@@ -1,0 +1,35 @@
+{
+  "timeZone": "Etc/UTC",
+  "runtimeVersion": "V8",
+  "exceptionLogging": "STACKDRIVER",
+  "dependencies": {
+    "enabledAdvancedServices": [
+      {
+        "userSymbol": "Calendar",
+        "serviceId": "calendar",
+        "version": "v3"
+      }
+    ]
+  },
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/calendar.addons.current.event.read",
+    "https://www.googleapis.com/auth/script.external_request",
+    "https://www.googleapis.com/auth/script.scriptapp"
+  ],
+  "addOns": {
+    "common": {
+      "name": "Drivetime Padding",
+      "useLocaleFromApp": true,
+      "homepageTrigger": {
+        "runFunction": "buildHomeCard"
+      }
+    },
+    "calendar": {
+      "currentEventAccess": "READ",
+      "eventOpenTrigger": {
+        "runFunction": "buildEventCard"
+      }
+    }
+  }
+}

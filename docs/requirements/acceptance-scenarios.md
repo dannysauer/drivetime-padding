@@ -1,0 +1,339 @@
+# Acceptance Scenarios
+
+This document provides behavior-oriented scenarios for the MVP. Scenario identifiers map to the requirements traceability matrix.
+
+---
+
+## AC-INSTALL-001: First-time setup
+
+**Given** a user has installed and authorized the add-on  
+**And** no settings exist  
+**When** the user opens the home card  
+**Then** the add-on displays default settings  
+**And** indicates that a default origin is required  
+**And** does not create generated events until configuration is valid.
+
+## AC-INSTALL-002: Trigger repair
+
+**Given** the user has valid settings  
+**And** the Calendar trigger is missing  
+**When** the user runs Repair automation  
+**Then** exactly one required Calendar trigger exists  
+**And** exactly one required daily trigger exists  
+**And** the UI reports success.
+
+---
+
+## AC-OOO-001: Create travel events for timed OOO event
+
+**Given** automation is enabled  
+**And** the default origin is configured  
+**And** a timed OOO event is within the planning window  
+**And** the event has a resolvable location  
+**And** outbound route duration is 20 minutes  
+**And** return route duration is 25 minutes  
+**And** the configured buffer is 7 minutes  
+**When** reconciliation runs  
+**Then** an outbound OOO event exists from 27 minutes before the source start until the source start  
+**And** a return OOO event exists from the source end until 32 minutes after the source end  
+**And** both generated events contain private ownership metadata.
+
+## AC-OOO-002: No duplicate writes
+
+**Given** the generated events from AC-OOO-001 match desired state  
+**When** reconciliation runs again without input changes  
+**Then** no generated event is created, updated, or deleted  
+**And** zero broker route calls are made, because both cached route entries are valid.
+
+The broker-call assertion is part of this scenario, not a separate concern. A run that makes ten route calls and writes nothing still costs money on every trigger firing.
+
+## AC-OOO-007: In-progress source event
+
+**Given** a timed OOO event running 10:00–11:00 with matching generated events  
+**And** the outbound block 09:28–10:00 has already ended  
+**When** reconciliation runs at 10:15  
+**Then** the outbound block is still within the read window and observed  
+**And** no duplicate outbound event is created  
+**And** the return block is preserved rather than treated as an orphan.
+
+## AC-OOO-008: Route exceeds maximum supported travel
+
+**Given** an eligible event whose location is an eight-hour drive from the resolved origin  
+**When** reconciliation runs  
+**Then** planning reports `ROUTE_TOO_LONG`  
+**And** no generated events are created for that source  
+**And** any pre-existing generated events for that source are preserved  
+**And** the event diagnostic card explains the destination is beyond the supported range.
+
+## AC-OOO-003: Source time changed
+
+**Given** a source event has matching generated events  
+**When** the user moves the source event by one hour  
+**And** reconciliation runs  
+**Then** the existing generated events are updated to surround the new time  
+**And** no duplicate companions remain.
+
+## AC-OOO-004: Source duration changed
+
+**Given** a source event has matching generated events  
+**When** the user extends the source end time  
+**And** reconciliation runs  
+**Then** the outbound event remains aligned to the source start  
+**And** the return event begins at the new source end.
+
+## AC-OOO-005: Source location changed
+
+**Given** a source event has matching generated events  
+**When** the source location changes  
+**And** route durations change  
+**Then** both generated events are recalculated and updated.
+
+## AC-OOO-006: Source deleted
+
+**Given** a source event has managed outbound and return events  
+**When** the source is deleted  
+**And** reconciliation runs  
+**Then** both managed generated events are deleted.
+
+---
+
+## AC-ELIG-001: All-day event ignored
+
+**Given** an all-day OOO event has a location  
+**When** reconciliation runs  
+**Then** no generated events are created  
+**And** diagnostics state that all-day events are unsupported.
+
+## AC-ELIG-002: Missing location ignored
+
+**Given** a timed OOO event has no Calendar location  
+**When** reconciliation runs  
+**Then** no generated events are created  
+**And** diagnostics state that a location is required.
+
+## AC-ELIG-003: Ordinary event ignored by default
+
+**Given** a timed ordinary event has a location  
+**And** optional subject matching is disabled  
+**When** reconciliation runs  
+**Then** no generated events are created.
+
+## AC-ELIG-004: Ordinary event included by pattern
+
+**Given** optional subject matching is enabled with `^OOO:`  
+**And** an ordinary timed event is named `OOO: Dentist`  
+**And** it has a location  
+**When** reconciliation runs  
+**Then** ordinary outbound and return events are generated  
+**And** they are not converted to OOO event type.
+
+## AC-ELIG-005: Per-event off directive
+
+**Given** an otherwise eligible event  
+**And** its description contains `drivetime padding: off`  
+**When** reconciliation runs  
+**Then** no desired generated events exist for that source  
+**And** any previously managed companions are deleted.
+
+---
+
+## AC-DIRECTIVE-001: Buffer override
+
+**Given** an eligible source event  
+**And** default buffer is 7 minutes  
+**And** the description contains `drivetime padding: buffer=15m`  
+**When** reconciliation runs  
+**Then** 15 minutes is added to each direction rather than 7 minutes.
+
+## AC-DIRECTIVE-002: Home origin override
+
+**Given** default and home origins are configured  
+**And** the description contains `drivetime padding: origin=home`  
+**When** reconciliation runs  
+**Then** both route calculations use the home origin.
+
+## AC-DIRECTIVE-003: Invalid directive
+
+**Given** an eligible source event  
+**And** the description contains `drivetime padding: buffer=banana`  
+**When** reconciliation runs  
+**Then** the invalid directive is ignored  
+**And** the default buffer is used  
+**And** a non-fatal warning is available in diagnostics.
+
+---
+
+## AC-ORIGIN-001: Working from home
+
+**Given** working-location selection is enabled  
+**And** the source time overlaps a home working-location event  
+**And** home origin is configured  
+**When** reconciliation runs  
+**Then** home origin is used.
+
+## AC-ORIGIN-002: Working from office
+
+**Given** working-location selection is enabled  
+**And** the source time overlaps an office working-location event  
+**And** office origin is configured  
+**When** reconciliation runs  
+**Then** office origin is used.
+
+## AC-ORIGIN-003: Missing selected origin falls back
+
+**Given** working-location resolves to office  
+**And** office origin is not configured  
+**And** default origin is configured  
+**When** reconciliation runs  
+**Then** default origin is used.
+
+## AC-ORIGIN-004: Missing default origin blocks writes
+
+**Given** no default origin is configured  
+**When** reconciliation runs  
+**Then** no generated events are created or deleted  
+**And** the run reports invalid configuration.
+
+---
+
+## AC-REC-001: Simple recurring instances
+
+**Given** a weekly recurring eligible event has four instances inside the window  
+**When** reconciliation runs  
+**Then** each instance has one outbound and one return event  
+**And** all generated events are non-recurring.
+
+## AC-REC-002: Move one instance
+
+**Given** a weekly recurring event has generated companions  
+**When** one instance is moved  
+**And** reconciliation runs  
+**Then** only the moved instance's generated companions change.
+
+## AC-REC-003: Cancel one instance
+
+**Given** a weekly recurring event has generated companions  
+**When** one instance is cancelled  
+**And** reconciliation runs  
+**Then** only that instance's generated companions are deleted.
+
+## AC-REC-004: Change one instance location
+
+**Given** a weekly recurring event has generated companions  
+**When** one instance receives a different location  
+**And** reconciliation runs  
+**Then** only that instance's routes and companions are recalculated.
+
+## AC-REC-005: Window advances
+
+**Given** a recurring instance is initially outside the 60-day window  
+**When** the daily window advances to include it  
+**Then** the next reconciliation creates its generated companions.
+
+---
+
+## AC-RECOVERY-001: Generated event deleted manually
+
+**Given** a source event remains eligible  
+**And** its outbound generated event is manually deleted  
+**When** reconciliation runs  
+**Then** the outbound event is recreated  
+**And** the matching return event is not duplicated.
+
+## AC-RECOVERY-002: Generated event moved manually
+
+**Given** a source event remains eligible  
+**And** a generated event is manually moved  
+**When** reconciliation runs  
+**Then** the event is restored to desired time.
+
+## AC-RECOVERY-003: Metadata removed
+
+**Given** a generated-looking event has had all Drivetime Padding metadata removed  
+**When** reconciliation runs  
+**Then** that event is not deleted based on title  
+**And** a new managed event is created if required.
+
+## AC-RECOVERY-004: Route broker temporary failure
+
+**Given** a source event remains eligible  
+**And** valid generated events already exist  
+**When** the route broker returns a transient error  
+**Then** existing generated events are preserved  
+**And** the run reports a planning error  
+**And** a later reconciliation retries.
+
+## AC-RECOVERY-005: Partial write failure
+
+**Given** neither generated event exists  
+**When** outbound creation succeeds and return creation fails  
+**Then** the run reports partial success  
+**And** the next reconciliation creates the missing return event without duplicating outbound.
+
+---
+
+## AC-CACHE-001: Expired cache, immaterial change
+
+**Given** generated events whose cached route entries are older than 24 hours  
+**And** the broker now returns 1455 seconds where it previously returned 1440  
+**When** reconciliation runs  
+**Then** both values quantize to 1500 seconds  
+**And** the fingerprint is unchanged  
+**And** no generated event is created, updated, or deleted  
+**And** only `routeSecs` and `routeAt` are refreshed.
+
+## AC-CACHE-002: Selective invalidation
+
+**Given** eligible events resolving to a mix of the default origin and the home origin  
+**When** the user changes only the home origin  
+**Then** route cache entries for home-origin events are invalidated  
+**And** cache entries for default-origin events remain valid and cause no broker calls.
+
+## AC-CACHE-003: Route budget prevents stampede
+
+**Given** more eligible events than `MAX_ROUTE_CALLS_PER_RUN` allows after a settings change invalidates every cache entry  
+**When** reconciliation runs  
+**Then** the run stops planning at the ceiling and reports `partial`  
+**And** unplanned events retain their existing generated events rather than having them deleted  
+**And** subsequent runs drain the remainder.
+
+## AC-CACHE-004: Diagnostic card budget
+
+**Given** a user has opened diagnostic cards enough times to reach the hourly route ceiling  
+**When** another diagnostic card is opened for an unplanned event  
+**Then** eligibility, directives, and resolved origin are still displayed  
+**And** no broker call is made  
+**And** the card reports that timing is temporarily unavailable.
+
+## AC-INSTALL-003: Trigger verification
+
+**Given** a fresh Marketplace installation  
+**When** installation completes  
+**Then** the required Calendar and daily triggers exist  
+**And** each executes under the installing user's authorization context  
+**And** the home card reports both as installed.
+
+> Depends on Prototype Spike 1. If Marketplace-installed add-ons cannot create installable triggers, this scenario and the architecture behind it must be redesigned.
+
+## AC-DRYRUN-001: Dry run
+
+**Given** an eligible event has no generated companions  
+**When** dry-run reconciliation executes  
+**Then** the result reports two creates  
+**And** Calendar remains unchanged.
+
+---
+
+## AC-PRIV-001: Broker payload minimization
+
+**Given** a route request is made  
+**When** the broker request is inspected  
+**Then** it contains origin, destination, mode, and optional correlation data only  
+**And** contains no event title, description, attendee, or recurrence data.
+
+## AC-SEC-001: Invalid broker authentication
+
+**Given** a broker request has invalid authentication  
+**When** the broker receives it  
+**Then** the broker rejects it before calling Google Maps  
+**And** records an authentication-failure metric without logging secrets.

@@ -1,0 +1,24 @@
+/**
+ * Origin resolution and generated-event calculations.
+ * Architecture section 5.5, Technical Design section 12.
+ *
+ * Returns a PlanningOutcome, never writes to Calendar (ADR 0014).
+ */
+
+function getGeneratedEventSpecs(context) {
+  throw new Error('Not implemented: Technical Design section 12');
+}
+
+function resolveOrigin(event, directives, settings, workingLocations) {
+  throw new Error('Not implemented: Technical Design section 10');
+}
+
+/**
+ * Rounds up to a 5-minute bucket. Technical Design section 12.3.
+ *
+ * This is what makes the daily cache refresh safe: traffic noise lands in the
+ * same bucket, so the fingerprint is unchanged and no Calendar write occurs.
+ */
+function quantizeDuration(seconds) {
+  return Math.ceil(seconds / ROUTE_GRANULARITY_SECONDS) * ROUTE_GRANULARITY_SECONDS;
+}
