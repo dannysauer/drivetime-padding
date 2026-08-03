@@ -808,7 +808,10 @@ A daily time-based trigger:
 - repairs missed or partial work;
 - recreates manually deleted generated events;
 - advances the far edge of the window;
+- drains work deferred by the per-run route ceiling (§21.3);
 - applies future schema or behavior changes.
+
+This run is the system's **eventual-consistency guarantee**. Calendar triggers are best-effort and may be missed, coalesced, or interrupted mid-write; the daily run is what makes that acceptable. Any correct state not reached by an event-driven run is reached within one daily cycle without the user doing anything.
 
 ### 15.3 Manual synchronization
 

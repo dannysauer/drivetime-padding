@@ -806,6 +806,8 @@ The add-on shall install an event-update trigger for the primary calendar.
 
 The add-on shall install a daily time-based reconciliation trigger.
 
+The daily run is the product's eventual-consistency guarantee. Regardless of missed triggers, partial writes, transient broker failures, route-budget truncation, or manual edits, a correct state shall be reached within one daily cycle without user intervention.
+
 ### REQ-TRIGGER-003: Duplicate prevention
 
 Trigger repair shall remove or otherwise resolve duplicate Drivetime Padding triggers.
