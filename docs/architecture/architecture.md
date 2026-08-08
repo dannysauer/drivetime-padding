@@ -704,12 +704,13 @@ function reconcile(options) {
       return { status: "disabled" };
     }
 
-    // window.start is now - RECONCILIATION_LOOKBACK_MINUTES (§21.2)
+    // Two ranges: plan* selects sources, observe* selects generated
+    // events to read. The second is strictly wider (§21.2).
     const window = calculateWindow(settings.windowDays);
     const allEvents = repository.listWindowEvents(
       "primary",
-      window.start,
-      window.end
+      window.observeStart,
+      window.observeEnd
     );
 
     const observedGenerated = allEvents.filter(isGeneratedEvent);
@@ -812,6 +813,8 @@ A daily time-based trigger:
 - applies future schema or behavior changes.
 
 This run is the system's **eventual-consistency guarantee**. Calendar triggers are best-effort and may be missed, coalesced, or interrupted mid-write; the daily run is what makes that acceptable. Any correct state not reached by an event-driven run is reached within one daily cycle without the user doing anything.
+
+With one qualification. Work deferred by the per-run route ceiling (§21.3) is not covered by the daily cycle alone: a settings change invalidating more entries than one run may process would otherwise need several days to drain. Partial runs therefore schedule their own continuation rather than waiting for the next daily trigger, so convergence tracks the amount of deferred work rather than the calendar. See Technical Design §23.4.
 
 ### 15.3 Manual synchronization
 
@@ -1082,24 +1085,37 @@ The default 60-day forward window bounds:
 - routing calls;
 - generated-event count.
 
-The window also extends **backward** from the current time. Outbound travel blocks begin before their source event, so a source event that is already in progress has an outbound block that has already ended. Because the Calendar API treats `timeMin` as a lower bound on an event's *end* time, such a block is invisible to a `timeMin: now` query while its source event is still returned and still eligible. Reconciliation would see a desired outbound spec with no observed match and create a duplicate on every run.
+Generated events do not sit inside their source event's span: outbound blocks begin before it, return blocks end after it. The range used to **read** generated events must therefore be wider than the range used to **plan** source events.
 
-The read window is therefore:
+The Calendar API makes this asymmetric in an easy-to-miss way. `timeMin` bounds an event's *end* time; `timeMax` bounds its *start* time. A single naive window leaks at both edges:
+
+- **Near edge.** A source event already in progress has an outbound block that has already ended, so `timeMin` excludes it while the source itself is still returned and still eligible.
+- **Far edge.** A source event starting just before the window ends but running past it is returned, because `timeMax` bounds start time — but its return block starts beyond the window and is excluded.
+
+In both cases reconciliation wants a companion event, cannot see it, and creates a duplicate on every run. Duplicate convergence cannot help, because the duplicates lie outside the range being read.
+
+Two ranges are therefore defined:
 
 ```text
-windowStart = now - RECONCILIATION_LOOKBACK_MINUTES
-windowEnd   = now + windowDays
+planStart    = now - COMPANION_SPAN
+planEnd      = now + windowDays
+
+observeStart = planStart - COMPANION_SPAN
+observeEnd   = planEnd + MAX_SOURCE_DURATION + COMPANION_SPAN
 ```
 
 ```text
-RECONCILIATION_LOOKBACK_MINUTES = MAX_TRAVEL_MINUTES + maxBufferMinutes
-                                = 360 + 120
-                                = 480   (8 hours)
+COMPANION_SPAN = MAX_TRAVEL_MINUTES + maxBufferMinutes = 360 + 120 = 480  (8 hours)
 ```
 
-The lookback must be applied symmetrically to source events and generated events. Source events that have already started are still planned, because their return blocks remain in the future and are still required; excluding them would make those return blocks look like orphans and delete them mid-appointment.
+Source events are planned when their start falls in `[planStart, planEnd)`. Every companion of such a source is then provably inside the observation range — see Technical Design §7.2 for the derivation.
 
-`MAX_TRAVEL_MINUTES` is 360. A route longer than six hours produces an explicit diagnostic and no generated events. This bounds the lookback and keeps the product within its intended use case.
+Source events that have already started are still planned, because their return blocks remain in the future and are still required; excluding them would make those return blocks look like orphans and delete them mid-appointment.
+
+Two caps make the observation range finite rather than approximate:
+
+- `MAX_TRAVEL_MINUTES` is 360. A longer route produces an explicit diagnostic and no generated events.
+- `MAX_SOURCE_DURATION_MINUTES` is 1440. A timed source event longer than a day is ineligible; without this the far bound would be unbounded.
 
 ### 21.3 Route plan caching
 

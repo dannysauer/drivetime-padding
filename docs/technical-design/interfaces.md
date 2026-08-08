@@ -34,8 +34,13 @@ routeInputHash(origin, destination, travelMode) -> string
 cachedRouteIsUsable(metadata, expectedHash, now) -> boolean
 quantizeDuration(seconds) -> number
 
-// Window
-calculateWindow(windowDays, now) -> { start: Date, end: Date }
+// Window -- two ranges, see technical design 7.2
+calculateWindow(windowDays, now)
+  -> { planStart: Date, planEnd: Date, observeStart: Date, observeEnd: Date }
+
+// Comparison helpers
+ownedFieldsMatch(observedFields, desiredSpec) -> boolean
+routeCacheNeedsPersisting(observed, freshRoute, now) -> boolean
 
 // Fingerprint and comparison
 fingerprintSpec(input) -> string

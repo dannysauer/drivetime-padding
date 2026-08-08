@@ -240,6 +240,17 @@ The broker-call assertion is part of this scenario, not a separate concern. A ru
 **Then** the outbound event is recreated  
 **And** the matching return event is not duplicated.
 
+## AC-RECOVERY-002a: Moved event whose fingerprint still matches
+
+**Given** a generated event that the user has dragged to a different time  
+**And** the source event is unchanged, so the desired fingerprint equals the stored fingerprint  
+**When** reconciliation runs  
+**Then** the observed owned fields are compared against the desired specification  
+**And** the mismatch is detected despite the matching fingerprint  
+**And** the event is restored to its desired time.
+
+Calendar preserves private extended properties through a user edit, so the stored fingerprint survives exactly the tampering it would need to detect. A fingerprint-only comparison would classify this as `unchanged` and silently fail AC-RECOVERY-002.
+
 ## AC-RECOVERY-002: Generated event moved manually
 
 **Given** a source event remains eligible  
@@ -279,8 +290,12 @@ The broker-call assertion is part of this scenario, not a separate concern. A ru
 **When** reconciliation runs  
 **Then** both values quantize to 1500 seconds  
 **And** the fingerprint is unchanged  
-**And** no generated event is created, updated, or deleted  
-**And** only `routeSecs` and `routeAt` are refreshed.
+**And** the diff records a **metadata patch**, not an update and not `unchanged`  
+**And** the patch body contains only `routeSecs` and `routeAt`  
+**And** the event's start, end, summary, event type, and transparency are not written  
+**And** a subsequent run within 24 hours makes zero broker calls.
+
+The final assertion is the point of the scenario. Classifying this as `unchanged` and skipping the write would leave `routeAt` permanently stale, so every later run would call the broker again — reintroducing exactly the unbounded cost the cache exists to prevent. The write is required; what makes it safe is that the user sees nothing.
 
 ## AC-CACHE-002: Selective invalidation
 
@@ -304,6 +319,54 @@ The broker-call assertion is part of this scenario, not a separate concern. A ru
 **Then** eligibility, directives, and resolved origin are still displayed  
 **And** no broker call is made  
 **And** the card reports that timing is temporarily unavailable.
+
+## AC-CACHE-005: Buffer change costs no broker calls
+
+**Given** eligible events with valid route cache entries  
+**When** the user changes only `defaultBufferMinutes`  
+**Then** no cache entry is invalidated, because the route input hash excludes the buffer  
+**And** zero broker calls are made  
+**And** generated events are updated, because the buffer changes event times and therefore the fingerprint.
+
+## AC-CACHE-006: Partial run continues without waiting a day
+
+**Given** an origin change invalidating more route directions than `MAX_ROUTE_CALLS_PER_RUN` allows  
+**When** reconciliation runs and stops at the ceiling  
+**Then** the run reports `partial`  
+**And** a continuation is scheduled rather than the work deferring to the next daily run  
+**And** the continuation completes the remaining events  
+**And** events already processed cost no broker calls, because their cache entries are now valid  
+**And** consecutive continuations stop at the documented cap.
+
+## AC-OOO-009: Source event straddling the far window edge
+
+**Given** a timed source event starting shortly before `planEnd` and ending after it  
+**And** matching generated events already exist  
+**When** reconciliation runs  
+**Then** the source is planned, because its start falls inside the planning range  
+**And** its return block — which begins after `planEnd` — is still observed  
+**And** no duplicate return event is created.
+
+Without the observation range extending past `planEnd`, `timeMax` would exclude the return block while still returning its source, and a duplicate would be created on every run. This is the mirror image of AC-OOO-007.
+
+## AC-ELIG-006: Overlong timed source event
+
+**Given** a timed source event lasting more than `MAX_SOURCE_DURATION_MINUTES`  
+**When** eligibility is evaluated  
+**Then** the reason is `SOURCE_TOO_LONG`  
+**And** no generated events are created.
+
+## AC-CONFIG-001: Malformed persisted settings
+
+**Given** User Properties containing the string `"false"` where `eligibility.titlePatternEnabled` expects a boolean  
+**When** settings are loaded  
+**Then** validation fails with a type error for that field rather than treating the value as truthy  
+**And** write-mode reconciliation is blocked  
+**And** dry-run diagnostics still run so the user can see the problem.
+
+**Given** a non-string `origins.default.value`  
+**When** settings are loaded  
+**Then** validation fails before any route hashing is attempted, rather than throwing inside a trigger.
 
 ## AC-INSTALL-003: Trigger verification
 

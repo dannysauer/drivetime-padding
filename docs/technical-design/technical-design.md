@@ -186,6 +186,7 @@ CANCELLED_EVENT
 MISSING_LOCATION
 DISABLED_BY_DIRECTIVE
 UNSUPPORTED_EVENT_TYPE
+SOURCE_TOO_LONG
 TITLE_PATTERN_DISABLED
 TITLE_PATTERN_NO_MATCH
 INVALID_TITLE_PATTERN
@@ -246,6 +247,19 @@ interface ObservedGeneratedEvent {
   role: string;
   parentEventId: string;
   fingerprint: string | null;
+  /** Owned fields as they currently stand, for the 15.2.1 comparison. */
+  observedFields: {
+    start: string;
+    end: string;
+    summary: string;
+    eventType: string;
+    transparency: "opaque" | "transparent" | null;
+  };
+  routeCache: {
+    routeHash: string | null;
+    routeSecs: number | null;
+    routeAt: string | null;
+  };
   rawEvent: object;
 }
 ```
@@ -259,11 +273,18 @@ interface ReconciliationDiff {
     observed: ObservedGeneratedEvent;
     desired: GeneratedEventSpec;
   }>;
+  /** Private-property writes only. No user-visible change. See 15.2.2. */
+  metadataPatches: Array<{
+    observed: ObservedGeneratedEvent;
+    privateProperties: Record<string, string>;
+  }>;
   deletes: ObservedGeneratedEvent[];
   unchanged: Array<{
     observed: ObservedGeneratedEvent;
     desired: GeneratedEventSpec;
   }>;
+  /** Preserved because the parent's planning failed. Never deleted. */
+  preserved: ObservedGeneratedEvent[];
   diagnostics: ReconciliationDiagnostics;
 }
 ```
@@ -328,17 +349,38 @@ interface ValidationResult {
 }
 ```
 
+Validation covers the **complete** `UserSettings` schema, not a selected subset. Settings arrive from User Properties, which can hold anything a corrupted write or a faulty migration left behind, and every field is consumed later without further checking.
+
+Type checks are not pedantry here. Two concrete failure modes:
+
+- JSON round-tripping or a bad migration can leave the **string** `"false"` where a boolean belongs. It is truthy, so `titlePatternEnabled` or `workingLocation.enabled` would silently switch on behavior the user never asked for.
+- A non-string `origins.default.value` reaches `routeInputHash()`, where `.trim()` throws — inside a trigger, where the user never sees it.
+
 Rules:
 
-- `schemaVersion` must be a supported integer;
-- `enabled` must be boolean;
-- `windowDays` must be an integer from 7 through 180;
-- `defaultBufferMinutes` must be an integer from 0 through 120;
-- enabled title pattern must compile;
-- origin type must be `address` or `placeId`;
-- default origin value is required for write-mode reconciliation;
-- optional origin values may be empty;
-- title prefix must be non-empty and no longer than a reasonable UI-safe limit, recommended 80 characters.
+| Field | Rule |
+|---|---|
+| `schemaVersion` | integer, one of the supported versions |
+| `enabled` | boolean — strictly, not truthy |
+| `windowDays` | integer, 7 through 180 |
+| `defaultBufferMinutes` | integer, 0 through `MAX_BUFFER_MINUTES` |
+| `eligibility.includeOutOfOffice` | boolean |
+| `eligibility.titlePatternEnabled` | boolean |
+| `eligibility.caseSensitive` | boolean |
+| `eligibility.titlePattern` | string; must compile as a regex when `titlePatternEnabled` |
+| `origins.{default,home,office}` | object with exactly `type` and `value` |
+| `origins.*.type` | string, `address` or `placeId` |
+| `origins.*.value` | string; may be empty for `home` and `office` |
+| `origins.default.value` | non-empty string required for write-mode reconciliation |
+| `workingLocation.enabled` | boolean |
+| `workingLocation.fallbackToDefault` | boolean |
+| `generatedEvents.titlePrefix` | non-empty string, recommended maximum 80 characters |
+
+Every boolean is checked with `typeof value === 'boolean'`. Every string is checked with `typeof value === 'string'`. Coercion is not applied — a wrong type is a validation error, because coercing hides the corruption that produced it.
+
+Unknown top-level keys are preserved but ignored, so a downgrade after a future migration does not destroy data.
+
+A validation failure blocks write-mode reconciliation and surfaces in the UI. Dry-run diagnostics still run, so a user can see what is wrong.
 
 ### 5.4 Migration contract
 
@@ -426,37 +468,84 @@ This is preferable to resolving an email address and is supported by Calendar AP
 
 ### 7.2 Window bounds
 
+There are **two** ranges, and conflating them causes duplicate creation at both ends of the window.
+
+- The **planning range** decides which source events are evaluated.
+- The **observation range** decides which generated events are read.
+
+The observation range must be strictly wider, because a generated event can fall outside its own source's position in time: outbound blocks start before their source, and return blocks end after it.
+
 ```javascript
 const MAX_TRAVEL_MINUTES = 360;              // 6 hours
 const MAX_BUFFER_MINUTES = 120;              // matches settings validation
-const RECONCILIATION_LOOKBACK_MINUTES =
+const MAX_SOURCE_DURATION_MINUTES = 1440;    // 24 hours; longer timed events are ineligible
+
+// The furthest a companion event can sit from its source.
+const COMPANION_SPAN_MINUTES =
   MAX_TRAVEL_MINUTES + MAX_BUFFER_MINUTES;   // 480 minutes / 8 hours
 
+const RECONCILIATION_LOOKBACK_MINUTES = COMPANION_SPAN_MINUTES;
+
 function calculateWindow(windowDays, now) {
+  const planStart = now.getTime() - RECONCILIATION_LOOKBACK_MINUTES * 60000;
+  const planEnd = now.getTime() + windowDays * 86400000;
+
   return {
-    start: new Date(now.getTime() - RECONCILIATION_LOOKBACK_MINUTES * 60000),
-    end: new Date(now.getTime() + windowDays * 86400000),
+    planStart: new Date(planStart),
+    planEnd: new Date(planEnd),
+    observeStart: new Date(planStart - COMPANION_SPAN_MINUTES * 60000),
+    observeEnd: new Date(
+      planEnd +
+        (MAX_SOURCE_DURATION_MINUTES + COMPANION_SPAN_MINUTES) * 60000
+    ),
   };
 }
 ```
 
-The backward extent is not cosmetic. `timeMin` is a lower bound on an event's **end** time, so an outbound block that has already finished is absent from the listing while its source event is still present and still eligible — producing a duplicate create on every run. The lookback must cover the longest outbound block the product can generate, which is why it is derived from `MAX_TRAVEL_MINUTES` rather than chosen by feel.
+#### Why each bound is what it is
 
-Both source events and generated events are read over the same bounds. Source events that have already started are still planned: their return blocks are in the future and still required, and dropping them from desired state would orphan-delete those blocks mid-appointment.
+`Events.list` is asymmetric: `timeMin` bounds an event's **end** time, `timeMax` bounds its **start** time. Both edges of a naive window therefore leak, in mirror-image ways.
 
-### 7.2.1 Event listing request
+**Near edge.** An outbound block that has already finished is excluded by `timeMin`, while its source event — still running — is returned and still eligible. Reconciliation wants the outbound block, cannot see it, and creates a duplicate on every run.
+
+**Far edge.** A source starting just before `planEnd` but ending after it is returned, because `timeMax` bounds start time. Its return block starts at `source.end`, past `planEnd`, and is excluded. Same failure, same unbounded duplication.
+
+Neither case is caught by duplicate convergence (§13.5), because the duplicates are outside the range being read.
+
+#### Completeness
+
+A source is planned when `planStart <= source.start < planEnd`. For any such source, both companions lie inside the observation range:
+
+```text
+outbound.start >= source.start - COMPANION_SPAN
+               >= planStart - COMPANION_SPAN
+               =  observeStart                              ✓
+
+return.end     <= source.end + COMPANION_SPAN
+               <= source.start + MAX_SOURCE_DURATION + COMPANION_SPAN
+               <  planEnd + MAX_SOURCE_DURATION + COMPANION_SPAN
+               =  observeEnd                                ✓
+```
+
+The `MAX_SOURCE_DURATION_MINUTES` term is what makes the far-edge bound provable rather than approximate. It is also why timed source events longer than 24 hours are ineligible (`SOURCE_TOO_LONG`) — without that cap the observation range would be unbounded.
+
+Source events that have already started are still planned: their return blocks are in the future and still required, and dropping them from desired state would orphan-delete those blocks mid-appointment.
+
+#### 7.2.1 Event listing request
 
 Use Advanced Calendar service `Calendar.Events.list` with:
 
 ```javascript
 {
-  timeMin: window.start.toISOString(),
-  timeMax: window.end.toISOString(),
+  timeMin: window.observeStart.toISOString(),
+  timeMax: window.observeEnd.toISOString(),
   singleEvents: true,
   showDeleted: true,
   maxResults: 2500
 }
 ```
+
+One call covers both ranges. Read over the **observation** range, then apply the planning range when deciding which source events to evaluate — a source outside `[planStart, planEnd)` is reported `OUTSIDE_WINDOW`.
 
 Pagination must be supported using `nextPageToken`.
 
@@ -535,20 +624,25 @@ function evaluateEligibility(event, directives, settings, window)
   -> EligibilityResult
 ```
 
+`window` supplies `planStart` and `planEnd`. The observation bounds are not an eligibility input.
+
 ### 9.2 Evaluation order
 
 Order matters because diagnostics should return the most useful reason.
 
 1. globally disabled;
-2. outside window;
+2. outside planning window;
 3. generated event;
 4. cancelled event;
 5. all-day event;
-6. missing location;
-7. disabled by directive;
-8. real OOO event accepted;
-9. optional title pattern accepted;
-10. otherwise reject.
+6. timed event longer than `MAX_SOURCE_DURATION_MINUTES`;
+7. missing location;
+8. disabled by directive;
+9. real OOO event accepted;
+10. optional title pattern accepted;
+11. otherwise reject.
+
+Step 2 uses the **planning** range, not the observation range (§7.2). Step 6 is what keeps the observation range bounded.
 
 ### 9.3 Title pattern
 
@@ -831,16 +925,16 @@ This bounds steady-state cost at two route calls per eligible event per day rega
 
 #### Invalidation and stampede control
 
-Changing the default origin, an origin value, or the default buffer changes the route input hash for many events at once, so the next reconciliation would re-route the entire window in one run.
+Changing the default origin or any configured origin value changes the route input hash for many events at once, so the next reconciliation would re-route the entire window in one run.
+
+Buffer changes do **not** appear in this list. The route input hash deliberately excludes the buffer, so changing `defaultBufferMinutes` invalidates no cache entries and costs no broker calls — only Calendar writes, since the buffer does affect event times and therefore the fingerprint.
 
 Required behavior:
 
 - settings writes that change any origin **mark the cache generation**, they do not eagerly clear it;
 - reconciliation honors the per-run route-call ceiling `MAX_ROUTE_CALLS_PER_RUN` (recommended 60);
 - when the ceiling is reached, remaining events are left unplanned for that run with status `partial`, and existing generated events for them are preserved (planning failure, not ineligibility);
-- the daily trigger drains the remainder across subsequent runs.
-
-Because a buffer change does not alter the route input hash, it costs no broker calls at all — only Calendar writes.
+- a run that ends `partial` schedules a continuation rather than waiting for the next daily run (§23.4).
 
 ### 13.4 Role values
 
@@ -932,14 +1026,47 @@ Convert signed byte values to two-digit hexadecimal.
 
 For every desired key:
 
-- no observed event: create;
-- one observed event with same fingerprint: unchanged;
-- one observed event with different or missing fingerprint: update;
-- multiple observed events: select canonical, update if needed, delete duplicates.
+- no observed event: **create**;
+- one observed event, fingerprint matches **and** owned fields match: **unchanged**;
+- one observed event, fingerprint matches but owned fields differ: **update** (see §15.2.1);
+- one observed event, cache metadata is stale but everything else matches: **metadata patch** (see §15.2.2);
+- one observed event, fingerprint differs or is missing: **update**;
+- multiple observed events: select canonical, apply the above, delete duplicates.
 
 For every observed key absent from desired:
 
-- delete.
+- **delete only if the parent's planning outcome is `planned` or `ineligible`**;
+- if the parent's outcome is `failed`, or the parent was never evaluated, **preserve**.
+
+#### 15.2.1 Fingerprint alone is not sufficient
+
+A matching fingerprint means *the desired state has not changed*. It does not mean *the observed event still matches that desired state*. Those are different questions, and only the second one detects user tampering.
+
+The fingerprint is written at create time and stored in the event's own metadata. When a user drags a generated event to a new time, resizes it, or renames it, Calendar preserves the private extended properties — so the stored fingerprint still equals the freshly computed desired fingerprint, while the event itself now sits at the wrong time.
+
+Treating that as `unchanged` would silently break the restoration behavior promised by Architecture §17.4 and AC-RECOVERY-002.
+
+Comparison must therefore verify the **owned fields** on the observed event against the desired specification:
+
+```text
+start
+end
+summary
+eventType
+transparency
+```
+
+These are exactly the fields §16.5 permits patching. Fields the add-on does not own are neither compared nor written.
+
+The fingerprint remains valuable as the cheap first check — it answers "do I need to recompute anything?" — but the owned-field comparison is what makes reconciliation self-healing.
+
+#### 15.2.2 Metadata-only patches
+
+Route cache entries live in the same private extended properties. When a cache entry is refreshed but the quantized duration lands in the same bucket, the event's owned fields are unchanged and only `routeSecs` and `routeAt` need to be written.
+
+This is a distinct diff category. It must not be folded into `unchanged`, because skipping the write would leave `routeAt` permanently stale and force a broker call on every subsequent run — defeating the cost bound the cache exists to provide. It must not be folded into `update` either, since it changes nothing the user can see.
+
+See §16.6.
 
 ### 15.3 Safety rule
 
@@ -1044,6 +1171,36 @@ Patch only fields owned by Drivetime Padding:
 - private extended properties.
 
 Do not overwrite unrelated fields if a later version adds them.
+
+### 16.6 Metadata-only patch
+
+Refreshing an expired route cache entry writes `routeSecs` and `routeAt` and nothing else:
+
+```json
+{
+  "extendedProperties": {
+    "private": {
+      "routeSecs": "1455",
+      "routeAt": "2026-07-31T14:00:00Z"
+    }
+  }
+}
+```
+
+Start, end, summary, event type, and transparency are omitted from the patch body, so the event does not move and the user sees nothing.
+
+This write is **required**, not optional. `routeAt` is what makes the cache entry valid; if it is not persisted, the entry stays expired and every subsequent run calls the broker again — which is precisely the unbounded cost the cache exists to prevent.
+
+The resulting cost profile:
+
+| Cache state | Broker calls | Calendar writes |
+|---|---|---|
+| Valid, nothing changed | 0 | 0 |
+| Expired, duration in same bucket | 2 | 1 metadata patch per direction |
+| Expired, duration in a new bucket | 2 | 1 full update per direction |
+| Source event changed | 2 | 1 full update per direction |
+
+One metadata patch per direction per day is a bounded and acceptable cost. Two broker calls per run is not, which is the trade being made.
 
 ---
 
@@ -1450,6 +1607,21 @@ not
 ```text
 2 route calls per eligible event per trigger firing
 ```
+
+### 23.4 Continuation after a partial run
+
+A run that stops at `MAX_ROUTE_CALLS_PER_RUN` leaves real work undone. Relying on the next daily trigger to pick it up does not hold: with 60 calls per run, an origin change across 100 eligible events needs four passes, which is four days — and calendar triggers cannot be counted on to fill the gap, since they are best-effort and may be coalesced or missed entirely.
+
+A run ending with status `partial` must therefore schedule its own continuation:
+
+- create a one-off time-based trigger a few minutes out;
+- the continuation is an ordinary reconciliation, not a resumed cursor — reconciliation is idempotent, and the events completed in the previous pass now have valid cache entries, so they cost nothing;
+- do not stack continuations: if one is already pending, do not create another;
+- cap consecutive continuations (recommended 10) so a persistent failure cannot loop indefinitely, and report the cap in run status.
+
+This makes convergence a function of total work rather than of the daily cycle, which is what REQ-TRIGGER-002 promises.
+
+Continuations depend on one-off trigger creation and are therefore **subject to Prototype Spike 1**. If that mechanism is unavailable, the eventual-consistency guarantee in REQ-TRIGGER-002 must be narrowed to "one daily cycle per `MAX_ROUTE_CALLS_PER_RUN` units of deferred work" and the ceiling raised as far as quota measurement allows.
 
 ---
 

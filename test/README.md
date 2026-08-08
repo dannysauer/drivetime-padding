@@ -45,8 +45,15 @@ Integration, against a fake repository and fake routing client:
 12. dry run produces no writes
 13. source event in progress — no duplicate outbound
 14. route exceeds maximum supported travel
-15. expired cache, immaterial duration change — no write
-16. route ceiling reached — partial status, nothing deleted
+15. expired cache, immaterial duration change — metadata patch only, and a following run makes no broker call
+16. route ceiling reached — partial status, nothing deleted, continuation scheduled
+17. source straddling the far window edge — return block observed, no duplicate
+18. manually moved event whose fingerprint still matches — restored
+19. planning failure — existing events preserved, not orphan-deleted
+20. buffer change — Calendar writes but zero broker calls
+21. malformed persisted settings — validation blocks write mode
+
+Scenarios 15, 17, 18, and 19 exist because each was a real defect in an earlier draft of the design. They are regression tests for the specification, not hypotheticals.
 
 ## Recurring fixtures
 
@@ -56,5 +63,7 @@ Permanent fixtures for: simple weekly recurrence, moved single instance, cancell
 
 - **Fake repository** — in-memory, same interface as `CalendarRepository`.
 - **Fake routing client** — deterministic durations keyed by origin and destination, with injectable transient and permanent failures, and a call counter for the cost assertions.
+
+The call counter is not optional. Several scenarios assert *zero broker calls*, and a run that writes nothing while calling the broker twice per event still costs money on every trigger firing — the failure mode the route cache exists to prevent.
 
 Inject `now` rather than reading the clock, so window and cache-age behavior is deterministic.

@@ -64,7 +64,7 @@ The next day the cache ages past `ROUTE_CACHE_MAX_AGE_HOURS`. Both directions ar
 Source event runs 10:00–11:00. Current time is 10:15.
 
 - outbound block 09:28–10:00 has already ended;
-- the reconciliation lookback places `windowStart` at 02:15, so the outbound block is still returned by the listing;
+- the reconciliation lookback places `planStart` at 02:15 and `observeStart` earlier still, so the outbound block is returned by the listing;
 - the source event is still planned, because its return block at 11:00–11:37 remains in the future and required;
 - desired and observed match in both directions;
 - no duplicate outbound event is created.
@@ -114,3 +114,15 @@ Expected result:
 - the altered event is treated as user-owned and unmanaged;
 - it is not deleted;
 - a new managed generated event is created if the source still qualifies.
+
+## Example: source straddling the far window edge
+
+`planEnd` falls at 2026-10-01T00:00. A source event runs 2026-09-30T23:30 to 2026-10-01T00:30.
+
+- the source is returned by the listing and planned, because its start is inside the planning range;
+- its return block runs 00:30–01:07, entirely past `planEnd`;
+- `timeMax` bounds start time, so a listing that stopped at `planEnd` would return the source but not its return block;
+- `observeEnd` sits `MAX_SOURCE_DURATION + COMPANION_SPAN` past `planEnd`, so the return block is observed;
+- desired and observed match, and no duplicate is created.
+
+This is the mirror image of the in-progress case. Both come from the same asymmetry: `timeMin` bounds an event's end, `timeMax` bounds its start.

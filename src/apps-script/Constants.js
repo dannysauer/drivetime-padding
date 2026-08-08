@@ -11,17 +11,24 @@ const MAX_WINDOW_DAYS = 180;
 const MAX_BUFFER_MINUTES = 120;
 
 // Maximum supported one-way travel. ADR 0012, REQ-TIME-012.
-// Also bounds the reconciliation lookback, so raising it widens every read.
+// Also bounds the observation range, so raising it widens every read.
 const MAX_TRAVEL_MINUTES = 360;
 
-// Reconciliation lower boundary. ADR 0012, Technical Design section 7.2.
-// Derived, not chosen: an outbound block can start this far before its source.
-const RECONCILIATION_LOOKBACK_MINUTES = MAX_TRAVEL_MINUTES + MAX_BUFFER_MINUTES;
+// Longest timed source event we will plan. ADR 0012, REQ-TIME-014.
+// Bounds how far past planEnd a return block can land. Without it the
+// observation range has no finite upper bound.
+const MAX_SOURCE_DURATION_MINUTES = 1440;
+
+// Furthest a companion event can sit from its source, in either direction.
+// Derived, not chosen. Technical Design section 7.2.
+const COMPANION_SPAN_MINUTES = MAX_TRAVEL_MINUTES + MAX_BUFFER_MINUTES;
+const RECONCILIATION_LOOKBACK_MINUTES = COMPANION_SPAN_MINUTES;
 
 // Route plan cache. ADR 0011, Technical Design section 13.3.
 const ROUTE_CACHE_MAX_AGE_HOURS = 24;
 const ROUTE_GRANULARITY_SECONDS = 300;
 const MAX_ROUTE_CALLS_PER_RUN = 60;
+const MAX_CONSECUTIVE_CONTINUATIONS = 10;
 const DIAGNOSTIC_ROUTE_CALLS_PER_HOUR = 20;
 
 // Storage keys.

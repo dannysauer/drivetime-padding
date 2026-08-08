@@ -447,6 +447,14 @@ The reconciliation read window shall extend backward from the current time by at
 
 Source events that have already started shall continue to be planned while any part of their padding remains in the future. They shall not be excluded from desired state, because doing so would orphan and delete their still-required return blocks.
 
+### REQ-TIME-014: Observation range completeness
+
+The range used to read generated events shall be wide enough that every companion event of every planned source event is observed.
+
+Because outbound blocks begin before their source and return blocks end after it, and because the Calendar API bounds start and end times asymmetrically, a single window leaks at both edges and causes repeated duplicate creation.
+
+Timed source events longer than `MAX_SOURCE_DURATION_MINUTES` shall be ineligible, so that the observation range remains finite.
+
 ### REQ-TIME-012: Maximum supported travel
 
 The product shall define a maximum supported one-way travel duration, initially six hours.
@@ -636,6 +644,12 @@ The MVP role values shall be:
 
 If a managed generated event is manually deleted while its source remains eligible, a later reconciliation shall recreate it.
 
+### REQ-GEN-014a: Owned-field verification
+
+Reconciliation shall compare the observed generated event's owned fields against the desired specification, and shall not treat a matching stored fingerprint as sufficient evidence that the event is correct.
+
+A manually moved, resized, or renamed generated event retains its private metadata, so its stored fingerprint still matches. Restoration therefore depends on comparing the fields themselves.
+
 ### REQ-GEN-014: Manual modification recovery
 
 If a managed generated event is manually moved, resized, or renamed, a later reconciliation shall restore desired state.
@@ -806,7 +820,9 @@ The add-on shall install an event-update trigger for the primary calendar.
 
 The add-on shall install a daily time-based reconciliation trigger.
 
-The daily run is the product's eventual-consistency guarantee. Regardless of missed triggers, partial writes, transient broker failures, route-budget truncation, or manual edits, a correct state shall be reached within one daily cycle without user intervention.
+The daily run is the product's eventual-consistency guarantee. Regardless of missed triggers, partial writes, transient broker failures, or manual edits, a correct state shall be reached within one daily cycle without user intervention.
+
+Work deferred by the per-run route ceiling is excluded from the one-cycle bound. A run that ends `partial` shall schedule a continuation so that convergence remains a function of the deferred work rather than of the daily schedule (REQ-PERF-013). Where continuation is unavailable, the bound is one daily cycle per `MAX_ROUTE_CALLS_PER_RUN` units of deferred work.
 
 ### REQ-TRIGGER-003: Duplicate prevention
 
@@ -1103,6 +1119,18 @@ Each reconciliation run shall enforce a maximum number of broker calls. On reach
 Event-diagnostic route calls shall be counted against a per-user hourly ceiling and shall consult and populate the same route cache used by reconciliation.
 
 When the ceiling is exceeded the diagnostic card shall still report eligibility, directives, and resolved origin, and shall indicate that timing is temporarily unavailable.
+
+### REQ-PERF-013: Continuation after a partial run
+
+A reconciliation run that stops at the per-run route ceiling shall schedule a continuation rather than deferring its remaining work to the next daily run.
+
+Consecutive continuations shall be capped and the cap reported in run status, so that a persistent failure cannot loop indefinitely.
+
+### REQ-PERF-014: Route cache persistence
+
+A refreshed route cache entry shall be persisted even when the generated event's user-visible fields are unchanged.
+
+Persisting only on user-visible change would leave the cache timestamp permanently stale and cause a broker call on every subsequent run, defeating REQ-PERF-010.
 
 ### REQ-PERF-012: Duration quantization
 
