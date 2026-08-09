@@ -426,6 +426,46 @@ A start-time containment test would fail this scenario, and because ineligibilit
 
 This scenario exists because the cache is only reachable if observed companions are indexed before planning. An implementation that builds the provider context from the source event alone passes every other cache scenario in this document while calling the broker on every run.
 
+## AC-RECOVERY-008: Reminders re-enabled on a travel block
+
+**Given** a generated travel block created with reminders suppressed  
+**And** the user enables a 10-minute popup reminder on it  
+**And** the source event is otherwise unchanged, so the fingerprint still matches  
+**When** reconciliation runs  
+**Then** the owned-field comparison detects the reminder difference  
+**And** the event is updated to restore suppression  
+**And** the user does not receive an alert for the travel block on the next run.
+
+Reminder state is not a planning input, so the fingerprint cannot detect this. It is caught only because reminders are in the owned-field set — the same reason a manual time change is caught.
+
+## AC-CACHE-010: Route age survives the ephemeral cache
+
+**Given** the diagnostic card warms the ephemeral cache for an unplanned event at 09:00  
+**And** reconciliation consumes that entry at 12:00 and creates the companions  
+**When** the durable cache entry is written  
+**Then** `routeAt` records 09:00, the time the broker produced the duration  
+**And** not 12:00, the time the entry was read  
+**And** the entry expires 24 hours after 09:00 rather than after 12:00.
+
+Stamping the read time would let a duration live up to one ephemeral TTL longer than `ROUTE_CACHE_MAX_AGE_HOURS` permits.
+
+## AC-CONFIG-002: Reducing the planning window
+
+**Given** `windowDays` is 180  
+**And** generated events exist for a source event 90 days out  
+**When** the user reduces `windowDays` to 7  
+**And** reconciliation runs  
+**Then** the ownership-filtered cleanup pass reads the span between the new horizon and the previous high-water mark  
+**And** the companions 90 days out are deleted  
+**And** the high-water mark is lowered only after those deletions succeed.
+
+**Given** the same shrink but a cleanup pass that fails partway  
+**When** reconciliation runs again  
+**Then** the high-water mark is still high  
+**And** the remaining stranded companions are found and deleted.
+
+Without the high-water mark the contracted observation range never reads those events, so they would survive until the rolling window grew back out to them — roughly 82 days here, during which the setting appears to do nothing.
+
 ## AC-CACHE-005: Buffer change costs no broker calls
 
 **Given** eligible events with valid route cache entries  

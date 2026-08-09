@@ -707,7 +707,7 @@ function reconcile(options) {
     // Two ranges: plan* selects sources, observe* selects generated
     // events to read. The second is strictly wider (§21.2).
     const window = calculateWindow(settings.windowDays);
-    const allEvents = repository.listWindowEvents(
+    const { events: allEvents, scanComplete } = repository.listWindowEvents(
       "primary",
       window.observeStart,
       window.observeEnd
@@ -724,12 +724,25 @@ function reconcile(options) {
 
     const desiredSpecs = [];
 
+    // Outcomes, not just specs. The comparator may delete a companion only
+    // when its parent was PLANNED or INELIGIBLE; a parent whose planning
+    // FAILED keeps its existing events. Dropping ineligible parents with a
+    // bare `continue` would erase that distinction and let a broker outage
+    // look identical to a cancelled appointment (§17.3-17.4 of the
+    // technical design).
+    const planningOutcomes = new Map();
+
     for (const rawEvent of sourceEvents) {
       const event = normalizeEvent(rawEvent);
       const directives = parseDirectives(event.description);
-      const eligibility = evaluateEligibility(event, directives, settings);
+      const eligibility = evaluateEligibility(event, directives, settings, window);
 
       if (!eligibility.eligible) {
+        planningOutcomes.set(event.id, {
+          state: "ineligible",
+          specs: [],
+          reason: eligibility.reason
+        });
         continue;
       }
 
@@ -742,15 +755,25 @@ function reconcile(options) {
         routeCacheFor(observedByKey, event.id)
       );
 
-      desiredSpecs.push(
-        ...DrivetimeProvider.getGeneratedEventSpecs(context)
-      );
+      const outcome = DrivetimeProvider.getGeneratedEventSpecs(context);
+      planningOutcomes.set(event.id, outcome);
+
+      if (outcome.state === "planned") {
+        desiredSpecs.push(...outcome.specs);
+      }
     }
 
     const diff = compareDesiredAndObserved(
       desiredSpecs,
-      observedGenerated
+      observedGenerated,
+      planningOutcomes,
+      scanComplete
     );
+
+    // Companions left beyond a shrunken horizon are invisible to the
+    // window read above, so they need their own ownership-filtered pass
+    // (§21.2, technical design §7.6).
+    diff.deletes.push(...findStrandedCompanions(window, settings));
 
     if (!options.dryRun) {
       applyDiff(diff);

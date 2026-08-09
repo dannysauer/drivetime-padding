@@ -19,6 +19,9 @@ parseDirectives(description) -> ParsedDirectives
 listWindowEvents(calendarId, observeStart, observeEnd)
   -> { events: RawCalendarEvent[], scanComplete: boolean }
 listWorkingLocationEvents(calendarId, start, end) -> RawCalendarEvent[]
+// Ownership-filtered (privateExtendedProperty=dtp=1); used for the
+// window-shrink cleanup pass in technical design 7.6
+listGeneratedEventsBetween(calendarId, start, end) -> ObservedGeneratedEvent[]
 createGeneratedEvent(spec) -> RawCalendarEvent
 updateGeneratedEvent(observed, spec) -> RawCalendarEvent
 patchGeneratedEventMetadata(observed, privateProperties) -> RawCalendarEvent
@@ -50,6 +53,8 @@ quantizeDuration(seconds) -> number
 calculateWindow(windowDays, now)
   -> { planStart: Date, planEnd: Date, observeStart: Date, observeEnd: Date }
 overlapsPlanningRange(event, window) -> boolean   // intersection, not start-containment
+findStrandedCompanions(window, settings) -> ObservedGeneratedEvent[]  // 7.6
+loadHighWater() / saveHighWater(observeEnd)                           // 7.6
 
 // Comparison helpers
 ownedFieldsMatch(observedFields, desiredSpec) -> boolean
@@ -57,7 +62,8 @@ routeCacheNeedsPersisting(observed, freshRoute, now) -> boolean
 
 // Fingerprint and comparison
 fingerprintSpec(input) -> string
-compareDesiredAndObserved(desiredSpecs, observedEvents, planningOutcomes) -> ReconciliationDiff
+compareDesiredAndObserved(desiredSpecs, observedEvents, planningOutcomes, scanComplete)
+  -> ReconciliationDiff
 
 // Reconciliation
 runReconciliation(options) -> ReconciliationResult

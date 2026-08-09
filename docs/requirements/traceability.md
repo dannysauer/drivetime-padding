@@ -62,3 +62,11 @@ This matrix links requirement groups to architecture components, technical-desig
 | REQ-ELIG-012 | Title matching uses the raw summary | AC-ELIG-008 |
 | REQ-CONFIG-014a | No eligible source types is surfaced, not silent | — UI |
 | REQ-META-009 (narrowed) | Fingerprint match alone does not license skipping a write | AC-RECOVERY-002a |
+
+## Requirements added in the fourth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| REQ-CONFIG-006a | Window reduction actually removes distant companions | AC-CONFIG-002 |
+| REQ-GEN-009a / REQ-GEN-014b | Reminder suppression is maintained, not creation-time | AC-RECOVERY-008 |
+| REQ-PERF-016 | Route age measured from calculation, not from cache read | AC-CACHE-010 |

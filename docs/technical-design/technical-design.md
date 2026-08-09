@@ -217,6 +217,12 @@ interface RouteResult {
   distanceMeters: number | null;
   /** False when this came from the broker and needs persisting. See 11.1. */
   fromCache: boolean;
+  /**
+   * When the broker produced this duration — never when it was read from a
+   * cache. This is what is written to routeAt, so a duration ages from its
+   * true origin no matter how many caches it passed through. See 20.3.
+   */
+  calculatedAt: string;
 }
 ```
 
@@ -234,10 +240,19 @@ interface GeneratedEventSpec {
   end: string;
   eventType: string;
   transparency: "opaque" | "transparent" | null;
+  /** Always suppressed for the MVP. Owned, compared, and restored. */
+  reminders: RemindersSetting;
   privateProperties: Record<string, string>;
   fingerprint: string;
 }
+
+interface RemindersSetting {
+  useDefault: boolean;
+  overrides: Array<{ method: string; minutes: number }>;
+}
 ```
+
+`reminders` is constant across every generated event (`{ useDefault: false, overrides: [] }`), so it is not a fingerprint input — it cannot vary with planning inputs. It is still owned state, because the *user* can change it. That distinction is why the fingerprint alone cannot decide whether a write is needed (§15.2.1).
 
 `key` is internal and deterministic:
 
@@ -261,6 +276,8 @@ interface ObservedGeneratedEvent {
     summary: string;
     eventType: string;
     transparency: "opaque" | "transparent" | null;
+    /** Owned because 16.3 suppresses them; users can re-enable. */
+    reminders: RemindersSetting;
   };
   routeCache: {
     routeHash: string | null;
@@ -606,6 +623,47 @@ listWorkingLocationEvents(calendarId, timeMin, timeMax)
 ```
 
 The exact Calendar API fields returned must be validated with real accounts during implementation. Unsupported or unavailable working-location data must degrade to default origin rather than fail synchronization.
+
+### 7.6 Stranded companions after a window shrink
+
+The observation range is derived from the *current* `windowDays`, so reducing that setting contracts `observeEnd` immediately — and companions already generated between the old and new horizons fall outside the read entirely. They are never listed, never classified `OUTSIDE_WINDOW`, and never deleted.
+
+Reducing the window from 180 days to 7 leaves a travel block 90 days out sitting on the calendar for roughly another 82 days, until the rolling window creeps back out to reach it. To the user the setting simply does not work.
+
+Widening the general read is the wrong fix — it would cost a large listing on every run to handle a rare event. Instead, reconciliation keeps a high-water mark and runs a targeted, ownership-filtered pass when the horizon has retreated:
+
+```javascript
+const OBSERVE_HIGH_WATER_KEY = 'dtp.observeHighWater';
+
+function findStrandedCompanions_(window, settings) {
+  const highWater = loadHighWater_();            // ISO string or null
+  if (!highWater || Date.parse(highWater) <= window.observeEnd.getTime()) {
+    saveHighWater_(window.observeEnd);
+    return [];
+  }
+
+  // Owned events only: privateExtendedProperty filters server-side, so this
+  // returns companions rather than the user's entire calendar.
+  const stranded = repository.listGeneratedEventsBetween(
+    'primary',
+    window.observeEnd,
+    new Date(Date.parse(highWater))
+  );
+
+  return stranded;   // parents are outside the planning window by construction
+}
+```
+
+Rules:
+
+- the high-water mark records the furthest `observeEnd` ever used, and is persisted alongside settings;
+- a run whose `observeEnd` is at or beyond the mark simply advances it and does no extra work — the common case costs one property read;
+- a run whose `observeEnd` is short of the mark performs the filtered scan, deletes what it finds, and lowers the mark to the current `observeEnd` **only after the deletions succeed**;
+- the scan uses `privateExtendedProperty=dtp=1`, so it lists managed events rather than the whole calendar, and §15.3's safety rule still applies to every deletion.
+
+Lowering the mark only on success matters: a failed or partial cleanup leaves the mark high, so the next run tries again. That keeps the behavior self-healing in the same way as the rest of reconciliation, rather than depending on a single run to get it right.
+
+The same mechanism covers a window shrink that happens while automation is disabled, since the mark is compared on the next run regardless of what caused the gap.
 
 ---
 
@@ -1191,9 +1249,14 @@ end
 summary
 eventType
 transparency
+reminders
 ```
 
-These are exactly the fields §16.5 permits patching. Fields the add-on does not own are neither compared nor written.
+This list is exactly §16.5's patch list, and the two must stay identical. A field the add-on **writes** but does not **compare** is a field the user can change permanently: reconciliation will never notice, because nothing else in the pipeline looks at it.
+
+`reminders` is the case that proves it. §16.3 suppresses reminders on generated events so travel blocks do not fire alerts, and §16.5 lists reminders as owned — but an earlier revision omitted them from this comparison. A user who switched reminders on for a travel block would have kept them forever: the fingerprint is unaffected (reminder state is not a planning input), and the owned-field check did not look, so the event was classified `unchanged` on every subsequent run.
+
+Fields the add-on does not own are neither compared nor written.
 
 The fingerprint remains valuable as the cheap first check — it answers "do I need to recompute anything?" — but the owned-field comparison is what makes reconciliation self-healing.
 
@@ -1307,6 +1370,8 @@ Generated events should explicitly disable reminders unless product testing indi
 ```
 
 This prevents duplicate or noisy alerts for travel blocks.
+
+Suppression is **maintained**, not merely set at creation. Reminders are owned state (§15.2.1), so a user who re-enables them on a generated block has that change reverted on the next reconciliation, exactly as a manual time change is reverted. Declaring a field owned and then not comparing it would make the suppression a one-time gesture rather than a guarantee.
 
 ### 16.4 Insert behavior
 
@@ -1633,13 +1698,40 @@ Repeated card opens on an unplanned event would therefore call the broker every 
 Diagnostics use a second, ephemeral cache instead:
 
 ```javascript
-CacheService.getUserCache().put(routeInputHash, String(seconds), ttlSeconds);
+CacheService.getUserCache().put(
+  routeInputHash,
+  JSON.stringify({ secs: rawSeconds, at: calculatedAt.toISOString() }),
+  ttlSeconds
+);
 ```
 
 - keyed by the same route input hash, so entries are interchangeable with the generated-event cache;
 - TTL bounded by `CacheService`'s own maximum, which is well under `ROUTE_CACHE_MAX_AGE_HOURS`;
 - read by both diagnostics and reconciliation, written by both;
 - values validated on read exactly as in §13.3 — an ephemeral store is no more trustworthy than a durable one.
+
+#### The calculation time must travel with the duration
+
+Storing only the duration loses `routeAt`, and both ways of recovering it are wrong:
+
+- **Omit the timestamp** when persisting to the durable cache, and the entry is never valid — so the next run after ephemeral eviction calls the broker anyway, and the warming did nothing.
+- **Stamp the read time** instead, and a route calculated up to one ephemeral TTL ago is recorded as fresh. The 24-hour reuse rule then measures from the wrong instant, and a duration can survive meaningfully longer than `ROUTE_CACHE_MAX_AGE_HOURS`.
+
+The second is the worse failure, because it silently weakens the freshness bound rather than merely wasting a call.
+
+So the entry carries `{ secs, at }`, and `RouteResult` carries `calculatedAt` through to the engine:
+
+```typescript
+interface RouteResult {
+  durationSeconds: number;
+  distanceMeters: number | null;
+  fromCache: boolean;
+  /** When the broker actually produced this duration, not when it was read. */
+  calculatedAt: string;
+}
+```
+
+`calculatedAt` is what gets written to `routeAt` in the durable cache. A duration is exactly as old as the moment the broker computed it, regardless of how many caches it passed through on the way.
 
 This keeps the derived-state invariant intact: flushing it may cost broker calls and can never change Calendar state. It is a cache in front of a cache, which is worth the small complexity only because the alternative is an unbounded per-card-open cost on the one path with no durable place to write.
 

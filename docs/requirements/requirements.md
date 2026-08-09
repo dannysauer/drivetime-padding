@@ -260,6 +260,14 @@ This shall not be treated as an error, but the UI shall surface it, since the re
 
 The user shall be able to enable an optional subject-matching pattern for non-OOO events.
 
+### REQ-CONFIG-006a: Window reduction takes effect
+
+Reducing the planning window shall remove generated events that fall beyond the new horizon.
+
+A contracted observation range no longer reads those events, so they cannot be classified as outside-window by the ordinary pass. The implementation shall retain a record of the furthest horizon previously used and perform an ownership-filtered cleanup over the vacated span, lowering that record only after the deletions succeed.
+
+Without this, a user who narrows the window sees generated events persist for as long as the original horizon, and the setting appears not to work.
+
 ### REQ-CONFIG-015: Pattern validation
 
 The add-on shall validate the configured pattern before saving or using it.
@@ -645,6 +653,12 @@ Creating or updating generated events shall not send source-event guest notifica
 
 Generated events shall not copy the source event description by default.
 
+### REQ-GEN-009a: Reminder suppression
+
+Generated events shall not carry reminders, so that travel blocks do not produce alerts of their own.
+
+Suppression shall be maintained rather than applied only at creation: see REQ-GEN-014b.
+
 ### REQ-GEN-010: Private metadata
 
 Generated events shall contain private extended properties sufficient to identify ownership, source linkage, role, schema, and fingerprint.
@@ -673,6 +687,12 @@ A manually moved, resized, or renamed generated event retains its private metada
 ### REQ-GEN-014: Manual modification recovery
 
 If a managed generated event is manually moved, resized, or renamed, a later reconciliation shall restore desired state.
+
+### REQ-GEN-014b: Owned fields include reminders
+
+Reminder state on generated events shall be compared and restored along with the other owned fields.
+
+Reminder suppression (REQ-GEN-009a) is a maintained property, not a creation-time gesture. A field the system writes but never compares can be changed permanently by the user without reconciliation noticing.
 
 ### REQ-GEN-015: Removed metadata safety
 
@@ -1157,6 +1177,12 @@ When the ceiling is exceeded the diagnostic card shall still report eligibility,
 A reconciliation run that stops at the per-run route ceiling shall schedule a continuation rather than deferring its remaining work to the next daily run.
 
 Consecutive continuations shall be capped and the cap reported in run status, so that a persistent failure cannot loop indefinitely.
+
+### REQ-PERF-016: Route age measured from calculation
+
+A cached route duration shall carry the time the route was calculated, not the time it was read from any cache.
+
+Where a duration passes through more than one cache, the original calculation time shall be preserved, so that freshness is measured from when the broker produced the value rather than from when it was most recently observed.
 
 ### REQ-PERF-015: Cache reachability
 

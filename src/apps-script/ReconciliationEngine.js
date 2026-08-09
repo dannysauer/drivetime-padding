@@ -57,7 +57,12 @@ function overlapsPlanningRange_(event, window) {
  * metadata when a user drags or renames an event, so the stored fingerprint
  * survives the tampering it would need to detect.
  *
- * Technical Design section 15.2.1, REQ-GEN-014a.
+ * Compares start, end, summary, eventType, transparency, AND reminders.
+ * That set must stay identical to the patch list in section 16.5: a field
+ * written but not compared is one the user can change permanently, because
+ * nothing else in the pipeline looks at it.
+ *
+ * Technical Design section 15.2.1, REQ-GEN-014a, REQ-GEN-014b.
  */
 function ownedFieldsMatch_(observed, desired) {
   throw new Error('Not implemented: Technical Design section 15.2.1');
@@ -90,4 +95,18 @@ function indexByGeneratedKey_(observedEvents) {
 
 function routeCacheFor_(observedByKey, parentEventId) {
   throw new Error('Not implemented: Technical Design section 12.1.1');
+}
+
+/**
+ * Companions stranded beyond a shrunken horizon.
+ *
+ * observeEnd is derived from the CURRENT windowDays, so reducing that setting
+ * hides previously generated companions rather than deleting them. A
+ * high-water mark of the furthest horizon ever used drives an
+ * ownership-filtered cleanup over the vacated span; the mark is lowered only
+ * after those deletions succeed, so a partial cleanup retries next run.
+ * Technical Design section 7.6, REQ-CONFIG-006a.
+ */
+function findStrandedCompanions_(window, settings) {
+  throw new Error('Not implemented: Technical Design section 7.6');
 }

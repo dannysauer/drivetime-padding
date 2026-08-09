@@ -40,6 +40,8 @@ const DIAGNOSTIC_ROUTE_CALLS_PER_HOUR = 20;
 // Storage keys.
 const SETTINGS_KEY = 'dtp.settings';
 const LAST_RUN_KEY = 'dtp.lastRun';
+// Furthest observeEnd ever used. Drives cleanup when windowDays shrinks.
+const OBSERVE_HIGH_WATER_KEY = 'dtp.observeHighWater';
 const CURRENT_SETTINGS_SCHEMA = 1;
 
 // Generated-event metadata. ADR 0009 -- this property is the deletion-safety

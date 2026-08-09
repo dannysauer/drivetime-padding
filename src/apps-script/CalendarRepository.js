@@ -4,13 +4,15 @@
  */
 
 /**
- * Lists every event in the window, following nextPageToken to completion.
+ * Lists every event in the observation range, following nextPageToken to
+ * completion. Returns { events, scanComplete }.
  *
- * Pagination is not optional. Silent truncation would make source events
- * invisible while their generated events remain observed, and the comparator
- * would delete those as orphans.
+ * Pagination is not optional, and scanComplete is not decoration. Silent
+ * truncation would make source events invisible while their companions remain
+ * observed; the comparator uses scanComplete to decide whether an unmatched
+ * companion is genuinely orphaned or merely unreached (section 15.2.3).
  */
-function listWindowEvents(calendarId, start, end) {
+function listWindowEvents(calendarId, observeStart, observeEnd) {
   throw new Error('Not implemented: Technical Design section 7.2.1');
 }
 
@@ -18,12 +20,35 @@ function listWorkingLocationEvents(calendarId, start, end) {
   throw new Error('Not implemented: Technical Design section 7.5');
 }
 
+/**
+ * Ownership-filtered listing (privateExtendedProperty=dtp=1).
+ *
+ * Used by the window-shrink cleanup pass: when windowDays is reduced, the
+ * observation range contracts and companions beyond the new horizon are never
+ * read, so they can never be classified outside-window and deleted. Filtering
+ * server-side keeps that pass cheap. Technical Design section 7.6.
+ */
+function listGeneratedEventsBetween(calendarId, start, end) {
+  throw new Error('Not implemented: Technical Design section 7.6');
+}
+
 function createGeneratedEvent(spec) {
   throw new Error('Not implemented: Technical Design section 16');
 }
 
-function updateGeneratedEvent(eventId, spec) {
+/** Takes the observed event so the ETag can be carried. Section 16.5.1. */
+function updateGeneratedEvent(observed, spec) {
   throw new Error('Not implemented: Technical Design section 16.5');
+}
+
+/**
+ * Private-property write only -- no owned fields in the patch body, so the
+ * event does not move and the user sees nothing. Required rather than
+ * optional: skipping it leaves routeAt stale and every later run calls the
+ * broker. Technical Design section 16.6.
+ */
+function patchGeneratedEventMetadata(observed, privateProperties) {
+  throw new Error('Not implemented: Technical Design section 16.6');
 }
 
 /**
