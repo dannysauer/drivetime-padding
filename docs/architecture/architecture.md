@@ -744,6 +744,10 @@ function reconcile(options) {
     // technical design).
     const planningOutcomes = new Map();
 
+    // Companions of overlong sources, found by targeted lookup because the
+    // window read cannot reach them (technical design §15.2.6).
+    const strandedOverlong = [];
+
     for (const rawEvent of sourceEvents) {
       const event = normalizeEvent(rawEvent);
       const directives = parseDirectives(event.description);
@@ -755,6 +759,19 @@ function reconcile(options) {
           specs: [],
           reason: eligibility.reason
         });
+
+        // A source edited past MAX_SOURCE_DURATION breaks the observability
+        // guarantee: it stays readable while its companions may sit behind
+        // observeStart, where the window read above cannot see them. Keyed
+        // on the duration, not the reason -- a multi-day all-day conversion
+        // strands companions the same way but classifies ALL_DAY_EVENT
+        // before the duration is ever tested (technical design §15.2.6).
+        if (sourceExceedsDurationCap(event) &&
+            !bothRolesObserved(observedByKey, event.id)) {
+          strandedOverlong.push(
+            ...repository.listCompanionsByParent("primary", event.id)
+          );
+        }
         continue;
       }
 
@@ -790,9 +807,11 @@ function reconcile(options) {
     // later run would repeat the full scan of the vacated range.
     const cleanup = findStrandedCompanions(window, settings);
     diff.deletes.push(...cleanup.events);
+    diff.deletes.push(...strandedOverlong);
 
+    let applied = null;
     if (!options.dryRun) {
-      const applied = applyDiff(diff);
+      applied = applyDiff(diff);
 
       // Lower the mark only when every stranded delete succeeded, and
       // never on a dry run. A partial cleanup leaves the mark high so the
@@ -802,8 +821,21 @@ function reconcile(options) {
       }
     }
 
-    saveRunStatus(diff);
-    return diff;
+    // Status is built from what Calendar ACCEPTED, not from what the diff
+    // proposed. applyDiff returns per-operation results (technical design
+    // §17.5); a rejected create or delete must reach the saved counts and
+    // the returned status, or the UI reports success over writes that
+    // silently failed (REQ-ERROR-006).
+    const result = buildRunResult(diff, applied, options);
+
+    // Dry runs return their proposal but never persist it. The stored
+    // last-run record is what the home card reports as the last outcome
+    // (technical design §19.5, §20.2); letting a diagnostic dry run
+    // overwrite it would present proposal counts as applied results.
+    if (!options.dryRun) {
+      saveRunStatus(result);
+    }
+    return result;
   } finally {
     lock.releaseLock();
   }
@@ -826,6 +858,7 @@ Each desired/observed pair produces one of:
 
 - create;
 - update;
+- replace — delete and recreate, used when `eventType` differs, because Calendar treats the type as immutable after creation (technical design §15.2.5);
 - ignore.
 
 Observed generated events with no desired match produce:
@@ -839,6 +872,8 @@ Recommended write order:
 1. delete obsolete events;
 2. create missing events;
 3. update changed events.
+
+A replace executes as its delete followed by its create, so a failure between the two leaves a brief gap rather than a brief duplicate — and the next reconciliation fills a gap for free.
 
 The exact order is not correctness-critical because future reconciliation repairs partial work, but deleting obsolete events first reduces temporary duplicates.
 
@@ -872,7 +907,9 @@ With one qualification. Work deferred by the per-run route ceiling (§21.3) is n
 
 ### 15.3 Manual synchronization
 
-The home-card "Synchronize now" button calls the same engine.
+The home-card "Synchronize now" button runs the same engine as the automatic triggers — but not inline. CardService action callbacks have a short execution budget that a full-window reconcile will exceed, so the button's handler enqueues a one-off time-based trigger invoking `runReconciliation({ reason: 'manual' })` and returns "Synchronization started" immediately. Progress surfaces through the stored last-run record on the home card.
+
+The enqueue mechanism, do-not-stack rule, and Spike 1 dependency are specified in technical design §19.5.
 
 ### 15.4 Trigger repair
 
@@ -931,6 +968,8 @@ return failed
 ```
 
 The next reconciliation sees the missing return event and creates it.
+
+The failure must still be **reported**, not just repaired later: it reaches the run's saved status through the diff application result (technical design §17.5), so the run shows `partial` with an error count rather than success. Self-healing excuses the missing rollback, never the missing report.
 
 ### 17.3 Broker failures
 

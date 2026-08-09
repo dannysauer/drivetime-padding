@@ -867,10 +867,26 @@ Each run shall produce a structured result containing at least:
 - eligible events;
 - created count;
 - updated count;
+- replaced count;
 - deleted count;
 - ignored count;
+- failed-write count;
 - error count;
 - start and completion timestamps.
+
+Write counts shall reflect operations Calendar **accepted**, taken from the diff application result, not operations the diff proposed. A run with one or more failed writes shall not report success (REQ-ERROR-006). Dry runs report proposal counts, marked as such, and shall not overwrite the stored last-run record.
+
+### REQ-RECON-014: Event type changes are applied by replacement
+
+When a generated event's desired `eventType` differs from its observed `eventType`, reconciliation shall delete the observed event and create a new one from the desired specification, rather than patching the type.
+
+Calendar declares `eventType` immutable after creation. Folding the difference into an update produces a patch that fails identically on every reconciliation, leaving the companion permanently in the wrong state. The type remains a compared owned field; replacement is its write path.
+
+### REQ-RECON-015: Companions of overlong sources are located outside the window
+
+When an ineligible source event's observed duration exceeds `MAX_SOURCE_DURATION_MINUTES` — regardless of its ineligibility reason — and either companion role is missing from the observed index, reconciliation shall locate its companions by ownership and parent metadata without time bounds, and delete them.
+
+The observation range's completeness guarantee assumes sources respect the duration cap. A source edited past the cap after planning keeps itself readable while its companions fall behind `observeStart` permanently; only a targeted lookup can reach them. The trigger is the duration, not the classification: a multi-day all-day conversion strands companions identically but is classified `ALL_DAY_EVENT` before the duration test runs. The gate is "either role missing" rather than "no companions observed" so a half-stranded pair does not wait an extra run for cleanup.
 
 ---
 
@@ -998,6 +1014,12 @@ Opening or refreshing diagnostics shall not write generated events unless the us
 ### REQ-UI-016: Mobile limitation documentation
 
 If Google does not support the add-on UI in mobile Calendar clients, Marketplace and support documentation shall state that limitation clearly while noting that installed automation still runs server-side.
+
+### REQ-UI-017: Manual synchronization is asynchronous
+
+The "Synchronize now" action shall enqueue reconciliation and return within the CardService callback budget, rather than running the full window inline.
+
+An inline run succeeds only on calendars small enough not to need it. The action reports that synchronization has started; completion surfaces through the stored last-run record. The enqueue mechanism shares the one-off trigger machinery of partial-run continuations and is subject to Prototype Spike 1.
 
 ---
 

@@ -14,3 +14,14 @@ function buildHomeCard() {
 function buildEventCard() {
   throw new Error('Not implemented: Technical Design section 20.3');
 }
+
+/**
+ * "Synchronize now" action handler. Enqueues a one-off trigger invoking
+ * runManualReconciliation and returns "Synchronization started" within the
+ * callback budget. Does not stack: one pending run covers any number of
+ * clicks, because reconciliation is idempotent.
+ * Technical Design section 19.5 (subject to Prototype Spike 1).
+ */
+function onSynchronizeNow(e) {
+  throw new Error('Not implemented: Technical Design section 19.5');
+}

@@ -37,9 +37,16 @@ const MAX_ROUTE_CALLS_PER_RUN = 60;
 const MAX_CONSECUTIVE_CONTINUATIONS = 10;
 const DIAGNOSTIC_ROUTE_CALLS_PER_HOUR = 20;
 
+// Manual sync enqueues a one-off trigger rather than running inline in the
+// card callback. Technical Design section 19.5.
+const MANUAL_RUN_DELAY_MS = 1000;
+
 // Storage keys.
 const SETTINGS_KEY = 'dtp.settings';
 const LAST_RUN_KEY = 'dtp.lastRun';
+// NOTE: manual-run pendingness is derived from ScriptApp.getProjectTriggers()
+// rather than stored -- a persisted flag with no failure-path clear would
+// brick the button after one crashed run. Technical Design section 19.5.
 // Furthest observeEnd ever used. Drives cleanup when windowDays shrinks.
 const OBSERVE_HIGH_WATER_KEY = 'dtp.observeHighWater';
 const CURRENT_SETTINGS_SCHEMA = 1;

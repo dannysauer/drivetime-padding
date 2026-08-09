@@ -32,6 +32,18 @@ function listGeneratedEventsBetween(calendarId, start, end) {
   throw new Error('Not implemented: Technical Design section 7.6');
 }
 
+/**
+ * Ownership + parent filtered (dtp=1 AND parent=<id>), no time bounds.
+ *
+ * A source edited to exceed MAX_SOURCE_DURATION breaks the section 7.2
+ * observability guarantee: the source stays readable while its companions
+ * fall behind observeStart forever. This targeted lookup is how those
+ * companions get found and deleted. Technical Design section 15.2.6.
+ */
+function listCompanionsByParent(calendarId, parentEventId) {
+  throw new Error('Not implemented: Technical Design section 15.2.6');
+}
+
 function createGeneratedEvent(spec) {
   throw new Error('Not implemented: Technical Design section 16');
 }

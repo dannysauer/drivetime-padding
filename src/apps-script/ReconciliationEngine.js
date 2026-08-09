@@ -16,6 +16,22 @@ function runReconciliation(options) {
 }
 
 /**
+ * Applies the diff and reports what Calendar ACCEPTED.
+ *
+ * The returned ApplyResult -- not the proposed diff -- is what run status
+ * and the stored last-run record are built from. A rejected write that
+ * never reaches the saved counts leaves the UI reporting success over
+ * work that silently failed (REQ-ERROR-006).
+ *
+ * Replaces execute delete-then-create: eventType is immutable after
+ * creation, so a type change cannot be patched (section 15.2.5).
+ * Technical Design section 17.5.
+ */
+function applyDiff_(diff) {
+  throw new Error('Not implemented: Technical Design section 17.5');
+}
+
+/**
  * Two ranges, not one. ADR 0012, Technical Design section 7.2.
  *
  * Plan range decides which sources are evaluated; observe range decides which
@@ -117,6 +133,12 @@ function routeCacheFor_(observedByKey, parentEventId) {
  * (and never on dry run). Merging the events into the delete list and
  * dropping the flag leaves no path that ever lowers the mark, so every
  * later run repeats the full scan of the vacated range.
+ *
+ * Stranded means START at or after the new horizon. Events.list bounds
+ * timeMin on event end, so a companion spanning the boundary shows up in
+ * this scan AND the ordinary observation read -- queuing it here would
+ * race a cleanup delete against the comparator's repair, and delete-first
+ * ordering means the delete wins.
  * Technical Design section 7.6, REQ-CONFIG-006a.
  */
 function findStrandedCompanions_(window, settings) {

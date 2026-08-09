@@ -302,6 +302,11 @@ interface ReconciliationDiff {
     observed: ObservedGeneratedEvent;
     privateProperties: Record<string, string>;
   }>;
+  /** Delete + recreate. eventType is immutable after creation. See 15.2.5. */
+  replaces: Array<{
+    observed: ObservedGeneratedEvent;
+    desired: GeneratedEventSpec;
+  }>;
   deletes: ObservedGeneratedEvent[];
   unchanged: Array<{
     observed: ObservedGeneratedEvent;
@@ -644,11 +649,23 @@ function findStrandedCompanions_(window, settings) {
 
   // Owned events only: privateExtendedProperty filters server-side, so this
   // returns companions rather than the user's entire calendar.
+  //
+  // The start filter is a correctness condition, not tidiness. Events.list
+  // bounds timeMin on event END, so a companion spanning the new horizon --
+  // a user resize can produce one -- is returned by this scan AND by the
+  // ordinary observation read. The comparator may queue an update to repair
+  // it while this pass queues its deletion, and with the delete-first write
+  // order (Architecture 14.5) the event would be removed instead of
+  // repaired. Stranded means wholly beyond the horizon: start at or after
+  // observeEnd. Anything spanning the boundary is visible to the ordinary
+  // read, which alone decides its fate.
   const stranded = repository.listGeneratedEventsBetween(
     'primary',
     window.observeEnd,
     new Date(Date.parse(highWater))
-  );
+  ).filter(function (event) {
+    return Date.parse(event.observedFields.start) >= window.observeEnd.getTime();
+  });
 
   // Deliberately does NOT lower the mark here. The stranded events have
   // only been found, not deleted; the engine lowers the mark after
@@ -676,7 +693,8 @@ Rules:
 - the high-water mark records the furthest `observeEnd` ever used, and is persisted alongside settings;
 - a run whose `observeEnd` is at or beyond the mark simply advances it and does no extra work — the common case costs one property read;
 - a run whose `observeEnd` is short of the mark performs the filtered scan and reports the stranded events; the **engine** lowers the mark to the current `observeEnd` only after `applyDiff` confirms every stranded delete succeeded, and never on a dry run;
-- the scan uses `privateExtendedProperty=dtp=1`, so it lists managed events rather than the whole calendar, and §15.3's safety rule still applies to every deletion.
+- the scan uses `privateExtendedProperty=dtp=1`, so it lists managed events rather than the whole calendar, and §15.3's safety rule still applies to every deletion;
+- only events **starting** at or after the new `observeEnd` count as stranded — an event spanning the boundary appears in the ordinary observation read too, and queuing it here as well would race a cleanup delete against the comparator's repair.
 
 Lowering the mark only on success matters: a failed or partial cleanup leaves the mark high, so the next run tries again. That keeps the behavior self-healing in the same way as the rest of reconciliation, rather than depending on a single run to get it right.
 
@@ -765,6 +783,8 @@ That ordering is a correctness constraint, not a preference. With `showDeleted: 
 A cancelled tombstone needs no timestamps to do its job: it yields empty desired state, and its companions are matched by parent ID.
 
 Step 4 uses the **planning** range as a temporal intersection, not the observation range (§7.2). Step 6 is what keeps the observation range bounded.
+
+A source rejected at step 5 or 6 whose duration exceeds `MAX_SOURCE_DURATION_MINUTES` additionally triggers the stranded-companion lookup of §15.2.6 — the duration cap is the precondition of the §7.2 observability proof, and a source that outgrew it may have left companions behind `observeStart` where the ordinary read cannot reach them.
 
 ### 9.3 Title pattern
 
@@ -1109,7 +1129,16 @@ It also excludes the buffer: the buffer is applied after routing and is already 
 ```javascript
 function cachedRouteIsUsable_(meta, expectedHash, now) {
   if (!meta.routeHash || meta.routeHash !== expectedHash) return false;
-  if (!meta.routeAt || !meta.routeSecs) return false;
+  if (!meta.routeAt) return false;
+
+  // Presence check, not truthiness. Zero is a legitimate duration -- the
+  // broker returns 0 seconds for coincident endpoints -- and a normalized
+  // cache entry carries routeSecs as a number, so `!meta.routeSecs` would
+  // treat a valid zero as absent and call the broker on every run for
+  // exactly the route the cache handles cheapest.
+  if (meta.routeSecs === null || meta.routeSecs === undefined) {
+    return false;
+  }
 
   // Cached durations get the same validation as broker responses (11.3).
   // Extended properties are strings and externally writable, so a corrupted
@@ -1125,6 +1154,8 @@ function cachedRouteIsUsable_(meta, expectedHash, now) {
   return ageMs >= 0 && ageMs < ROUTE_CACHE_MAX_AGE_HOURS * 3600000;
 }
 ```
+
+`meta` is the **normalized** cache entry (§4.9), and the normalization rule is load-bearing now that zero is a legal value. Extended properties are strings (§13.1); `normalizeObservedGeneratedEvent` converts `routeSecs` to a number **only when the raw string is non-empty and entirely numeric**, and maps everything else — empty, whitespace, garbage — to `null`. A naive `Number(raw)` would turn an externally blanked property into `0` (`Number('')` and `Number('  ')` are both zero), and the presence check above would then trust corruption as a real zero-second route for up to 24 hours. Zero is legitimate only when the broker actually said zero; it must never be manufactured by coercion.
 
 A cache entry that fails any of these checks is treated as absent: the broker is called and the entry rewritten. Discarding a corrupt entry is always safe, which is the whole point of ADR 0011 — but only if the corrupt entry is never trusted in the first place. Cached durations must clear the same bar as fresh broker responses (§11.3), because an unvalidated cache read is a path around that validation.
 
@@ -1253,10 +1284,13 @@ For every desired key:
 
 - no observed event: **create** — only when the scan was complete (§15.2.4);
 - one observed event, fingerprint matches **and** owned fields match: **unchanged**;
+- one observed event, desired `eventType` differs from observed: **replace** — delete and recreate (see §15.2.5);
 - one observed event, fingerprint matches but owned fields differ: **update** (see §15.2.1);
 - one observed event, cache metadata is stale but everything else matches: **metadata patch** (see §15.2.2);
 - one observed event, fingerprint differs or is missing: **update**;
 - multiple observed events: select canonical, apply the above, delete duplicates.
+
+The `eventType` test comes before the update branches because it overrides them: when the type differs, an update is not merely suboptimal, it is impossible (§15.2.5).
 
 For every observed key absent from desired, decide by the parent's planning outcome (§15.2.3):
 
@@ -1286,7 +1320,7 @@ transparency
 reminders
 ```
 
-This list is exactly §16.5's patch list, and the two must stay identical. A field the add-on **writes** but does not **compare** is a field the user can change permanently: reconciliation will never notice, because nothing else in the pipeline looks at it.
+Every compared field must have a write path that can realign it, or the comparison is theater: a field the add-on **writes** but does not **compare** is one the user can change permanently, and a field it **compares** but cannot **write** is a difference it detects and then cannot fix. For all fields except `eventType` that write path is §16.5's patch, and the patch list and this comparison set must stay identical. `eventType` is compared here but realigned by **replacement** (§15.2.5), because Calendar will not patch it.
 
 `reminders` is the case that proves it. §16.3 suppresses reminders on generated events so travel blocks do not fire alerts, and §16.5 lists reminders as owned — but an earlier revision omitted them from this comparison. A user who switched reminders on for a travel block would have kept them forever: the fingerprint is unaffected (reminder state is not a planning input), and the owned-field check did not look, so the event was classified `unchanged` on every subsequent run.
 
@@ -1332,12 +1366,46 @@ So the diff outcomes divide by what they rely on:
 | create | absence | **suppressed** |
 | delete (orphan) | absence | **suppressed** (§15.2.3) |
 | update | an observed event | proceeds |
+| replace (§15.2.5) | an observed event | proceeds |
 | metadata patch | an observed event | proceeds |
 | unchanged | an observed event | proceeds |
 
 Presence-based operations proceed because the events they touch were actually read — their data is real regardless of what the scan missed. Suppressing them too would discard sound work and make a flaky page fetch cost a whole run.
 
 A run with suppressed operations reports `partial`, records the suppressed counts in diagnostics, and relies on retry — the next trigger, continuation, or daily run — to complete the scan and perform them.
+
+Replacements proceed on an incomplete scan for the same reason updates do: both halves of a replacement act on an event the scan actually read.
+
+#### 15.2.5 Replacement when eventType differs
+
+The Calendar API declares `eventType` **immutable after creation**. A companion created as `outOfOffice` cannot be patched into an ordinary event, nor the reverse.
+
+The desired type can legitimately change while the parent key stays the same: a source event qualifies as a real OOO event one run (companions are `outOfOffice`, §12.6) and by title pattern the next — the user toggled `includeOutOfOffice` off, or converted the source event's type. The comparator then matches the old companion by `parent + role` and, if the type difference were folded into `update`, would emit a patch Calendar rejects. The patch fails identically on every subsequent reconciliation, the run reports an error each time, and the companion sits permanently in the wrong state — a persistent failure loop, not a transient one.
+
+An `eventType` difference is therefore a **replace**: delete the observed event, create from the desired spec. Both operations already exist in the diff vocabulary; `replaces` records them as one intent so run reporting counts a replacement rather than an unrelated delete plus create, and so application can order the delete before the create (Architecture §14.5), leaving at worst a brief gap rather than a brief duplicate.
+
+Replacement authority is deletion authority: the observed event is removed, so the parent's planning outcome must be `planned` (it is, by construction — a desired spec exists). The safety rule §15.3 applies to the delete half unchanged.
+
+#### 15.2.6 Companions of overlong sources
+
+The §7.2 completeness proof guarantees a source's companions are observable **only while the source respects `MAX_SOURCE_DURATION`**. A source event edited after planning to exceed 24 hours can violate that precondition: its end keeps it inside the read range (`timeMin` bounds event end) while the companions generated before the edit sit earlier than `observeStart`.
+
+Such a source is definitively ineligible, which carries deletion authority — but the comparator can only delete events the scan observed, and these companions were not. Without a supplementary read they are stranded permanently: the observation range tracks `now` forward, so events behind `observeStart` never re-enter it.
+
+The trigger condition is the **duration**, not the ineligibility reason. A timed source over the cap is classified `SOURCE_TOO_LONG`, but a source converted into a multi-day **all-day** event breaks the same precondition and never reaches the duration test — §9.2 step 5 classifies it `ALL_DAY_EVENT` first. Keying the lookup on `SOURCE_TOO_LONG` alone would leave the all-day conversion stranding companions in exactly the way this section exists to prevent. The rule is therefore:
+
+> For each ineligible source whose observed duration exceeds `MAX_SOURCE_DURATION_MINUTES`, when **either** companion role is missing from the observed index, perform a targeted, ownership-filtered lookup outside the window bounds.
+
+```javascript
+repository.listCompanionsByParent('primary', event.id)
+// privateExtendedProperty: dtp=1 AND parent=<event.id>; no time bounds
+```
+
+"Either role missing" rather than "no companions observed": the stale departure block can fall behind `observeStart` while the stale return block is still inside the range. Gating on total absence would skip the lookup, delete only the observed one through the ordinary path, and leave the stranded one waiting for a later run — a delay with no bound under flaky pagination, since the ordinary delete is absence-based and suppressed on incomplete scans (§15.2.4). One cheap extra list call removes the dependency.
+
+The returned events join `diff.deletes`. They were actually read — by the targeted query rather than the window scan — so this is presence-based deletion and does not depend on `scanComplete`; §15.3's marker rule and §16.5.1's conditional delete apply unchanged. If the lookup itself fails, the run records the error and retries next run, like any other read failure.
+
+Cost is bounded and rare: one extra `Events.list` per overlong source per run, only while such a source sits in the observation range with a companion unaccounted for. Cancelled tombstones are excluded — they may carry no timestamps (§9.2), so their duration is untestable; a source made overlong and then cancelled inside the stranding gap is a residual edge this design accepts rather than paying a per-tombstone list call on every run.
 
 ### 15.3 Safety rule
 
@@ -1438,10 +1506,11 @@ Patch only fields owned by Drivetime Padding:
 - summary;
 - start;
 - end;
-- event type and relevant properties;
 - transparency;
 - reminders;
 - private extended properties.
+
+`eventType` is **not** in the patch body: Calendar declares it immutable after creation, so a patch carrying a different type is rejected. The type is still owned and still compared (§15.2.1) — a difference is realigned by replacement (§15.2.5), never by patch. Type-specific properties (`outOfOfficeProperties`) travel with the create that a replacement performs.
 
 Do not overwrite unrelated fields if a later version adds them.
 
@@ -1571,6 +1640,31 @@ The comparator receives deletion authority only for `planned` and `ineligible` e
 
 `failed` covers every reason planning could not complete, including `ROUTE_TOO_LONG` and `ROUTE_BUDGET_EXCEEDED`. A source event skipped because the run hit its route ceiling must never have its existing travel blocks deleted as orphans.
 
+### 17.5 Diff application result
+
+`applyDiff` does not mutate the diff it is given. It returns its own record of what happened:
+
+```typescript
+interface ApplyResult {
+  /** Counts of operations that Calendar accepted. */
+  applied: { creates: number; updates: number; metadataPatches: number;
+             replaces: number; deletes: number };
+  /** Every operation Calendar rejected, with the event it targeted. */
+  failures: Array<{
+    op: "create" | "update" | "metadataPatch" | "replace" | "delete";
+    observed?: ObservedGeneratedEvent;
+    spec?: GeneratedEventSpec;
+    error: AppErrorRecord;
+  }>;
+  /** True when every one of the given observed events was deleted. */
+  deletedAll(events: ObservedGeneratedEvent[]): boolean;
+}
+```
+
+The `ReconciliationResult` and the stored last-run record (§20.2) are built **from this object**, not from the proposed diff. The distinction is REQ-ERROR-006: the diff says what the run intended, the `ApplyResult` says what Calendar accepted, and only the second can honestly claim success. A run whose `failures` list is non-empty reports `partial` (or `failed` when nothing applied), merges each failure's `AppErrorRecord` into `errors`, and counts it in the stored record — otherwise a rejected write vanishes: the UI shows success, and nothing distinguishes "done" from "silently dropped".
+
+On a dry run there is no `ApplyResult`; the result is built from the diff, carries `dryRun: true`, and is **returned but never persisted**. The stored last-run record is what the home card presents as the last outcome (§19.5, §20.2), and the event diagnostic card runs dry-run planning routinely — letting it overwrite the record would replace real applied counts with proposal counts moments after a genuine run.
+
 ---
 
 ## 18. Error Model
@@ -1693,6 +1787,55 @@ Remove all generated events and disable automation
 
 This action must require explicit confirmation.
 
+### 19.5 Manual synchronization entry point
+
+The home card's "Synchronize now" button must not run reconciliation inline. CardService action callbacks have a short execution budget, and a full-window reconcile on a busy calendar will exceed it — the user would see a spinner, then a timeout, and learn that the button breaks exactly when the calendar is big enough to need it.
+
+The button therefore **enqueues** and returns, using the same one-off time-based trigger mechanism as partial-run continuations (§23.4):
+
+```javascript
+// CardService action handler. Must return within the callback budget.
+function onSynchronizeNow(e) {
+  enqueueManualRun_();
+  return buildNotificationResponse_('Synchronization started.');
+}
+
+// Pendingness is DERIVED from the trigger list, never stored. A persisted
+// flag needs a failure-path clear: if the run throws after its trigger is
+// deleted, or the container dies mid-run, a stored flag stays set forever
+// and every later click silently no-ops while still toasting success. The
+// trigger list cannot go stale that way -- the handler deletes its trigger
+// on entry, so a crashed run leaves pendingness false and the button live.
+function manualRunPending_() {
+  return ScriptApp.getProjectTriggers().some(function (trigger) {
+    return trigger.getHandlerFunction() === 'runManualReconciliation';
+  });
+}
+
+function enqueueManualRun_() {
+  // Do not stack: if a manual run trigger is already pending, this is a
+  // no-op -- same rule as continuations (23.4). Reconciliation is
+  // idempotent, so one pending run covers any number of clicks.
+  if (manualRunPending_()) return;
+  ScriptApp.newTrigger('runManualReconciliation')
+    .timeBased()
+    .after(MANUAL_RUN_DELAY_MS)      // recommended 1000; minimum granularity applies
+    .create();
+}
+
+// One-off trigger handler. Deletes its own trigger FIRST -- that single
+// act is also what clears pendingness -- then runs the same engine as
+// every other entry point (REQ-RECON-011).
+function runManualReconciliation(e) {
+  deleteTriggerById_(e && e.triggerUid);
+  return runReconciliation({ reason: 'manual' });
+}
+```
+
+The home card reflects progress through the stored last-run record (§20.2) plus `manualRunPending_()`. "Synchronization started" is honest — the card does not pretend the work finished inside the callback.
+
+Like continuations, this depends on one-off trigger creation and is therefore **subject to Prototype Spike 1**. If the spike finds one-off triggers unavailable to Marketplace add-ons, the fallback is an inline run with the per-run route ceiling lowered far enough to fit the callback budget, ending `partial` and relying on the daily cycle for the remainder — a worse experience that must be called out in the spike report rather than silently adopted.
+
 ---
 
 ## 20. Status and Diagnostics
@@ -1718,10 +1861,16 @@ Store only compact operational data, not addresses or event titles.
   "plannedEvents": 8,
   "created": 2,
   "updated": 1,
+  "replaced": 0,
   "deleted": 0,
+  "failedWrites": 0,
   "errors": 0
 }
 ```
+
+The write counts are **applied** counts taken from the `ApplyResult` (§17.5), not proposal counts taken from the diff. `failedWrites` is the size of the failure list; any non-zero value forces `status` to `partial` or `failed`, so the home card can never display success over rejected writes.
+
+Dry runs never write this record (§17.5). Only runs that actually applied a diff — or genuinely attempted to — belong in it.
 
 ### 20.3 Event diagnostic mode
 

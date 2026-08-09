@@ -18,3 +18,12 @@ function ensureTriggers() {
 function removeAutomation() {
   throw new Error('Not implemented: Technical Design section 19.4');
 }
+
+/**
+ * One-off trigger handler behind the "Synchronize now" card action. Deletes
+ * its own trigger, then runs the shared engine with reason 'manual'
+ * (REQ-RECON-011). Technical Design section 19.5.
+ */
+function runManualReconciliation(e) {
+  throw new Error('Not implemented: Technical Design section 19.5');
+}

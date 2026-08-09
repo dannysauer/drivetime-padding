@@ -79,3 +79,14 @@ This matrix links requirement groups to architecture components, technical-desig
 | REQ-PERF-017 | Schedule-only changes cost no broker calls | AC-CACHE-011 |
 | REQ-PERF-014 (extended) | Cache repair persists the full triplet including the hash | AC-CACHE-012 |
 | REQ-ROUTE-011 | Uniform typed endpoints in both directions | AC-ORIGIN-005 |
+
+## Requirements added in the sixth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| REQ-RECON-014 | Event type changes applied by replacement, not patch | AC-ELIG-009 |
+| REQ-RECON-015 | Overlong source's companions located outside the window | AC-RECOVERY-011 |
+| REQ-RECON-012 (extended) | Run status built from applied results, failed writes counted | AC-RECOVERY-010 |
+| REQ-UI-017 | Manual synchronization enqueues rather than running inline | — UI, subject to Spike 1 |
+| REQ-CONFIG-006a (clarified) | Shrink cleanup excludes boundary-spanning events | AC-CONFIG-003 |
+| REQ-PERF-009 (clarified) | Zero-second cached routes are valid cache entries | AC-CACHE-013 |

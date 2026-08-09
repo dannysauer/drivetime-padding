@@ -588,3 +588,60 @@ Without the observation range extending past `planEnd`, `timeMax` would exclude 
 **When** the broker receives it  
 **Then** the broker rejects it before calling Google Maps  
 **And** records an authentication-failure metric without logging secrets.
+
+---
+
+## AC-ELIG-009: Qualification path changes the companion event type
+
+**Given** a source event whose companions were created as `outOfOffice` events  
+**And** the user disables `includeOutOfOffice` while the source still matches the title pattern  
+**When** reconciliation runs  
+**Then** each companion is deleted and recreated as an ordinary event  
+**And** no patch attempts to change `eventType` in place  
+**And** the run counts one replacement per companion, not an unrelated delete and create.
+
+Calendar declares `eventType` immutable after creation. A patch carrying a different type fails identically on every run, leaving the companion permanently wrong.
+
+## AC-RECOVERY-010: A rejected write is reported, not absorbed
+
+**Given** a reconciliation diff proposing two creates  
+**And** Calendar rejects one of them  
+**When** the run completes  
+**Then** the stored last-run record counts one create and one failed write  
+**And** the run status is `partial`, not `success`  
+**And** the failure's error record appears in the result.
+
+Status is built from what Calendar accepted, not from what the diff proposed. Self-healing on the next run excuses the missing rollback, never the missing report.
+
+## AC-RECOVERY-011: Overlong source's stale companions are removed
+
+**Given** a source event that had companions created while it was eligible  
+**And** the source is later extended beyond `MAX_SOURCE_DURATION_MINUTES` — as a timed event or by conversion into a multi-day all-day event  
+**And** enough time passes that at least one companion falls before `observeStart` while the source remains in the observation range  
+**When** reconciliation runs  
+**Then** the source is classified ineligible (`SOURCE_TOO_LONG` or `ALL_DAY_EVENT`)  
+**And** its companions are located by ownership and parent metadata outside the window bounds  
+**And** all of them are deleted in that same run.
+
+Definitive ineligibility carries deletion authority, but the window scan cannot reach companions the overlong source stranded behind `observeStart`. The lookup keys on the duration, not the classification reason — the all-day check runs before the duration check, so a multi-day all-day conversion never reports `SOURCE_TOO_LONG` — and fires when either role is missing, so a half-stranded pair is cleaned in one run.
+
+## AC-CACHE-013: Zero-second route is cached and reused
+
+**Given** a source event whose origin and destination resolve to coincident endpoints  
+**And** the broker returns a zero-second duration  
+**When** reconciliation runs twice within the cache lifetime  
+**Then** the second run makes no broker call  
+**And** the cached zero is accepted by validation rather than treated as absent.
+
+Zero is a legitimate duration. A truthiness check on the cached value would reject it before validation, forcing a broker call and metadata rewrite on every run.
+
+## AC-CONFIG-003: Companion spanning the reduced horizon is not double-handled
+
+**Given** `windowDays` is reduced  
+**And** a managed companion starts before the new `observeEnd` but ends after it  
+**When** reconciliation runs  
+**Then** the shrink cleanup pass excludes that companion  
+**And** only the ordinary comparison decides whether it is updated, unchanged, or deleted  
+**And** no delete and update are queued for the same event in one run.
+
+`Events.list` bounds `timeMin` on event end, so a boundary-spanning event is visible to both the observation read and the cleanup scan; without the start filter, a cleanup delete races the comparator's repair and the delete-first write order wins.

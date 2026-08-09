@@ -22,6 +22,10 @@ listWorkingLocationEvents(calendarId, start, end) -> RawCalendarEvent[]
 // Ownership-filtered (privateExtendedProperty=dtp=1); used for the
 // window-shrink cleanup pass in technical design 7.6
 listGeneratedEventsBetween(calendarId, start, end) -> ObservedGeneratedEvent[]
+// Ownership + parent filtered, no time bounds; locates companions of an
+// overlong (SOURCE_TOO_LONG) source that fell outside the observation
+// range (technical design 15.2.6)
+listCompanionsByParent(calendarId, parentEventId) -> ObservedGeneratedEvent[]
 createGeneratedEvent(spec) -> RawCalendarEvent
 updateGeneratedEvent(observed, spec) -> RawCalendarEvent
 patchGeneratedEventMetadata(observed, privateProperties) -> RawCalendarEvent
@@ -30,7 +34,9 @@ deleteGeneratedEvent(observed) -> void   // conditional; see 16.5.1
 // Normalization and eligibility
 normalizeCalendarEvent(rawEvent) -> NormalizedEvent
 // Raw generated resources must be flattened before indexing or comparison;
-// the comparator and cache lookup consume this shape, not raw Calendar JSON
+// the comparator and cache lookup consume this shape, not raw Calendar JSON.
+// routeSecs: numeric only when the raw string is non-empty and entirely
+// numeric; everything else maps to null, never 0 (technical design 13.3)
 normalizeObservedGeneratedEvent(rawEvent) -> ObservedGeneratedEvent
 evaluateEligibility(event, directives, settings, window) -> EligibilityResult
 resolveOrigin(event, directives, settings, workingLocations) -> ResolvedOrigin
@@ -58,6 +64,8 @@ quantizeDuration(seconds) -> number
 calculateWindow(windowDays, now)
   -> { planStart: Date, planEnd: Date, observeStart: Date, observeEnd: Date }
 overlapsPlanningRange(event, window) -> boolean   // intersection, not start-containment
+// Stranded = start at or after the new horizon; a companion SPANNING the
+// boundary is visible to the ordinary read, which alone decides its fate
 findStrandedCompanions(window, settings) -> { shrunk, events }        // 7.6
 // engine lowers the high-water mark only after applyDiff confirms every
 // stranded delete succeeded, never on dry run
@@ -66,6 +74,10 @@ loadHighWater() / saveHighWater(observeEnd)                           // 7.6
 // Comparison helpers
 ownedFieldsMatch(observedFields, desiredSpec) -> boolean
 routeCacheNeedsPersisting(observed, freshRoute, now) -> boolean
+// Overlong-source cleanup gate (technical design 15.2.6): duration-keyed,
+// reason-agnostic; fires when either companion role is unobserved
+sourceExceedsDurationCap(event) -> boolean
+bothRolesObserved(observedByKey, parentEventId) -> boolean
 
 // Fingerprint and comparison
 fingerprintSpec(input) -> string
@@ -74,8 +86,16 @@ compareDesiredAndObserved(desiredSpecs, observedEvents, planningOutcomes, scanCo
 
 // Reconciliation
 runReconciliation(options) -> ReconciliationResult
+// Returns what Calendar ACCEPTED; run status is built from this, not from
+// the proposed diff (technical design 17.5, REQ-ERROR-006)
+applyDiff(diff) -> ApplyResult
+buildRunResult(diff, applied, options) -> ReconciliationResult   // applied null on dry run
 
 // Triggers
 ensureTriggers() -> TriggerHealth
 removeAutomation() -> CleanupResult
+// Manual sync enqueues -- card callbacks cannot fit a full reconcile
+// (technical design 19.5; one-off trigger, subject to Spike 1)
+onSynchronizeNow(e) -> ActionResponse
+runManualReconciliation(e) -> ReconciliationResult
 ```
