@@ -43,9 +43,13 @@ repos:
     hooks:
       # The Apps Script sources are plain JS in a shared global namespace, so
       # there is no build step to catch a syntax error before deployment.
+      #
+      # The loop is required. `node --check a.js b.js` checks only a.js and
+      # treats b.js as a script argument, so a bare `entry: node --check`
+      # exits 0 with a syntax error in any file but the first.
       - id: apps-script-syntax
         name: Apps Script syntax check
-        entry: node --check
+        entry: bash -c 'for f in "$@"; do node --check "$f" || exit 1; done' --
         language: system
         files: ^src/apps-script/.*\.js$
 

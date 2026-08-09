@@ -20,7 +20,7 @@
   "addOns": {
     "common": {
       "name": "Drivetime Padding",
-      "useLocaleFromApp": true,
+      "useLocaleFromApp": false,
       "homepageTrigger": {
         "runFunction": "buildHomeCard"
       }

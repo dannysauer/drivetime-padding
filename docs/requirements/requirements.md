@@ -250,6 +250,12 @@ Each origin shall support:
 
 The user shall be able to enable or disable working-location-based origin selection.
 
+### REQ-CONFIG-014a: No eligible source types
+
+Configuration in which `eligibility.includeOutOfOffice` is false and `eligibility.titlePatternEnabled` is false makes every source event ineligible.
+
+This shall not be treated as an error, but the UI shall surface it, since the resulting behavior is indistinguishable from a malfunction.
+
 ### REQ-CONFIG-014: Optional title pattern
 
 The user shall be able to enable an optional subject-matching pattern for non-OOO events.
@@ -277,6 +283,10 @@ The UI should provide a way to reset settings to defaults, with confirmation bef
 ### REQ-ELIG-001: Real OOO default
 
 A timed event with Calendar event type `outOfOffice` shall be eligible by default when all other required conditions are met.
+
+Eligibility by event type shall be governed by the `eligibility.includeOutOfOffice` setting. When that setting is false, a real OOO event shall not qualify on the strength of its event type alone, and the reason reported shall distinguish this from a failed title-pattern match.
+
+A settings field that no evaluation step consults is not a setting; it is a control that silently does nothing.
 
 ### REQ-ELIG-002: Pattern-based inclusion
 
@@ -338,6 +348,12 @@ If the API cannot reliably create the required event type, the implementation sh
 ### REQ-DEST-001: Location field only
 
 The destination shall come only from the source event's Calendar `location` field.
+
+### REQ-ELIG-012: Title matching uses the raw summary
+
+Title-pattern matching shall be performed against the source event's summary exactly as Calendar returned it.
+
+Any display fallback substituted for a blank summary shall not participate in eligibility, so that an event whose title was never set cannot be matched by a pattern that happens to match the fallback text.
 
 ### REQ-DEST-002: No description inference
 
@@ -712,7 +728,11 @@ The MVP shall use SHA-256 or an equivalently stable available hash.
 
 ### REQ-META-009: No-write match
 
-When desired and observed fingerprints match, reconciliation shall not update the generated event.
+When the desired and observed fingerprints match **and** the observed event's owned fields match the desired specification, reconciliation shall not update the generated event.
+
+A matching fingerprint alone is not sufficient grounds to skip a write. Calendar preserves private metadata through a user edit, so a moved, resized, or renamed generated event still carries a matching fingerprint while sitting in the wrong place. Skipping the write in that case would forbid the restoration REQ-GEN-014 and REQ-GEN-014a require.
+
+Refreshing an expired route cache entry is a metadata patch rather than an update, and is permitted under this requirement (REQ-PERF-014).
 
 ### REQ-META-010: Unknown metadata preservation
 
@@ -1137,6 +1157,12 @@ When the ceiling is exceeded the diagnostic card shall still report eligibility,
 A reconciliation run that stops at the per-run route ceiling shall schedule a continuation rather than deferring its remaining work to the next daily run.
 
 Consecutive continuations shall be capped and the cap reported in run status, so that a persistent failure cannot loop indefinitely.
+
+### REQ-PERF-015: Cache reachability
+
+The planning path shall have access to the route cache entries of the observed companions for the source event being planned, and to an injected clock.
+
+Cache entries live on generated events, which are matched to desired specifications only after planning. Unless observed companions are indexed before planning begins, no cache lookup is possible and REQ-PERF-009 and REQ-PERF-010 cannot be satisfied.
 
 ### REQ-PERF-014: Route cache persistence
 

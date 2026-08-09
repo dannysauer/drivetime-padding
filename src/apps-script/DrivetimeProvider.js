@@ -5,6 +5,18 @@
  * Returns a PlanningOutcome, never writes to Calendar (ADR 0014).
  */
 
+/**
+ * context carries the observed companions' route cache entries and an
+ * injected clock, not just the event and settings.
+ *
+ * Without them the cache is unreachable: it lives on the observed generated
+ * events, which the comparator matches to specs only AFTER planning. Every
+ * run would call the broker and the cost bound in ADR 0011 would be
+ * unimplementable. Technical Design section 12.1.1.
+ *
+ * The provider passes cache entries through and never inspects them --
+ * staleness is decided in RoutingClient so there is one place for the policy.
+ */
 function getGeneratedEventSpecs(context) {
   throw new Error('Not implemented: Technical Design section 12');
 }

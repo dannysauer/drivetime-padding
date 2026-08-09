@@ -30,8 +30,16 @@ evaluateEligibility(event, directives, settings, window) -> EligibilityResult
 resolveOrigin(event, directives, settings, workingLocations) -> ResolvedOrigin
 
 // Routing and provider
+// requestContext carries { role, cacheEntry, now, correlationId }; the client
+// consults the cache before the network and reports fromCache on the result.
 getRouteDuration(origin, destination, requestContext) -> RouteResult
 getGeneratedEventSpecs(context) -> PlanningOutcome
+
+// Context construction -- observed companions must be indexed before planning
+// so their route caches are reachable (technical design 12.1.1)
+indexByGeneratedKey(observedEvents) -> Map<string, ObservedGeneratedEvent>
+routeCacheFor(observedByKey, parentEventId)
+  -> { outbound: RouteCacheEntry|null, return: RouteCacheEntry|null }
 
 // Route plan cache (derived state, stored on generated events)
 routeInputHash(origin, destination, travelMode) -> string

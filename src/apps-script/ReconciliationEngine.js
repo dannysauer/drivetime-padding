@@ -75,3 +75,19 @@ function orderForPlanning_(events, now) {
 function compareDesiredAndObserved(desiredSpecs, observedEvents, planningOutcomes) {
   throw new Error('Not implemented: Technical Design section 15');
 }
+
+/**
+ * Index observed companions by parentEventId|role BEFORE planning.
+ *
+ * Ordering is load-bearing, not an optimization: route cache entries live on
+ * the observed companions, so unless they are resolved first the provider has
+ * nothing to consult and every run calls the broker.
+ * Technical Design section 12.1.1, REQ-PERF-015.
+ */
+function indexByGeneratedKey_(observedEvents) {
+  throw new Error('Not implemented: Technical Design section 12.1.1');
+}
+
+function routeCacheFor_(observedByKey, parentEventId) {
+  throw new Error('Not implemented: Technical Design section 12.1.1');
+}

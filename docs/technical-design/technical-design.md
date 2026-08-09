@@ -136,7 +136,10 @@ interface NormalizedEvent {
   iCalUID: string | null;
   recurringEventId: string | null;
   originalStartTime: string | null;
+  /** Raw Calendar summary, possibly empty. Eligibility matches on this. */
   summary: string;
+  /** summary, or "Untitled event" when blank. Display only. See 8.3. */
+  displaySummary: string;
   description: string;
   location: string;
   /** Null for cancelled tombstones, which may omit both. See 8.2. */
@@ -188,6 +191,7 @@ MISSING_LOCATION
 DISABLED_BY_DIRECTIVE
 UNSUPPORTED_EVENT_TYPE
 SOURCE_TOO_LONG
+OUT_OF_OFFICE_DISABLED
 TITLE_PATTERN_DISABLED
 TITLE_PATTERN_NO_MATCH
 INVALID_TITLE_PATTERN
@@ -209,8 +213,10 @@ interface ResolvedOrigin {
 
 ```typescript
 interface RouteResult {
-  durationSeconds: number;
+  durationSeconds: number;      // raw broker seconds, unquantized
   distanceMeters: number | null;
+  /** False when this came from the broker and needs persisting. See 11.1. */
+  fromCache: boolean;
 }
 ```
 
@@ -621,15 +627,20 @@ All-day events use `start.date` and `end.date` and set `isAllDay: true`.
 
 The normalizer must not invent a timezone offset. It should retain Calendar-provided ISO strings.
 
-### 8.3 Summary fallback
+### 8.3 Summary and display fallback
 
-If summary is absent or blank, use:
+`NormalizedEvent` carries **two** summary fields:
 
-```text
-Untitled event
-```
+| Field | Value | Used by |
+|---|---|---|
+| `summary` | the raw Calendar summary, possibly empty | title-pattern eligibility, and nothing else |
+| `displaySummary` | `summary`, or `Untitled event` when blank | generated event subjects, diagnostics |
 
-This is only for generated subject display and diagnostics.
+The split is not cosmetic. Substituting the fallback into `summary` would make a blank-titled event match any configured pattern that happens to match `Untitled event` — including a broad pattern like `.*` — and generate travel blocks for an event whose title never contained that text. The earlier wording said the fallback was "only for display," but with a single field there was no way for an implementation to honor that, since eligibility consumes the same normalized object.
+
+Eligibility matches against `summary` exactly as Calendar returned it. A blank summary simply does not match a pattern unless the pattern matches the empty string.
+
+The fingerprint uses the generated subject, which derives from `displaySummary`, so a blank-titled eligible event still produces a stable fingerprint.
 
 ### 8.4 Location normalization
 
@@ -664,9 +675,13 @@ Order matters because diagnostics should return the most useful reason.
 6. timed event longer than `MAX_SOURCE_DURATION_MINUTES`;
 7. missing location;
 8. disabled by directive;
-9. real OOO event accepted;
+9. real OOO event accepted **when `eligibility.includeOutOfOffice` is true**;
 10. optional title pattern accepted;
 11. otherwise reject.
+
+Step 9 must consult the setting. It is a user-facing toggle in the persisted schema, so accepting every OOO event regardless would mean a user who switches it off sees no change and their companions keep being maintained. A real OOO event rejected because the toggle is off reports `OUT_OF_OFFICE_DISABLED`, which is distinct from `TITLE_PATTERN_NO_MATCH` so the diagnostic card can say which control is responsible.
+
+A real OOO event may still qualify at step 10 through the title pattern; the toggle governs only automatic OOO inclusion, not the event type.
 
 Steps 1–3 must not read timestamps. Everything from step 4 onward may.
 
@@ -728,7 +743,27 @@ function getRouteDuration(origin, destination, requestContext)
   -> RouteResult
 ```
 
-`requestContext` may contain an opaque correlation ID but no calendar title or description.
+`requestContext` is a `RouteRequestContext` (§12.1): role, the observed cache entry for that role, the injected clock, and an optional opaque correlation ID. It carries no calendar title, description, or attendee data.
+
+The client consults the cache before the network:
+
+```text
+cachedRouteIsUsable_(requestContext.cacheEntry, expectedHash, requestContext.now)
+  -> reuse the cached duration, no broker call
+  -> otherwise call the broker and return a result marked for persistence
+```
+
+Cache policy lives here rather than in the provider, so there is exactly one place that decides whether an entry is stale. `RouteResult` therefore reports its own provenance:
+
+```typescript
+interface RouteResult {
+  durationSeconds: number;      // raw, unquantized
+  distanceMeters: number | null;
+  fromCache: boolean;           // false when the broker was called
+}
+```
+
+`fromCache` is what lets the engine decide between a metadata patch and no write at all (§15.2.2), and what the tests in §24.3 assert against when checking that an unchanged run makes zero broker calls.
 
 ### 11.2 Request timeout and retries
 
@@ -774,11 +809,50 @@ interface DrivetimeContext {
   settings: UserSettings;
   directives: ParsedDirectives;
   origin: ResolvedOrigin;
+  /** Injected clock. Cache age is time-dependent; tests must control it. */
+  now: Date;
+  /**
+   * Route cache entries from the observed companions for this source,
+   * keyed by role. Null when no companion exists yet. See 12.1.1.
+   */
+  observedRouteCache: {
+    outbound: RouteCacheEntry | null;
+    return: RouteCacheEntry | null;
+  };
   routingClient: {
     getRouteDuration(origin, destination, requestContext): RouteResult;
   };
 }
+
+interface RouteCacheEntry {
+  routeHash: string | null;
+  routeSecs: number | null;
+  routeAt: string | null;
+}
 ```
+
+The `requestContext` passed to `getRouteDuration` carries the cache entry and clock through to the routing client:
+
+```typescript
+interface RouteRequestContext {
+  role: "outbound" | "return";
+  cacheEntry: RouteCacheEntry | null;
+  now: Date;
+  correlationId?: string;
+}
+```
+
+#### 12.1.1 Why the cache reaches the provider at all
+
+Without these fields the cache is unreachable and the cost bound is unimplementable.
+
+The cache lives in the observed companion's private metadata (§13.3), but the provider runs *before* the comparator matches specs to observed events — so under a context of `{event, settings, directives, origin, routingClient}` alone, nothing in the planning path can see a cache entry. Every reconciliation would call the broker, defeating ADR 0011, REQ-PERF-009, and REQ-PERF-010 while the documents still claimed a bound.
+
+The engine therefore resolves observed companions by `parentEventId|role` *before* planning and passes their cache entries down. That ordering is not an optimization; it is what makes the cache exist.
+
+**Cache policy stays in the routing client.** The provider passes the entry through and never inspects it: `cachedRouteIsUsable_` and the reuse rule live in `RoutingClient` (§13.3), so there is one place where staleness is decided. This preserves ADR 0014 — the provider computes desired state and knows nothing about infrastructure — while giving the routing layer the data it needs.
+
+`now` is injected rather than read from the clock so that cache-age behavior is deterministic under test (§17.1, §24.1).
 
 ### 12.2 Effective buffer
 
@@ -864,14 +938,16 @@ The exact Calendar API write contract for OOO events must be validated in a prot
 Outbound:
 
 ```text
-<prefix> Travel to <source summary>
+<prefix> Travel to <source displaySummary>
 ```
 
 Return:
 
 ```text
-<prefix> Return from <source summary>
+<prefix> Return from <source displaySummary>
 ```
+
+Uses `displaySummary`, not `summary` (§8.3), so a blank-titled source produces a readable subject rather than a dangling preposition.
 
 Summary generation must be deterministic because it contributes to the fingerprint.
 

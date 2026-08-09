@@ -40,6 +40,7 @@ Questions:
 3. Is `calendar.events` sufficient, or is the broader `calendar` scope actually required?
 4. Which scope do working-location reads require?
 5. What is the realistic verification timeline for the resulting set?
+6. Does the product need host locale? If so, `script.locale` joins the set and `useLocaleFromApp` can be re-enabled; it is currently `false` precisely to avoid declaring that scope ahead of the decision.
 
 **Exit:** a scope set written into the manifest, ADR 0013 moved to Accepted, and a verification timeline in the plan.
 

@@ -386,6 +386,46 @@ A start-time containment test would fail this scenario, and because ineligibilit
 **Then** the return block is updated  
 **And** the outbound block is **not** written, because its fingerprint does not include the source end.
 
+## AC-ELIG-007: Out of Office inclusion disabled
+
+**Given** an otherwise eligible real OOO event with a location  
+**And** `eligibility.includeOutOfOffice` is false  
+**And** title-pattern matching is disabled  
+**When** reconciliation runs  
+**Then** the reason is `OUT_OF_OFFICE_DISABLED`, not `TITLE_PATTERN_NO_MATCH`  
+**And** no generated events are created  
+**And** any existing companions for that source are deleted, because the source is ineligible rather than failed.
+
+**Given** the same event  
+**And** title-pattern matching is enabled with a pattern its title matches  
+**When** reconciliation runs  
+**Then** the event qualifies through the pattern  
+**And** ordinary generated events are produced, since the toggle governs automatic OOO inclusion rather than the event type.
+
+## AC-ELIG-008: Blank summary does not match a broad pattern
+
+**Given** a timed OOO event with a location and an empty summary  
+**And** title-pattern matching is enabled with a pattern that matches the text `Untitled event`  
+**When** eligibility is evaluated  
+**Then** matching is performed against the raw empty summary  
+**And** the event does not qualify through the pattern.
+
+**Given** the same event qualifying through its OOO event type instead  
+**When** generated events are produced  
+**Then** their subjects use the display fallback  
+**And** read `[Drivetime Padding] Travel to Untitled event`.
+
+## AC-CACHE-009: Provider can reach the observed cache
+
+**Given** a source event whose companions carry valid `routeHash`, `routeSecs`, and `routeAt`  
+**When** reconciliation plans that source  
+**Then** the planning context receives those cache entries keyed by role  
+**And** the routing client reuses them  
+**And** zero broker calls are made  
+**And** each `RouteResult` reports `fromCache: true`.
+
+This scenario exists because the cache is only reachable if observed companions are indexed before planning. An implementation that builds the provider context from the source event alone passes every other cache scenario in this document while calling the broker on every run.
+
 ## AC-CACHE-005: Buffer change costs no broker calls
 
 **Given** eligible events with valid route cache entries  

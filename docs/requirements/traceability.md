@@ -52,3 +52,13 @@ This matrix links requirement groups to architecture components, technical-desig
 | REQ-TIME-012 | Maximum supported travel | AC-OOO-008 |
 | REQ-TIME-013 | Daily maintenance hour | — pending Spike 1 |
 | REQ-SEC-002a | Scope selection as an architectural decision | — pending Spike 2 |
+
+## Requirements added in the third review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| REQ-PERF-015 | Cache reachability from the planning path | AC-CACHE-009 |
+| REQ-ELIG-001 (extended) | `includeOutOfOffice` actually governs eligibility | AC-ELIG-007 |
+| REQ-ELIG-012 | Title matching uses the raw summary | AC-ELIG-008 |
+| REQ-CONFIG-014a | No eligible source types is surfaced, not silent | — UI |
+| REQ-META-009 (narrowed) | Fingerprint match alone does not license skipping a write | AC-RECOVERY-002a |

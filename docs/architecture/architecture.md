@@ -716,6 +716,12 @@ function reconcile(options) {
     const observedGenerated = allEvents.filter(isGeneratedEvent);
     const sourceEvents = allEvents.filter(event => !isGeneratedEvent(event));
 
+    // Index observed companions by parentEventId|role BEFORE planning, so
+    // their route cache entries are reachable from the provider context.
+    // Without this the cache cannot be consulted and every run calls the
+    // broker (ADR 0011, Technical Design 12.1.1).
+    const observedByKey = indexByGeneratedKey(observedGenerated);
+
     const desiredSpecs = [];
 
     for (const rawEvent of sourceEvents) {
@@ -731,7 +737,9 @@ function reconcile(options) {
         event,
         directives,
         settings,
-        window
+        window,
+        options.now,
+        routeCacheFor(observedByKey, event.id)
       );
 
       desiredSpecs.push(
@@ -1036,6 +1044,10 @@ Two points of care while it is open:
 - Google classifies OAuth scopes as basic, sensitive, or restricted. The restricted tier requires a third-party security assessment with annual renewal; the sensitive tier requires OAuth verification but no paid assessment. Calendar scopes are believed to be **sensitive** rather than restricted, but this has not been confirmed against Google's current published list and must be before any budget or scope conclusion is drawn.
 - No scope may be added speculatively to support an undecided mechanism. In particular `openid` must not appear in the manifest until broker authentication is chosen (§19.5).
 
+Manifest flags that carry a scope requirement are subject to the same rule. `addOns.common.useLocaleFromApp` requires `https://www.googleapis.com/auth/script.locale` in order to supply host locale and timezone in add-on event objects; the flag is therefore set to `false` rather than declaring a scope the product does not yet need. Nothing in the MVP consumes host locale — the daily trigger derives the user's timezone from their Calendar (Technical Design §19.2), not from the add-on event object.
+
+If a later requirement needs host locale, `script.locale` joins the scope set as part of the Spike 2 decision rather than being added ahead of it.
+
 ### 20.2 Maps credentials
 
 Maps credentials belong in Secret Manager and are available only to the Cloud Run service account.
@@ -1105,15 +1117,26 @@ Two ranges are therefore defined:
 planStart    = now - COMPANION_SPAN
 planEnd      = now + windowDays
 
-observeStart = planStart - COMPANION_SPAN
-observeEnd   = planEnd + MAX_SOURCE_DURATION + COMPANION_SPAN
+observeStart = planStart - OBSERVE_MARGIN
+observeEnd   = planEnd   + OBSERVE_MARGIN
 ```
 
 ```text
-COMPANION_SPAN = MAX_TRAVEL_MINUTES + maxBufferMinutes = 360 + 120 = 480  (8 hours)
+COMPANION_SPAN = MAX_TRAVEL_MINUTES + maxBufferMinutes  = 360 + 120  =  480  (8 hours)
+OBSERVE_MARGIN = MAX_SOURCE_DURATION + COMPANION_SPAN   = 1440 + 480 = 1920  (32 hours)
 ```
 
-Source events are planned when their start falls in `[planStart, planEnd)`. Every companion of such a source is then provably inside the observation range — see Technical Design §7.2 for the derivation.
+A source event is planned when it **overlaps** the planning range:
+
+```text
+source.end > planStart  AND  source.start < planEnd
+```
+
+Overlap, not start-containment. A source that began before `planStart` but is still running still needs its return block, and because ineligibility carries deletion authority, testing the start alone would delete that block mid-appointment.
+
+The observation margin is symmetric for the same reason: a long source event reaches backward past `planStart` exactly as it reaches forward past `planEnd`.
+
+Every companion of a planned source is then provably inside the observation range — see Technical Design §7.2 for the derivation.
 
 Source events that have already started are still planned, because their return blocks remain in the future and are still required; excluding them would make those return blocks look like orphans and delete them mid-appointment.
 
