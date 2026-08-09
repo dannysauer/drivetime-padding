@@ -1,5 +1,18 @@
 # Contributing
 
+## Setup
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+The same hooks run in CI via `pre-commit run --all-files`, so anything that passes locally passes there. Add new checks to `.pre-commit-config.yaml` rather than to the workflow — the workflow deliberately contains no checks of its own.
+
+Today the hooks cover file hygiene, Markdown linting, Apps Script syntax, and the manifest-matches-docs invariant. A JavaScript linter and formatter following Google's JavaScript style guide will be added when implementation starts.
+
+## Working here
+
 1. Read the [architecture](docs/architecture/architecture.md) and [technical design](docs/technical-design/technical-design.md).
 2. Check [open questions](docs/open-questions.md) — some sections are blocked on prototype spikes.
 3. Update documentation before changing behavior.

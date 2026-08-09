@@ -320,6 +320,72 @@ The final assertion is the point of the scenario. Classifying this as `unchanged
 **And** no broker call is made  
 **And** the card reports that timing is temporarily unavailable.
 
+## AC-OOO-010: Long-running in-progress source
+
+**Given** a timed OOO source event running 01:00–18:00 with matching generated events  
+**And** the current time is 12:00, so the source started before the 8-hour lookback  
+**When** reconciliation runs  
+**Then** the source is planned, because it overlaps the planning range  
+**And** it is **not** reported `OUTSIDE_WINDOW`  
+**And** its return block at 18:00 is preserved rather than deleted as ineligible.
+
+A start-time containment test would fail this scenario, and because ineligibility carries deletion authority the failure would delete a needed return block mid-appointment.
+
+## AC-REC-006: Cancelled tombstone without timestamps
+
+**Given** a cancelled recurring instance returned by `showDeleted: true`  
+**And** the tombstone carries only identity, recurrence linkage, and original start — no `start` or `end`  
+**When** eligibility is evaluated  
+**Then** cancellation is recognized before any timestamp is read  
+**And** normalization does not throw on the missing values  
+**And** the reason is `CANCELLED_EVENT`, granting deletion authority  
+**And** the instance's companions are deleted.
+
+## AC-RECOVERY-006: Source moved outside the observation range
+
+**Given** generated events whose source has been moved far beyond `observeEnd`  
+**And** the scan completes successfully  
+**When** reconciliation runs  
+**Then** the companions are treated as orphaned and deleted  
+**And** they are not preserved indefinitely on the grounds that their parent was not evaluated.
+
+**Given** the same state but a scan truncated by pagination failure or execution budget  
+**When** reconciliation runs  
+**Then** the companions are preserved  
+**And** the run records `scanComplete: false`.
+
+## AC-RECOVERY-007: Marker removed between read and write
+
+**Given** a generated event queued for deletion  
+**And** a concurrent client removes its `dtp` marker after the read but before the write  
+**When** the diff is applied  
+**Then** the delete does not remove the event  
+**And** the run records the conflict rather than silently succeeding.
+
+## AC-CACHE-007: Corrupt cached duration is not trusted
+
+**Given** a generated event whose `routeHash` matches and whose `routeAt` is fresh  
+**And** whose `routeSecs` holds a negative, non-numeric, or non-integer value  
+**When** reconciliation runs  
+**Then** the entry is treated as absent  
+**And** the broker is called  
+**And** no companion time is derived from the corrupt value.
+
+## AC-CACHE-008: Diagnostics warm an ephemeral cache
+
+**Given** an eligible event with no generated events yet  
+**When** the diagnostic card is opened twice within the ephemeral cache TTL  
+**Then** the first open calls the broker and writes the ephemeral cache  
+**And** the second open makes no broker call  
+**And** neither open creates a Calendar event.
+
+## AC-OOO-011: Extending only the source end
+
+**Given** a source event with matching outbound and return blocks  
+**When** the user extends only the source end time  
+**Then** the return block is updated  
+**And** the outbound block is **not** written, because its fingerprint does not include the source end.
+
 ## AC-CACHE-005: Buffer change costs no broker calls
 
 **Given** eligible events with valid route cache entries  

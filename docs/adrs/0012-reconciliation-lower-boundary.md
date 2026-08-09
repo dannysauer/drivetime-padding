@@ -28,7 +28,28 @@ observeStart = planStart - COMPANION_SPAN
 observeEnd   = planEnd + MAX_SOURCE_DURATION + COMPANION_SPAN
 ```
 
-Source events are planned by start time within `[planStart, planEnd)`; generated events are read over the observation range. Technical Design §7.2 carries the completeness derivation showing every companion of a planned source falls inside it.
+Generated events are read over the observation range. Technical Design §7.2 carries the completeness derivation showing every companion of a planned source falls inside it.
+
+## Amendment 2: planning eligibility is intersection
+
+The first amendment specified planning by source **start time** within `[planStart, planEnd)`. Review found that this excludes a long-running source that began before the lookback but is still in progress — at noon, an 01:00–18:00 event — and because ineligibility carries deletion authority, its still-needed return block would be deleted mid-appointment.
+
+Planning eligibility is therefore temporal **intersection**, which is what REQ-ELIG-007 specified all along:
+
+```text
+source.end > planStart  AND  source.start < planEnd
+```
+
+The observation margin becomes symmetric as a result, since a long source can now reach backward past `planStart` exactly as it reaches forward past `planEnd`:
+
+```text
+OBSERVE_MARGIN = MAX_SOURCE_DURATION + COMPANION_SPAN = 1920 minutes (32 hours)
+
+observeStart = planStart - OBSERVE_MARGIN
+observeEnd   = planEnd   + OBSERVE_MARGIN
+```
+
+Three revisions to reach a correct window is itself the lesson: each earlier version fixed the asymmetry that had been noticed rather than the one that existed. The completeness derivation in §7.2 exists so the next change is checked against a proof instead of an example.
 
 ## Dependency
 

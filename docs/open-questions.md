@@ -54,6 +54,10 @@ Questions:
 | 3 | Whether explicit reminder suppression behaves consistently on OOO events | TD §16.3 |
 | 4 | Whether `showDeleted` + `singleEvents` is sufficient to detect all cancelled recurring instances | TD §7.3, AC-REC-003 |
 | 5 | Whether extended properties survive on OOO events as they do on ordinary events | ADR 0009 — safety-critical |
+| 6 | Whether the Advanced Calendar service can send `If-Match` for conditional delete and patch | TD §16.5.1 — safety-critical |
+| 7 | Exactly which fields a cancelled recurring tombstone carries when `showDeleted: true` | TD §8.2, §9.2 |
+
+Item 6 decides whether the deletion-safety boundary can be enforced atomically or only narrowed. If conditional delete is unavailable, the fallback — re-read and re-verify immediately before deleting — leaves a small residual race that must be documented rather than assumed away.
 
 Item 5 is the one to test first. If OOO events cannot carry private extended properties, the deletion-safety boundary in ADR 0009 does not hold for the product's primary event type, and the design changes materially.
 

@@ -175,6 +175,8 @@ The MVP shall manage only the authenticated user's primary calendar.
 
 The product shall provide a documented method to remove generated events. Cleanup may be exposed before uninstall, through a dedicated add-on action, or through a documented reinstallation workflow if Marketplace uninstall hooks are insufficient.
 
+Published documentation shall not state or imply that uninstalling removes generated events. It shall state that cleanup must be run before uninstalling, and shall document the reinstall-and-clean recovery path for users who uninstall first.
+
 ### REQ-INSTALL-006: Trigger ownership
 
 Installable triggers shall be created under the installing user's authorization context.
@@ -447,6 +449,8 @@ The reconciliation read window shall extend backward from the current time by at
 
 Source events that have already started shall continue to be planned while any part of their padding remains in the future. They shall not be excluded from desired state, because doing so would orphan and delete their still-required return blocks.
 
+Planning eligibility shall be determined by temporal intersection with the planning range, not by source start time alone. A source that began before the lookback but is still running remains eligible.
+
 ### REQ-TIME-014: Observation range completeness
 
 The range used to read generated events shall be wide enough that every companion event of every planned source event is observed.
@@ -658,6 +662,8 @@ If a managed generated event is manually moved, resized, or renamed, a later rec
 
 An event with no recognizable Drivetime Padding metadata shall not be deleted based only on its title.
 
+Deletion shall verify the ownership marker at the moment of deletion, not only at the moment the event was read. Concurrent Calendar edits are not serialized by the add-on's own locking, so an event may lose its marker between read and write.
+
 ### REQ-GEN-016: Cleanup when ineligible
 
 When a previously eligible source becomes definitively ineligible, its managed generated events shall be deleted.
@@ -689,6 +695,8 @@ Generated metadata shall include the generated-event role.
 ### REQ-META-005: Fingerprint
 
 Generated metadata shall include a deterministic fingerprint of all inputs that affect generated Calendar state.
+
+Fingerprint inputs shall be role-specific. A fingerprint shall not include a source boundary that cannot affect the companion it identifies, because doing so would force writes to events that are already correct and violate REQ-RECON-007.
 
 ### REQ-META-006: Optional recurrence diagnostics
 
@@ -785,6 +793,10 @@ The system shall rely on later reconciliation to repair partial writes rather th
 ### REQ-RECON-009: Orphan cleanup
 
 Managed generated events with no desired eligible source shall be deleted, except when desired-state planning for the source failed transiently.
+
+A generated event whose source event is absent from a **complete** scan shall be treated as orphaned and deleted. A generated event whose source is absent from an **incomplete** scan shall be preserved, because an incomplete scan establishes only that the source was not reached, not that it is gone.
+
+Preservation shall not be extended to every unevaluated parent. Doing so would strand generated events whose source moved outside the read range, leaving stale travel blocks that age out of view without ever being removed.
 
 ### REQ-RECON-010: Dry-run support
 

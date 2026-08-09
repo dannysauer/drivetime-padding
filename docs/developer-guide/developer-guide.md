@@ -22,10 +22,10 @@ Before writing implementation code, read [`../open-questions.md`](../open-questi
 4. Enable the Calendar API.
 5. Copy `src/apps-script/appsscript.json` into the Apps Script project, or push with `clasp`.
 
-Steps 6 and 7 are only needed from implementation phase 5 onward — phases 1 through 4 use a fixed travel duration and never call the broker:
+The broker setup below is only needed from implementation phase 5 onward — phases 1 through 4 use a fixed travel duration and never call the broker:
 
-6. Deploy the Cloud Run routing broker.
-7. Configure Secret Manager for Maps credentials.
+1. Deploy the Cloud Run routing broker.
+2. Configure Secret Manager for Maps credentials.
 
 `.clasp.json` is gitignored. Create your own with the script ID of your development deployment; never commit it.
 
@@ -47,21 +47,27 @@ Steps 6 and 7 are only needed from implementation phase 5 onward — phases 1 th
 ## Apps Script Modules
 
 ### ReconciliationEngine
+
 Owns synchronization.
 
 ### CalendarRepository
+
 Owns Calendar API interaction.
 
 ### DrivetimeProvider
+
 Produces GeneratedEventSpec objects.
 
 ### RoutingClient
+
 Communicates with the routing broker.
 
 ### Settings
+
 Loads, validates, and migrates user configuration.
 
 ### UI
+
 Builds CardService cards only.
 
 ## Development Workflow
@@ -76,17 +82,20 @@ Builds CardService cards only.
 ## Testing
 
 Unit:
+
 - directives
 - eligibility
 - fingerprints
 - settings
 
 Integration:
+
 - reconciliation
 - recurring exceptions
 - generated event lifecycle
 
 End-to-end:
+
 - install
 - configure
 - create OOO
@@ -97,18 +106,24 @@ End-to-end:
 
 ## CI
 
-`.github/workflows/validate.yml` currently runs:
+CI runs `pre-commit run --all-files` and nothing else. The workflow holds no checks of its own, so local hooks and CI cannot drift apart.
 
-- JSON validation across all tracked JSON files
-- `node --check` on every Apps Script source file
-- a diff asserting `src/apps-script/appsscript.json` matches the documented manifest example
-- trailing-whitespace and conflict-marker checks
+`.pre-commit-config.yaml` currently covers:
 
-Add unit tests to CI as soon as the first pure module lands. No step should be allowed to pass unconditionally.
+- file hygiene — trailing whitespace, end-of-file, line endings, merge conflicts, case conflicts, large files
+- JSON and YAML validity, with JSON reformatted to a canonical 2-space form
+- Markdown linting via `markdownlint-cli2`, configured in `.markdownlint-cli2.yaml`
+- `node --check` on every Apps Script source file, since there is no build step to catch a syntax error before deployment
+- a diff asserting `src/apps-script/appsscript.json` matches the documented manifest example, so the architecture cannot become quietly wrong about the add-on's OAuth scopes
+
+Two rules for adding to it: put the check in `.pre-commit-config.yaml`, and never let a step pass unconditionally. An earlier version of this workflow ended its only real step with `|| true`, which made a green check meaningless.
+
+Add unit tests as soon as the first pure module lands. Markdown line-length (`MD013`) and table-column-style (`MD060`) are disabled deliberately — see the comments in `.markdownlint-cli2.yaml`.
 
 ## Marketplace Release
 
 Checklist:
+
 - Privacy Policy
 - OAuth verification
 - Screenshots
@@ -119,6 +134,7 @@ Checklist:
 ## Troubleshooting
 
 Symptoms:
+
 - Missing trigger
 - OAuth revoked
 - Invalid route
@@ -129,6 +145,7 @@ The Home card should surface trigger health and last synchronization status.
 ## Future Contributors
 
 Before introducing a new provider:
+
 1. Update architecture.
 2. Add ADR if architecture changes.
 3. Add requirements.

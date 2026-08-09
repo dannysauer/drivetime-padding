@@ -139,8 +139,9 @@ interface NormalizedEvent {
   summary: string;
   description: string;
   location: string;
-  start: string;
-  end: string;
+  /** Null for cancelled tombstones, which may omit both. See 8.2. */
+  start: string | null;
+  end: string | null;
   timeZone: string | null;
   eventType: string;
   transparency: "opaque" | "transparent" | null;
@@ -486,21 +487,35 @@ const COMPANION_SPAN_MINUTES =
 
 const RECONCILIATION_LOOKBACK_MINUTES = COMPANION_SPAN_MINUTES;
 
+// How far the observation range extends beyond the planning range at each end.
+const OBSERVE_MARGIN_MINUTES =
+  MAX_SOURCE_DURATION_MINUTES + COMPANION_SPAN_MINUTES;  // 1920 minutes / 32 hours
+
 function calculateWindow(windowDays, now) {
   const planStart = now.getTime() - RECONCILIATION_LOOKBACK_MINUTES * 60000;
   const planEnd = now.getTime() + windowDays * 86400000;
+  const margin = OBSERVE_MARGIN_MINUTES * 60000;
 
   return {
     planStart: new Date(planStart),
     planEnd: new Date(planEnd),
-    observeStart: new Date(planStart - COMPANION_SPAN_MINUTES * 60000),
-    observeEnd: new Date(
-      planEnd +
-        (MAX_SOURCE_DURATION_MINUTES + COMPANION_SPAN_MINUTES) * 60000
-    ),
+    observeStart: new Date(planStart - margin),
+    observeEnd: new Date(planEnd + margin),
   };
 }
 ```
+
+#### Planning eligibility is temporal intersection
+
+A source event is planned when it **overlaps** the planning range:
+
+```text
+source.end > planStart  AND  source.start < planEnd
+```
+
+Not when its start falls inside the range. The difference matters for long-running events: at noon, a source running 01:00–18:00 started nine hours ago, outside an eight-hour lookback, but its return block at 18:00 is still in the future and still required. A start-time test would mark it `OUTSIDE_WINDOW`, and since ineligibility carries deletion authority (§15.2), its return block would be deleted while the appointment is still running.
+
+Intersection is also what REQ-ELIG-007 has always specified.
 
 #### Why each bound is what it is
 
@@ -514,22 +529,29 @@ Neither case is caught by duplicate convergence (§13.5), because the duplicates
 
 #### Completeness
 
-A source is planned when `planStart <= source.start < planEnd`. For any such source, both companions lie inside the observation range:
+For any source overlapping the planning range, with duration bounded by `MAX_SOURCE_DURATION`, both companions lie inside the observation range:
 
 ```text
+source.start   >  source.end - MAX_SOURCE_DURATION
+               >  planStart - MAX_SOURCE_DURATION
+
 outbound.start >= source.start - COMPANION_SPAN
-               >= planStart - COMPANION_SPAN
+               >  planStart - MAX_SOURCE_DURATION - COMPANION_SPAN
+               =  planStart - OBSERVE_MARGIN
                =  observeStart                              ✓
 
+source.end     <  source.start + MAX_SOURCE_DURATION
+               <  planEnd + MAX_SOURCE_DURATION
+
 return.end     <= source.end + COMPANION_SPAN
-               <= source.start + MAX_SOURCE_DURATION + COMPANION_SPAN
                <  planEnd + MAX_SOURCE_DURATION + COMPANION_SPAN
+               =  planEnd + OBSERVE_MARGIN
                =  observeEnd                                ✓
 ```
 
-The `MAX_SOURCE_DURATION_MINUTES` term is what makes the far-edge bound provable rather than approximate. It is also why timed source events longer than 24 hours are ineligible (`SOURCE_TOO_LONG`) — without that cap the observation range would be unbounded.
+The margin is symmetric because the failure is symmetric: a long source can reach backward past `planStart` just as it can reach forward past `planEnd`.
 
-Source events that have already started are still planned: their return blocks are in the future and still required, and dropping them from desired state would orphan-delete those blocks mid-appointment.
+`MAX_SOURCE_DURATION_MINUTES` is what makes both bounds provable rather than approximate. It is also why timed source events longer than 24 hours are ineligible (`SOURCE_TOO_LONG`) — without that cap the observation range would be unbounded in both directions.
 
 #### 7.2.1 Event listing request
 
@@ -545,7 +567,9 @@ Use Advanced Calendar service `Calendar.Events.list` with:
 }
 ```
 
-One call covers both ranges. Read over the **observation** range, then apply the planning range when deciding which source events to evaluate — a source outside `[planStart, planEnd)` is reported `OUTSIDE_WINDOW`.
+One call covers both ranges. Read over the **observation** range, then apply the planning range when deciding which source events to evaluate — a source that does not overlap `[planStart, planEnd)` is reported `OUTSIDE_WINDOW`.
+
+The scan must be driven to completion. Whether every page was retrieved determines if an unmatched companion can safely be treated as an orphan (§15.2.3), so the repository reports scan completeness alongside the events.
 
 Pagination must be supported using `nextPageToken`.
 
@@ -593,6 +617,8 @@ Timed events use `start.dateTime` and `end.dateTime`.
 
 All-day events use `start.date` and `end.date` and set `isAllDay: true`.
 
+**Cancelled tombstones may have neither.** When `showDeleted: true` returns a cancelled instance, Calendar may supply only `id`, `status`, `recurringEventId`, and `originalStartTime`. `NormalizedEvent.start` and `.end` are therefore nullable, and normalization must not throw on their absence. Eligibility recognizes cancellation before it reads any timestamp (§9.2).
+
 The normalizer must not invent a timezone offset. It should retain Calendar-provided ISO strings.
 
 ### 8.3 Summary fallback
@@ -631,9 +657,9 @@ function evaluateEligibility(event, directives, settings, window)
 Order matters because diagnostics should return the most useful reason.
 
 1. globally disabled;
-2. outside planning window;
-3. generated event;
-4. cancelled event;
+2. generated event;
+3. **cancelled event**;
+4. outside planning window;
 5. all-day event;
 6. timed event longer than `MAX_SOURCE_DURATION_MINUTES`;
 7. missing location;
@@ -642,7 +668,13 @@ Order matters because diagnostics should return the most useful reason.
 10. optional title pattern accepted;
 11. otherwise reject.
 
-Step 2 uses the **planning** range, not the observation range (§7.2). Step 6 is what keeps the observation range bounded.
+Steps 1–3 must not read timestamps. Everything from step 4 onward may.
+
+That ordering is a correctness constraint, not a preference. With `showDeleted: true` the listing includes cancelled tombstones, and a cancelled instance may carry only its identity, recurrence linkage, and original start — `start` and `end` can be absent entirely. A window check placed ahead of the cancellation check would therefore throw or misclassify on exactly the events whose companions most need deleting, leaving orphaned travel blocks behind and breaking AC-REC-003.
+
+A cancelled tombstone needs no timestamps to do its job: it yields empty desired state, and its companions are matched by parent ID.
+
+Step 4 uses the **planning** range as a temporal intersection, not the observation range (§7.2). Step 6 is what keeps the observation range bounded.
 
 ### 9.3 Title pattern
 
@@ -910,10 +942,23 @@ It also excludes the buffer: the buffer is applied after routing and is already 
 function cachedRouteIsUsable_(meta, expectedHash, now) {
   if (!meta.routeHash || meta.routeHash !== expectedHash) return false;
   if (!meta.routeAt || !meta.routeSecs) return false;
+
+  // Cached durations get the same validation as broker responses (11.3).
+  // Extended properties are strings and externally writable, so a corrupted
+  // entry could otherwise inject a negative or non-finite duration and
+  // produce invalid companion times.
+  const seconds = Number(meta.routeSecs);
+  if (!Number.isFinite(seconds) || !Number.isInteger(seconds) || seconds < 0) {
+    return false;
+  }
+
   const ageMs = now.getTime() - Date.parse(meta.routeAt);
+  if (!Number.isFinite(ageMs)) return false;
   return ageMs >= 0 && ageMs < ROUTE_CACHE_MAX_AGE_HOURS * 3600000;
 }
 ```
+
+A cache entry that fails any of these checks is treated as absent: the broker is called and the entry rewritten. Discarding a corrupt entry is always safe, which is the whole point of ADR 0011 — but only if the corrupt entry is never trusted in the first place. Cached durations must clear the same bar as fresh broker responses (§11.3), because an unvalidated cache read is a path around that validation.
 
 ```javascript
 const ROUTE_CACHE_MAX_AGE_HOURS = 24;
@@ -972,8 +1017,7 @@ If duplicate observed events share the same key, retain one canonical event and 
   "schema": 1,
   "parentEventId": "abc123",
   "role": "outbound",
-  "sourceStart": "2026-07-24T14:00:00-05:00",
-  "sourceEnd": "2026-07-24T15:00:00-05:00",
+  "sourceAnchor": "2026-07-24T14:00:00-05:00",
   "origin": {
     "type": "address",
     "value": "123 Main Street"
@@ -988,6 +1032,19 @@ If duplicate observed events share the same key, retain one canonical event and 
 ```
 
 `routeDurationSeconds` is the **quantized** duration (§12.3), never the raw broker value. This is what allows the daily cache refresh to run without rewriting events: a duration that moves from 1420s to 1447s quantizes to 1500s both times, so the fingerprint is unchanged and no write occurs.
+
+#### Fingerprints are role-specific
+
+`sourceAnchor` carries only the source boundary that companion actually depends on:
+
+| Role | Anchor | Derivation |
+|---|---|---|
+| `outbound` | `source.start` | ends at the source start |
+| `return` | `source.end` | begins at the source end |
+
+Including both boundaries in both fingerprints would violate the minimal-write requirement. Extending a meeting by fifteen minutes changes `source.end` and nothing else; the outbound block's times, summary, and type are all unaffected — but a fingerprint containing `sourceEnd` would change, and §15.2 would mandate a full outbound update for a block that is already correct. The inverse applies when only the source start moves.
+
+Each fingerprint covers exactly the inputs that can change its own companion, so a write happens only when that companion is genuinely stale.
 
 ### 14.2 Canonicalization
 
@@ -1033,10 +1090,14 @@ For every desired key:
 - one observed event, fingerprint differs or is missing: **update**;
 - multiple observed events: select canonical, apply the above, delete duplicates.
 
-For every observed key absent from desired:
+For every observed key absent from desired, decide by the parent's planning outcome (§15.2.3):
 
-- **delete only if the parent's planning outcome is `planned` or `ineligible`**;
-- if the parent's outcome is `failed`, or the parent was never evaluated, **preserve**.
+| Parent outcome | Action |
+|---|---|
+| `planned` or `ineligible` | **delete** |
+| `failed` | **preserve** |
+| absent from a **complete** scan | **delete** — genuinely orphaned |
+| absent from an **incomplete** scan | **preserve** |
 
 #### 15.2.1 Fingerprint alone is not sufficient
 
@@ -1067,6 +1128,23 @@ Route cache entries live in the same private extended properties. When a cache e
 This is a distinct diff category. It must not be folded into `unchanged`, because skipping the write would leave `routeAt` permanently stale and force a broker call on every subsequent run — defeating the cost bound the cache exists to provide. It must not be folded into `update` either, since it changes nothing the user can see.
 
 See §16.6.
+
+#### 15.2.3 Absent parents
+
+"Preserve anything whose parent was not evaluated" is too broad, and would strand generated events permanently.
+
+A source event can leave the observation range entirely — moved months out, or deleted. Its old companions stay behind inside the range. If an absent parent always meant preserve, those companions would never be deleted; they would simply age out of the read range still sitting on the user's calendar, violating REQ-RECON-009.
+
+So an absent parent means **orphaned**, and orphans are deleted — but only when the scan that failed to find the parent was complete. A run truncated by pagination failure or execution budget has not established that the parent is gone, only that it was not reached.
+
+```text
+scanComplete && parent not found   ->  orphan, delete
+!scanComplete && parent not found  ->  unknown, preserve
+```
+
+The distinction that matters is *evaluated and failed* versus *not present at all*. Only the former is a planning failure; the latter is ordinary cleanup.
+
+`ReconciliationDiff.diagnostics` records `scanComplete`, so a dry run shows why deletions were or were not proposed.
 
 ### 15.3 Safety rule
 
@@ -1171,6 +1249,24 @@ Patch only fields owned by Drivetime Padding:
 - private extended properties.
 
 Do not overwrite unrelated fields if a later version adds them.
+
+### 16.5.1 Conditional delete
+
+`deleteGeneratedEvent` must not take a bare event ID.
+
+The user lock (§16 of the architecture) serializes this add-on's executions against each other. It does nothing about concurrent edits from Calendar's own UI, a phone, or another API client. Between the moment reconciliation reads an event and the moment it applies the diff, a user can strip the `dtp` marker or repurpose the event entirely — and a delete keyed only on ID would remove it anyway.
+
+That is a direct breach of ADR 0009, which is a safety boundary rather than a preference, so the check has to happen at the moment of deletion rather than at the moment of reading:
+
+```javascript
+deleteGeneratedEvent(observed)   // observed carries id, etag, and marker
+```
+
+Preferred mechanism is a conditional delete carrying the observed ETag as `If-Match`, so Calendar itself rejects the delete if the event changed after it was read.
+
+If the Advanced Calendar service cannot set that header — unverified, and listed in `docs/open-questions.md` — the fallback is to re-read the event immediately before deleting and confirm `dtp === '1'`. That narrows the race to the gap between re-read and delete rather than closing it; the residual window is small but real, and the limitation must be documented rather than assumed away.
+
+The same reasoning applies to updates and metadata patches: a patch that lands on an event the user has since taken ownership of is a smaller harm than a delete, but the ETag should be carried wherever the runtime allows.
 
 ### 16.6 Metadata-only patch
 
@@ -1450,8 +1546,26 @@ const DIAGNOSTIC_ROUTE_CALLS_PER_HOUR = 20;
 
 - diagnostics consult the route cache first, exactly as reconciliation does;
 - diagnostic broker calls are counted per user per hour against the ceiling;
-- on exceeding it, the card renders eligibility, directives, and resolved origin — everything that needs no route — and reports that timing is temporarily unavailable;
-- diagnostic calls write to the same route cache, so a card open warms the next reconciliation rather than duplicating its work.
+- on exceeding it, the card renders eligibility, directives, and resolved origin — everything that needs no route — and reports that timing is temporarily unavailable.
+
+#### Where diagnostic routes are cached
+
+The generated-event cache (§13.3) cannot serve this path. Diagnostics are most useful on an event that has *no* companions yet, and diagnostics run as a dry run — so there is no metadata to write into, and creating an event to hold the cache would violate the no-write contract.
+
+Repeated card opens on an unplanned event would therefore call the broker every time.
+
+Diagnostics use a second, ephemeral cache instead:
+
+```javascript
+CacheService.getUserCache().put(routeInputHash, String(seconds), ttlSeconds);
+```
+
+- keyed by the same route input hash, so entries are interchangeable with the generated-event cache;
+- TTL bounded by `CacheService`'s own maximum, which is well under `ROUTE_CACHE_MAX_AGE_HOURS`;
+- read by both diagnostics and reconciliation, written by both;
+- values validated on read exactly as in §13.3 — an ephemeral store is no more trustworthy than a durable one.
+
+This keeps the derived-state invariant intact: flushing it may cost broker calls and can never change Calendar state. It is a cache in front of a cache, which is worth the small complexity only because the alternative is an unbounded per-card-open cost on the one path with no durable place to write.
 
 ---
 

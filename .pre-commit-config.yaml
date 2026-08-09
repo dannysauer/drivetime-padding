@@ -1,0 +1,63 @@
+# Pre-commit hooks for Drivetime Padding.
+#
+# Install once per clone:
+#
+#     pip install pre-commit
+#     pre-commit install
+#
+# Run against everything (CI does this):
+#
+#     pre-commit run --all-files
+#
+# The repository is documentation-only today, so the hooks are hygiene and
+# Markdown checks plus two repo-specific invariants. When implementation
+# starts, a JavaScript linter and formatter configured to Google's JavaScript
+# style guide will be added here.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Two trailing spaces are a hard line break in Markdown, used
+        # deliberately in the ADR headers and Given/When/Then scenarios.
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-yaml
+      - id: check-json
+      - id: pretty-format-json
+        args: [--autofix, --indent=2, --no-sort-keys]
+      - id: check-added-large-files
+        args: [--maxkb=512]
+
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.18.1
+    hooks:
+      - id: markdownlint-cli2
+
+  - repo: local
+    hooks:
+      # The Apps Script sources are plain JS in a shared global namespace, so
+      # there is no build step to catch a syntax error before deployment.
+      - id: apps-script-syntax
+        name: Apps Script syntax check
+        entry: node --check
+        language: system
+        files: ^src/apps-script/.*\.js$
+
+      # docs/architecture/appsscript-manifest.example.json is referenced by the
+      # architecture as the manifest of record. If the two drift, the
+      # documentation is quietly wrong about what the add-on requests --
+      # including its OAuth scopes.
+      - id: manifest-matches-docs
+        name: Manifest matches documented example
+        entry: >-
+          bash -c 'diff -u src/apps-script/appsscript.json
+          docs/architecture/appsscript-manifest.example.json'
+        language: system
+        pass_filenames: false
+        files: ^(src/apps-script/appsscript\.json|docs/architecture/appsscript-manifest\.example\.json)$

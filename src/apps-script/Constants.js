@@ -24,6 +24,12 @@ const MAX_SOURCE_DURATION_MINUTES = 1440;
 const COMPANION_SPAN_MINUTES = MAX_TRAVEL_MINUTES + MAX_BUFFER_MINUTES;
 const RECONCILIATION_LOOKBACK_MINUTES = COMPANION_SPAN_MINUTES;
 
+// How far the observation range extends past the planning range at EACH end.
+// Symmetric, because a long source event can reach backward past planStart
+// just as it can reach forward past planEnd.
+const OBSERVE_MARGIN_MINUTES =
+  MAX_SOURCE_DURATION_MINUTES + COMPANION_SPAN_MINUTES;
+
 // Route plan cache. ADR 0011, Technical Design section 13.3.
 const ROUTE_CACHE_MAX_AGE_HOURS = 24;
 const ROUTE_GRANULARITY_SECONDS = 300;

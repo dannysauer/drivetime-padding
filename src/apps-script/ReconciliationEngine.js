@@ -27,15 +27,28 @@ function runReconciliation(options) {
 function calculateWindow(windowDays, now) {
   const planStart = now.getTime() - RECONCILIATION_LOOKBACK_MINUTES * 60000;
   const planEnd = now.getTime() + windowDays * 86400000;
+  const margin = OBSERVE_MARGIN_MINUTES * 60000;
 
   return {
     planStart: new Date(planStart),
     planEnd: new Date(planEnd),
-    observeStart: new Date(planStart - COMPANION_SPAN_MINUTES * 60000),
-    observeEnd: new Date(
-      planEnd + (MAX_SOURCE_DURATION_MINUTES + COMPANION_SPAN_MINUTES) * 60000
-    ),
+    observeStart: new Date(planStart - margin),
+    observeEnd: new Date(planEnd + margin),
   };
+}
+
+/**
+ * Planning eligibility is temporal INTERSECTION, not start-time containment.
+ *
+ * A source running 01:00-18:00 evaluated at noon started before an 8h
+ * lookback, but its return block at 18:00 is still needed. Testing
+ * source.start alone would mark it OUTSIDE_WINDOW, and ineligibility carries
+ * deletion authority -- so the return block would be deleted mid-appointment.
+ *
+ * Technical Design section 7.2, REQ-ELIG-007, REQ-TIME-011.
+ */
+function overlapsPlanningRange_(event, window) {
+  throw new Error('Not implemented: Technical Design section 7.2');
 }
 
 /**

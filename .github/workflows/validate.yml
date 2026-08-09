@@ -3,7 +3,7 @@ name: Validate
 on:
   pull_request:
   push:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
   validate:
@@ -11,37 +11,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Needed by the local apps-script-syntax hook, which shells out to node.
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Validate JSON
-        run: |
-          for f in $(git ls-files '*.json'); do
-            python3 -m json.tool "$f" > /dev/null
-          done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
-      - name: Check Apps Script syntax
-        run: |
-          for f in $(git ls-files 'src/apps-script/*.js'); do
-            node --check "$f"
-          done
-
-      - name: Manifest matches documented example
-        run: diff src/apps-script/appsscript.json docs/architecture/appsscript-manifest.example.json
-
-      # Markdown is excluded: two trailing spaces is a hard line break, used
-      # deliberately in the ADR headers and the Given/When/Then scenarios.
-      - name: No trailing whitespace outside Markdown
-        run: |
-          if git grep -nIE '[[:blank:]]+$' -- . ':(exclude)*.md' ; then
-            echo "Trailing whitespace found"
-            exit 1
-          fi
-
-      - name: No unresolved conflict markers
-        run: |
-          if git grep -nE '^(<<<<<<<|>>>>>>>) ' -- . ; then
-            echo "Conflict markers found"
-            exit 1
-          fi
+      # Every check lives in .pre-commit-config.yaml so CI and local hooks
+      # cannot disagree. Add checks there, not here.
+      - uses: pre-commit/action@v3.0.1

@@ -1,0 +1,28 @@
+# markdownlint configuration
+#
+# The documentation set is prose-heavy specification text, not source code, so
+# a few default rules are turned off deliberately rather than worked around.
+
+config:
+  # Line length. These documents are read in rendered form and diffed by
+  # paragraph; hard-wrapping specification prose makes diffs noisier without
+  # making anything more readable.
+  MD013: false
+
+  # Table column style. The docs use the compact `|---|---|` delimiter form
+  # consistently. Padding every delimiter row to column width is churn.
+  MD060: false
+
+  # Allow inline HTML. Not currently used, but harmless and occasionally
+  # needed for anchors.
+  MD033: false
+
+  # First line need not be a top-level heading; some fragments are included
+  # in larger documents.
+  MD041: false
+
+globs:
+  - "**/*.md"
+
+ignores:
+  - "node_modules/**"

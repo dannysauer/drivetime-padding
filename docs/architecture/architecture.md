@@ -1060,7 +1060,12 @@ Marketplace documentation should clearly state:
 - Calendar data remains in the user's Google account;
 - route origin and destination are sent to the Drivetime Padding routing service and Google Maps;
 - no event descriptions or attendee data are sent to the routing service;
-- generated events are fully removable by uninstalling or running cleanup.
+- generated events can be removed at any time using the add-on's **Remove all generated events** action;
+- that action must be run **before** uninstalling. Uninstalling first leaves the generated events on the calendar and removes the interface that deletes them; recovering from that requires reinstalling, running cleanup, and uninstalling again.
+
+The second point is a disclosure, not a footnote. Google Workspace add-ons have no reliable uninstall hook (Technical Design §19.4), so any claim that uninstalling cleans up after itself would be false — and this text is published in the Marketplace listing, where a false cleanup promise is the kind of thing users and reviewers are entitled to rely on.
+
+The UI should carry the same warning at the point of uninstall risk, not only in the listing.
 
 ---
 
