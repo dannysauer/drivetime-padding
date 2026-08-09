@@ -422,7 +422,7 @@ A start-time containment test would fail this scenario, and because ineligibilit
 **Then** the planning context receives those cache entries keyed by role  
 **And** the routing client reuses them  
 **And** zero broker calls are made  
-**And** each `RouteResult` reports `fromCache: true`.
+**And** each `RouteResult` reports `source: "durable"`.
 
 This scenario exists because the cache is only reachable if observed companions are indexed before planning. An implementation that builds the provider context from the source event alone passes every other cache scenario in this document while calling the broker on every run.
 
@@ -621,7 +621,8 @@ Status is built from what Calendar accepted, not from what the diff proposed. Se
 **When** reconciliation runs  
 **Then** the source is classified ineligible (`SOURCE_TOO_LONG` or `ALL_DAY_EVENT`)  
 **And** its companions are located by ownership and parent metadata outside the window bounds  
-**And** all of them are deleted in that same run.
+**And** all of them are deleted in that same run  
+**And** no event id appears in the delete list twice, even when one companion was also queued by the ordinary comparison.
 
 Definitive ineligibility carries deletion authority, but the window scan cannot reach companions the overlong source stranded behind `observeStart`. The lookup keys on the duration, not the classification reason — the all-day check runs before the duration check, so a multi-day all-day conversion never reports `SOURCE_TOO_LONG` — and fires when either role is missing, so a half-stranded pair is cleaned in one run.
 
@@ -645,3 +646,45 @@ Zero is a legitimate duration. A truthiness check on the cached value would reje
 **And** no delete and update are queued for the same event in one run.
 
 `Events.list` bounds `timeMin` on event end, so a boundary-spanning event is visible to both the observation read and the cleanup scan; without the start filter, a cleanup delete races the comparator's repair and the delete-first write order wins.
+
+## AC-ELIG-010: Special event types cannot qualify by title pattern
+
+**Given** a timed `fromGmail` event with a location whose title matches the enabled pattern  
+**When** eligibility is evaluated  
+**Then** the reason is `UNSUPPORTED_EVENT_TYPE`  
+**And** the title pattern is never consulted  
+**And** no generated events are created.
+
+Pattern inclusion is limited to ordinary events. Without a type gate ahead of pattern matching, `UNSUPPORTED_EVENT_TYPE` is unreachable and special-type sources silently gain default-typed companions.
+
+## AC-CACHE-014: Ephemeral hit still repairs the durable cache
+
+**Given** a diagnostic has warmed the ephemeral cache for a route  
+**And** the companion's durable cache entry is expired  
+**When** reconciliation plans that source  
+**Then** no broker call is made  
+**And** the `RouteResult` reports `source: "ephemeral"`  
+**And** the durable triplet is patched onto the companion, so the run after ephemeral eviction also makes no broker call.
+
+An ephemeral hit avoids the broker call, not the metadata patch. A boolean cached/not-cached flag conflates the tiers and strands the stale durable entry.
+
+## AC-CACHE-015: Transient retries spend the route budget
+
+**Given** a run whose broker calls each receive a 503 and succeed on the immediate retry  
+**When** the run reaches the per-run route ceiling  
+**Then** the total HTTP attempts made, including retries, do not exceed `MAX_ROUTE_CALLS_PER_RUN`  
+**And** remaining events are left unplanned as `ROUTE_BUDGET_EXCEEDED`  
+**And** their existing companions are preserved.
+
+The ceiling bounds wire traffic. Counting logical calls instead would double the spend exactly when the broker is struggling.
+
+## AC-CONFIG-004: Remove-all reaches events outside the window
+
+**Given** managed events exist both inside the observation range and far outside it (aged out, or beyond a shrunken horizon)  
+**And** the user confirms "Remove all generated events and disable automation"  
+**When** the action runs  
+**Then** the add-on's triggers are removed first  
+**And** every managed event is deleted, including those no window-bounded scan would read  
+**And** the result reports deleted and failed counts, with a retry offered when any deletion failed.
+
+"All" must mean all: the ordinary scans are bounded by the rolling window, and a cleanup built on them silently misses history and stranded events.

@@ -27,3 +27,17 @@ function removeAutomation() {
 function runManualReconciliation(e) {
   throw new Error('Not implemented: Technical Design section 19.5');
 }
+
+/**
+ * One-off trigger handler behind partial-run continuations. Deletes its own
+ * trigger, increments dtp.continuationCount BEFORE running (a crashed run
+ * must still count itself or a persistent failure loops for free), then
+ * runs the shared engine. A lock-contention skip refunds the count and
+ * re-enqueues -- a skip did no work and must not burn cap allowance. The
+ * counter resets to 0 on any successful non-dry run; the cap is enforced
+ * at enqueue time, and the engine records continuationCapReached from the
+ * enqueue return value. Technical Design section 19.6.
+ */
+function runContinuationReconciliation(e) {
+  throw new Error('Not implemented: Technical Design section 19.6');
+}

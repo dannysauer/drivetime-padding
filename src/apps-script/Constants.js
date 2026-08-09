@@ -41,6 +41,9 @@ const DIAGNOSTIC_ROUTE_CALLS_PER_HOUR = 20;
 // card callback. Technical Design section 19.5.
 const MANUAL_RUN_DELAY_MS = 1000;
 
+// Partial runs schedule their own continuation. Technical Design 19.6/23.4.
+const CONTINUATION_DELAY_MS = 5 * 60000;
+
 // Storage keys.
 const SETTINGS_KEY = 'dtp.settings';
 const LAST_RUN_KEY = 'dtp.lastRun';
@@ -49,6 +52,10 @@ const LAST_RUN_KEY = 'dtp.lastRun';
 // brick the button after one crashed run. Technical Design section 19.5.
 // Furthest observeEnd ever used. Drives cleanup when windowDays shrinks.
 const OBSERVE_HIGH_WATER_KEY = 'dtp.observeHighWater';
+// Consecutive-continuation counter. Incremented by the continuation handler
+// on entry, reset to 0 by any successful run, enforced at enqueue time.
+// Unlike trigger pendingness this cannot be derived -- it must survive runs.
+const CONTINUATION_COUNT_KEY = 'dtp.continuationCount';
 const CURRENT_SETTINGS_SCHEMA = 1;
 
 // Generated-event metadata. ADR 0009 -- this property is the deletion-safety

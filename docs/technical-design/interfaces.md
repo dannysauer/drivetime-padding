@@ -26,6 +26,10 @@ listGeneratedEventsBetween(calendarId, start, end) -> ObservedGeneratedEvent[]
 // overlong (SOURCE_TOO_LONG) source that fell outside the observation
 // range (technical design 15.2.6)
 listCompanionsByParent(calendarId, parentEventId) -> ObservedGeneratedEvent[]
+// Unbounded ownership scan for "remove all generated events" -- window
+// scans miss events that aged out of the rolling range (19.4)
+listAllGeneratedEvents(calendarId)
+  -> { events: ObservedGeneratedEvent[], scanComplete: boolean }
 createGeneratedEvent(spec) -> RawCalendarEvent
 updateGeneratedEvent(observed, spec) -> RawCalendarEvent
 patchGeneratedEventMetadata(observed, privateProperties) -> RawCalendarEvent
@@ -42,8 +46,11 @@ evaluateEligibility(event, directives, settings, window) -> EligibilityResult
 resolveOrigin(event, directives, settings, workingLocations) -> ResolvedOrigin
 
 // Routing and provider
-// requestContext carries { role, cacheEntry, now, correlationId }; the client
-// consults the cache before the network and reports fromCache on the result.
+// requestContext carries { role, cacheEntry, now, budget, correlationId };
+// the client consults the cache before the network and reports provenance as
+// result.source ('durable' | 'ephemeral' | 'broker') -- anything other than
+// 'durable' needs persisting (11.1). budget.remaining is decremented per
+// HTTP attempt, retries included (11.2).
 getRouteDuration(from, to, requestContext) -> RouteResult
 getGeneratedEventSpecs(context) -> PlanningOutcome
 
@@ -73,7 +80,11 @@ loadHighWater() / saveHighWater(observeEnd)                           // 7.6
 
 // Comparison helpers
 ownedFieldsMatch(observedFields, desiredSpec) -> boolean
+// true when freshRoute.source !== 'durable' (11.1, 15.2.2)
 routeCacheNeedsPersisting(observed, freshRoute, now) -> boolean
+// Upcoming first, then in-progress and lookback -- API response order would
+// spend the route budget on the past (23.2); called before the planning loop
+orderForPlanning(normalizedEvents, now) -> NormalizedEvent[]
 // Overlong-source cleanup gate (technical design 15.2.6): duration-keyed,
 // reason-agnostic; fires when either companion role is unobserved
 sourceExceedsDurationCap(event) -> boolean
@@ -98,4 +109,11 @@ removeAutomation() -> CleanupResult
 // (technical design 19.5; one-off trigger, subject to Spike 1)
 onSynchronizeNow(e) -> ActionResponse
 runManualReconciliation(e) -> ReconciliationResult
+// Partial-run continuation worker (19.6): counter incremented on entry,
+// refunded on lock-contention skips, reset by any successful non-dry run,
+// cap enforced at enqueue time. Called by the ENGINE after a partial run;
+// the return value is how continuationCapReached reaches run status.
+enqueueContinuation() -> { scheduled: boolean, capReached: boolean }
+resetContinuationCount() / decrementContinuationCount()
+runContinuationReconciliation(e) -> ReconciliationResult
 ```

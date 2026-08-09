@@ -7,12 +7,21 @@
  */
 
 /**
- * requestContext = { role, cacheEntry, now, correlationId }.
+ * requestContext = { role, cacheEntry, now, budget, correlationId }.
  *
  * Consults the cache before the network. Cache policy lives here rather than
  * in the provider so there is exactly one place that decides staleness.
- * Returns RouteResult with fromCache set, which is how the engine tells a
- * metadata patch apart from no write at all.
+ *
+ * Returns RouteResult with source set to 'durable' | 'ephemeral' | 'broker'.
+ * Anything other than 'durable' needs persisting: an ephemeral hit (section
+ * 20.3) avoids the broker call but the companion's durable entry is still
+ * stale -- a boolean fromCache would conflate the tiers and strand the
+ * stale entry.
+ *
+ * Decrements requestContext.budget.remaining for EVERY HTTP attempt,
+ * retries included (section 11.2). The ceiling bounds wire traffic, not
+ * logical calls; enforcing it above the retry layer would double the spend
+ * during a broker outage.
  */
 function getRouteDuration(from, to, requestContext) {
   throw new Error('Not implemented: broker authentication unresolved');

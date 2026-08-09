@@ -342,8 +342,7 @@ Settings are stored as a single JSON object in Apps Script User Properties.
     }
   },
   "workingLocation": {
-    "enabled": true,
-    "fallbackToDefault": true
+    "enabled": true
   },
   "generatedEvents": {
     "titlePrefix": "[Drivetime Padding]"
@@ -748,8 +747,28 @@ function reconcile(options) {
     // window read cannot reach them (technical design §15.2.6).
     const strandedOverlong = [];
 
-    for (const rawEvent of sourceEvents) {
-      const event = normalizeEvent(rawEvent);
+    // Working-location events feed origin resolution. Fetched once per run,
+    // over the planning range -- resolveOrigin needs them, and a flow that
+    // never fetches them silently reduces every origin to the default
+    // (technical design §7.5, §10.3).
+    const workingLocations = settings.workingLocation.enabled
+      ? repository.listWorkingLocationEvents("primary", window.planStart, window.planEnd)
+      : [];
+
+    // One shared HTTP-attempt budget for the whole run, decremented by the
+    // routing client for every request on the wire, retries included
+    // (technical design §11.2). Created here because only the engine spans
+    // the run; the planning layer cannot see retries.
+    const routeBudget = { remaining: MAX_ROUTE_CALLS_PER_RUN };
+
+    // Upcoming events first, then in-progress and lookback events. The
+    // listing arrives in API response order; without reordering, past
+    // events can exhaust the route budget while the appointment the user
+    // is about to drive to sits unplanned (technical design §23.2).
+    // Events without timestamps (cancelled tombstones) sort last.
+    const orderedSources = orderForPlanning(sourceEvents.map(normalizeEvent), now);
+
+    for (const event of orderedSources) {
       const directives = parseDirectives(event.description);
       const eligibility = evaluateEligibility(event, directives, settings, window);
 
@@ -775,12 +794,16 @@ function reconcile(options) {
         continue;
       }
 
+      const origin = resolveOrigin(event, directives, settings, workingLocations);
+
       const context = buildProviderContext(
         event,
         directives,
         settings,
+        origin,
         window,
         now,
+        routeBudget,
         routeCacheFor(observedByKey, event.id)
       );
 
@@ -807,7 +830,17 @@ function reconcile(options) {
     // later run would repeat the full scan of the vacated range.
     const cleanup = findStrandedCompanions(window, settings);
     diff.deletes.push(...cleanup.events);
-    diff.deletes.push(...strandedOverlong);
+
+    // Deduplicate by event id before merging. An overlong source with one
+    // companion still observed already has that companion queued by the
+    // comparator (ineligible parent), and listCompanionsByParent returns
+    // both roles -- queuing the same id twice makes the second delete 404
+    // and marks an otherwise clean cleanup run partial (technical design
+    // §15.2.6).
+    const queuedDeleteIds = new Set(diff.deletes.map(event => event.id));
+    diff.deletes.push(
+      ...strandedOverlong.filter(event => !queuedDeleteIds.has(event.id))
+    );
 
     let applied = null;
     if (!options.dryRun) {
@@ -828,11 +861,23 @@ function reconcile(options) {
     // silently failed (REQ-ERROR-006).
     const result = buildRunResult(diff, applied, options);
 
-    // Dry runs return their proposal but never persist it. The stored
-    // last-run record is what the home card reports as the last outcome
-    // (technical design §19.5, §20.2); letting a diagnostic dry run
-    // overwrite it would present proposal counts as applied results.
+    // Dry runs return their proposal but never persist it — and never
+    // touch continuation state or triggers. The stored last-run record is
+    // what the home card reports as the last outcome (technical design
+    // §19.5, §20.2); letting a diagnostic dry run overwrite it would
+    // present proposal counts as applied results, and letting one schedule
+    // a continuation would have a diagnostic mutating trigger state.
     if (!options.dryRun) {
+      // The engine, not the trigger layer, drives the continuation
+      // lifecycle (technical design §19.6): success drains the deferred
+      // work and resets the allowance; partial schedules the next pass.
+      if (result.status === "success") {
+        resetContinuationCount();
+      } else if (result.status === "partial") {
+        // {scheduled, capReached}: already-pending is fine (a pass is
+        // coming anyway); capReached is the state diagnostics must show.
+        result.continuationCapReached = enqueueContinuation().capReached;
+      }
       saveRunStatus(result);
     }
     return result;

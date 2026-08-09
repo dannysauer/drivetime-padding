@@ -44,6 +44,16 @@ function listCompanionsByParent(calendarId, parentEventId) {
   throw new Error('Not implemented: Technical Design section 15.2.6');
 }
 
+/**
+ * Unbounded ownership scan (dtp=1, no time bounds, paginated to completion)
+ * for the "remove all generated events" action. Window-bounded scans miss
+ * managed events that aged out of the rolling range; "all" must mean all.
+ * Technical Design section 19.4.
+ */
+function listAllGeneratedEvents(calendarId) {
+  throw new Error('Not implemented: Technical Design section 19.4');
+}
+
 function createGeneratedEvent(spec) {
   throw new Error('Not implemented: Technical Design section 16');
 }

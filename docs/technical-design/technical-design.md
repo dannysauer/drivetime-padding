@@ -109,13 +109,14 @@ interface UserSettings {
   };
   workingLocation: {
     enabled: boolean;
-    fallbackToDefault: boolean;
   };
   generatedEvents: {
     titlePrefix: string;
   };
 }
 ```
+
+There is deliberately no `workingLocation.fallbackToDefault` toggle. Falling back to the default origin when a working-location origin is missing or unsupported is fixed behavior (§10.4), not a preference — an earlier draft carried the flag with no behavioral consumer anywhere in the design, and a validated setting nothing reads is a lie in the schema: the user flips it and nothing changes.
 
 ### 4.2 OriginSetting
 
@@ -215,8 +216,13 @@ interface ResolvedOrigin {
 interface RouteResult {
   durationSeconds: number;      // raw broker seconds, unquantized
   distanceMeters: number | null;
-  /** False when this came from the broker and needs persisting. See 11.1. */
-  fromCache: boolean;
+  /**
+   * Where the duration came from. Anything other than "durable" means the
+   * durable entry on the companion is stale or missing and must be
+   * (re)written — an ephemeral hit avoids the broker call, not the
+   * metadata patch. See 11.1, 20.3.
+   */
+  source: "durable" | "ephemeral" | "broker";
   /**
    * When the broker produced this duration — never when it was read from a
    * cache. This is what is written to routeAt, so a duration ages from its
@@ -354,7 +360,6 @@ function defaultSettings_() {
     },
     workingLocation: {
       enabled: true,
-      fallbackToDefault: true,
     },
     generatedEvents: {
       titlePrefix: '[Drivetime Padding]',
@@ -402,7 +407,6 @@ Rules:
 | `origins.*.value` | string; may be empty for `home` and `office` |
 | `origins.default.value` | non-empty string required for write-mode reconciliation |
 | `workingLocation.enabled` | boolean |
-| `workingLocation.fallbackToDefault` | boolean |
 | `generatedEvents.titlePrefix` | non-empty string, recommended maximum 80 characters |
 
 Every boolean is checked with `typeof value === 'boolean'`. Every string is checked with `typeof value === 'string'`. Coercion is not applied — a wrong type is a validation error, because coercing hides the corruption that produced it.
@@ -766,15 +770,18 @@ Order matters because diagnostics should return the most useful reason.
 4. outside planning window;
 5. all-day event;
 6. timed event longer than `MAX_SOURCE_DURATION_MINUTES`;
-7. missing location;
-8. disabled by directive;
-9. real OOO event accepted **when `eligibility.includeOutOfOffice` is true**;
-10. optional title pattern accepted;
-11. otherwise reject.
+7. **unsupported event type** — only `default` and `outOfOffice` proceed;
+8. missing location;
+9. disabled by directive;
+10. real OOO event accepted **when `eligibility.includeOutOfOffice` is true**;
+11. optional title pattern accepted;
+12. otherwise reject.
 
-Step 9 must consult the setting. It is a user-facing toggle in the persisted schema, so accepting every OOO event regardless would mean a user who switches it off sees no change and their companions keep being maintained. A real OOO event rejected because the toggle is off reports `OUT_OF_OFFICE_DISABLED`, which is distinct from `TITLE_PATTERN_NO_MATCH` so the diagnostic card can say which control is responsible.
+Step 7 is what makes `UNSUPPORTED_EVENT_TYPE` reachable, and what keeps the title pattern inside its charter. Calendar has special event types beyond OOO — `focusTime`, `workingLocation`, `birthday`, `fromGmail` — and a timed `fromGmail` event can carry a location and a pattern-matching title. REQ-ELIG-002 limits pattern inclusion to **ordinary** events; without this gate the pattern would accept the special type and §12.6 would silently manufacture a default-typed companion for it. Anything that is neither `default` nor `outOfOffice` reports `UNSUPPORTED_EVENT_TYPE` before pattern matching is ever consulted.
 
-A real OOO event may still qualify at step 10 through the title pattern; the toggle governs only automatic OOO inclusion, not the event type.
+Step 10 must consult the setting. It is a user-facing toggle in the persisted schema, so accepting every OOO event regardless would mean a user who switches it off sees no change and their companions keep being maintained. A real OOO event rejected because the toggle is off reports `OUT_OF_OFFICE_DISABLED`, which is distinct from `TITLE_PATTERN_NO_MATCH` so the diagnostic card can say which control is responsible.
+
+A real OOO event may still qualify at step 11 through the title pattern; the toggle governs only automatic OOO inclusion, not the event type.
 
 Steps 1–3 must not read timestamps. Everything from step 4 onward may.
 
@@ -838,7 +845,7 @@ function getRouteDuration(from, to, requestContext)
   -> RouteResult
 ```
 
-`requestContext` is a `RouteRequestContext` (§12.1): role, the observed cache entry for that role, the injected clock, and an optional opaque correlation ID. It carries no calendar title, description, or attendee data.
+`requestContext` is a `RouteRequestContext` (§12.1): role, the observed cache entry for that role, the injected clock, the run's shared HTTP-attempt budget (§11.2), and an optional opaque correlation ID. It carries no calendar title, description, or attendee data.
 
 The client consults the cache before the network:
 
@@ -854,15 +861,17 @@ Cache policy lives here rather than in the provider, so there is exactly one pla
 interface RouteResult {
   durationSeconds: number;      // raw, unquantized
   distanceMeters: number | null;
-  fromCache: boolean;           // false when the broker was called
+  source: "durable" | "ephemeral" | "broker";
 }
 ```
 
-`fromCache` is what lets the engine decide between a metadata patch and no write at all (§15.2.2), and what the tests in §24.3 assert against when checking that an unchanged run makes zero broker calls.
+`source` is what lets the engine decide between a metadata patch and no write at all (§15.2.2), and what the tests in §24.3 assert against when checking that an unchanged run makes zero broker calls. The rule is: **anything other than `"durable"` needs persisting.** A boolean `fromCache` would conflate the two cache tiers — a diagnostic-warmed ephemeral hit (§20.3) avoids the broker call, but the companion's durable entry is still stale, and folding that hit into "cached, no write" would leave the stale entry in place and cost another broker call after ephemeral eviction. The durable check runs first, so an ephemeral or broker result is by construction one whose durable entry failed validation.
 
 ### 11.2 Request timeout and retries
 
 Apps Script `UrlFetchApp` does not expose fine-grained retry middleware. The client should perform at most one immediate retry for clearly transient broker errors such as 502, 503, or 504.
+
+**Retries spend the same budget as first attempts.** The per-run ceiling (`MAX_ROUTE_CALLS_PER_RUN`, §13.3) bounds **HTTP attempts**, not logical `getRouteDuration` calls: the shared budget counter travels in `RouteRequestContext.budget`, and the client decrements it for every request it puts on the wire, including the transient retry. Counting logical calls instead would let a run admitted for 60 misses issue 120 attempts — doubling the spend precisely during a broker outage, when the quota matters most. A budget exhausted mid-call yields `ROUTE_BUDGET_EXCEEDED`, an ordinary planning failure (§17.4).
 
 Do not retry:
 
@@ -909,6 +918,13 @@ interface DrivetimeContext {
   /** Injected clock. Cache age is time-dependent; tests must control it. */
   now: Date;
   /**
+   * The run's shared HTTP-attempt budget, created once by the engine
+   * (starting at MAX_ROUTE_CALLS_PER_RUN) and passed through to every
+   * RouteRequestContext. Without this field the retry-inclusive ceiling
+   * (11.2) has no path to the routing client.
+   */
+  routeBudget: RouteBudget;
+  /**
    * Route cache entries from the observed companions for this source,
    * keyed by role. Null when no companion exists yet. See 12.1.1.
    */
@@ -935,7 +951,19 @@ interface RouteRequestContext {
   role: "outbound" | "return";
   cacheEntry: RouteCacheEntry | null;
   now: Date;
+  /**
+   * Shared per-run HTTP-attempt budget. One counter for the whole run,
+   * decremented by the routing client for every request put on the wire,
+   * retries included (11.2). The planning layer cannot enforce the ceiling
+   * alone because it cannot see retries.
+   */
+  budget: RouteBudget;
   correlationId?: string;
+}
+
+interface RouteBudget {
+  /** Attempts remaining this run. Starts at MAX_ROUTE_CALLS_PER_RUN. */
+  remaining: number;
 }
 ```
 
@@ -1027,6 +1055,8 @@ Otherwise:
 generated eventType = default
 transparency = source transparency when supported
 ```
+
+"Otherwise" here means a `default`-typed source: eligibility step 7 (§9.2) has already rejected every other special type as `UNSUPPORTED_EVENT_TYPE`, so the provider never sees a `fromGmail` or `focusTime` source to silently convert.
 
 The exact Calendar API write contract for OOO events must be validated in a prototype before public release.
 
@@ -1403,7 +1433,9 @@ repository.listCompanionsByParent('primary', event.id)
 
 "Either role missing" rather than "no companions observed": the stale departure block can fall behind `observeStart` while the stale return block is still inside the range. Gating on total absence would skip the lookup, delete only the observed one through the ordinary path, and leave the stranded one waiting for a later run — a delay with no bound under flaky pagination, since the ordinary delete is absence-based and suppressed on incomplete scans (§15.2.4). One cheap extra list call removes the dependency.
 
-The returned events join `diff.deletes`. They were actually read — by the targeted query rather than the window scan — so this is presence-based deletion and does not depend on `scanComplete`; §15.3's marker rule and §16.5.1's conditional delete apply unchanged. If the lookup itself fails, the run records the error and retries next run, like any other read failure.
+The returned events join `diff.deletes`, **deduplicated by event id against deletes already queued**. The lookup runs when *either* role is missing, so in the half-stranded case it returns the observed companion too — and the comparator has already queued that one under its ineligible parent. Queuing the same id twice makes the second delete fail with 404 inside `applyDiff`, which would mark an otherwise clean cleanup run `partial` on every occurrence.
+
+They were actually read — by the targeted query rather than the window scan — so this is presence-based deletion and does not depend on `scanComplete`; §15.3's marker rule and §16.5.1's conditional delete apply unchanged. If the lookup itself fails, the run records the error and retries next run, like any other read failure.
 
 Cost is bounded and rare: one extra `Events.list` per overlong source per run, only while such a source sits in the observation range with a companion unaccounted for. Cancelled tombstones are excluded — they may carry no timestamps (§9.2), so their duration is untestable; a source made overlong and then cancelled inside the stranding gap is a residual edge this design accepts rather than paying a per-tombstone list call on every run.
 
@@ -1585,7 +1617,7 @@ interface ReconciliationOptions {
   dryRun?: boolean;
   now?: Date;
   eventIdFilter?: string | null;
-  reason?: "calendar-trigger" | "daily-trigger" | "manual" | "event-diagnostic";
+  reason?: "calendar-trigger" | "daily-trigger" | "manual" | "continuation" | "event-diagnostic";
 }
 ```
 
@@ -1787,6 +1819,36 @@ Remove all generated events and disable automation
 
 This action must require explicit confirmation.
 
+**"All" means all, not "all within the current window."** Managed events age out of the rolling observation range but stay on the calendar as history, and a window shrink or an old overlong source can leave managed events far outside any range a reconciliation run reads. A cleanup built on the window-bounded scans would silently miss them. The repository therefore exposes an **unbounded, ownership-filtered, paginated** scan for exactly this action:
+
+```javascript
+listAllGeneratedEvents(calendarId)
+  -> { events: ObservedGeneratedEvent[], scanComplete: boolean }
+// privateExtendedProperty: dtp=1; no timeMin/timeMax; nextPageToken to completion
+```
+
+`removeAutomation` proceeds in a fixed order:
+
+1. **acquire the same user lock reconciliation uses** (§16 of the architecture), with a generous wait — removing triggers stops *future* runs, but an in-flight run already past its planning phase would otherwise create companions after the cleanup scan, leaving orphans behind a `CleanupResult` that reports complete success, with automation disabled so nothing ever removes them;
+2. **remove the add-on's triggers**, so no later run recreates events after cleanup;
+3. run the unbounded scan and delete every returned event through `deleteGeneratedEvent` — §15.3's marker rule and §16.5.1's conditional delete apply to these deletions like any other;
+4. clear reconciliation state: the high-water mark and the continuation counter;
+5. release the lock and report a `CleanupResult`.
+
+If the lock cannot be acquired within the wait, the action reports that a synchronization is in progress and asks the user to retry — it must not proceed unserialized.
+
+```typescript
+interface CleanupResult {
+  triggersRemoved: number;
+  eventsDeleted: number;
+  failedDeletes: number;
+  /** False when the scan was truncated; some events may remain. */
+  scanComplete: boolean;
+}
+```
+
+A partial failure is **reported, not absorbed**: the confirmation card shows the counts, states that some events may remain when `failedDeletes > 0` or `scanComplete` is false, and offers the action again — it is idempotent, so re-running it retries only what remains. Automation stays disabled after step 1 regardless of cleanup outcome; a failed cleanup must never leave triggers running against a user who asked to stop.
+
 ### 19.5 Manual synchronization entry point
 
 The home card's "Synchronize now" button must not run reconciliation inline. CardService action callbacks have a short execution budget, and a full-window reconcile on a busy calendar will exceed it — the user would see a spinner, then a timeout, and learn that the button breaks exactly when the calendar is big enough to need it.
@@ -1835,6 +1897,72 @@ function runManualReconciliation(e) {
 The home card reflects progress through the stored last-run record (§20.2) plus `manualRunPending_()`. "Synchronization started" is honest — the card does not pretend the work finished inside the callback.
 
 Like continuations, this depends on one-off trigger creation and is therefore **subject to Prototype Spike 1**. If the spike finds one-off triggers unavailable to Marketplace add-ons, the fallback is an inline run with the per-run route ceiling lowered far enough to fit the callback budget, ending `partial` and relying on the daily cycle for the remainder — a worse experience that must be called out in the spike report rather than silently adopted.
+
+### 19.6 Continuation entry point
+
+§23.4 promises that a `partial` run schedules its own continuation, with a do-not-stack rule and a cap of `MAX_CONSECUTIVE_CONTINUATIONS`. This section is the worker behind that promise — without it, the constant and the requirement exist but nothing can enforce either rule.
+
+The trigger machinery mirrors manual synchronization (§19.5): pendingness derived from the trigger list, handler deletes its own trigger on entry.
+
+```javascript
+function continuationPending_() {
+  return ScriptApp.getProjectTriggers().some(function (trigger) {
+    return trigger.getHandlerFunction() === 'runContinuationReconciliation';
+  });
+}
+
+// Called by the ENGINE after a non-dry run ends `partial` (see the
+// architecture §14.2 pseudocode). Returns what happened so the engine can
+// record continuationCapReached on the run status -- a void decline would
+// leave diagnostics unable to say why work is waiting for the daily run.
+function enqueueContinuation_() {
+  if (continuationPending_()) {
+    return { scheduled: true, capReached: false };          // a pass is already coming
+  }
+  const count = Number(userProperties.getProperty(CONTINUATION_COUNT_KEY)) || 0;
+  if (count >= MAX_CONSECUTIVE_CONTINUATIONS) {
+    return { scheduled: false, capReached: true };          // daily run takes over
+  }
+  ScriptApp.newTrigger('runContinuationReconciliation')
+    .timeBased()
+    .after(CONTINUATION_DELAY_MS)                           // recommended 5 minutes
+    .create();
+  return { scheduled: true, capReached: false };
+}
+
+// One-off trigger handler. Deletes its own trigger, counts itself, runs
+// the shared engine (REQ-RECON-011).
+function runContinuationReconciliation(e) {
+  deleteTriggerById_(e && e.triggerUid);
+  incrementContinuationCount_();
+  const result = runReconciliation({ reason: 'continuation' });
+
+  // Lock contention did no work and proved nothing about the deferred
+  // backlog -- it must not burn cap allowance. Refund and retry. This
+  // cannot loop unboundedly: Apps Script locks release when the holding
+  // execution ends (hard 6-minute execution ceiling), so contention is
+  // inherently transient.
+  if (result.status === 'skipped') {
+    decrementContinuationCount_();
+    enqueueContinuation_();
+  }
+  return result;
+}
+```
+
+The **counter lifecycle** is what makes the cap enforceable:
+
+- stored in User Properties under `dtp.continuationCount` — unlike pendingness it cannot be derived, because it must survive across runs;
+- incremented by the continuation handler on entry, so a continuation that crashes mid-run still counted itself and cannot loop for free;
+- refunded (and the continuation re-enqueued) when the run was `skipped` for lock contention — a skip did no work, so counting it would let repeated contention exhaust the allowance with nothing done;
+- reset to `0` by any **non-dry** run that completes with status `success`, whatever its reason — success means the deferred work drained, so the next `partial` episode starts a fresh allowance;
+- when the cap is reached, `enqueueContinuation_` returns `capReached: true` and the engine records `continuationCapReached` on the run status.
+
+**Dry runs are exempt from all of this.** A diagnostic dry run that would end `partial` neither schedules a continuation nor resets the counter — a diagnostic must not mutate trigger state (see the engine pseudocode, Architecture §14.2).
+
+A stale counter is bounded harm in both directions: a crash before reset costs at most one episode's allowance (the next successful run clears it), and the daily run remains the eventual-consistency backstop either way (REQ-TRIGGER-002).
+
+Like §19.5, this depends on one-off trigger creation — **subject to Prototype Spike 1** — and §23.4 already states the narrowed guarantee if the spike fails.
 
 ---
 
@@ -1934,13 +2062,15 @@ So the entry carries `{ secs, at }`, and `RouteResult` carries `calculatedAt` th
 interface RouteResult {
   durationSeconds: number;
   distanceMeters: number | null;
-  fromCache: boolean;
+  source: "durable" | "ephemeral" | "broker";
   /** When the broker actually produced this duration, not when it was read. */
   calculatedAt: string;
 }
 ```
 
 `calculatedAt` is what gets written to `routeAt` in the durable cache. A duration is exactly as old as the moment the broker computed it, regardless of how many caches it passed through on the way.
+
+An ephemeral hit reports `source: "ephemeral"`, which the engine treats as "needs persisting" exactly like a broker call (§11.1): the client only reached the ephemeral tier because the durable entry failed validation, so the warmed duration still has to land in the companion's metadata or the next post-eviction run pays the broker again.
 
 This keeps the derived-state invariant intact: flushing it may cost broker calls and can never change Calendar state. It is a cache in front of a cache, which is worth the small complexity only because the alternative is an unbounded per-card-open cost on the one path with no durable place to write.
 
@@ -2070,6 +2200,8 @@ Process **upcoming events first**: source events starting at or after `now` in a
 
 Plain ascending start order is wrong now that the window extends backward — it would spend the execution budget on events that have already begun before reaching the appointments the user is about to travel to.
 
+Events **without timestamps sort last**. Ordering runs on normalized events before eligibility, and cancelled tombstones may carry no `start` at all (§8.2) — a naive time comparison against `now` turns those into NaN comparisons and arbitrary sort placement. Last is the correct position, not just a safe one: a tombstone consumes no route budget and no broker call; its only work is yielding deletion intent, which loses nothing by running after the planning that competes for the budget.
+
 ### 23.3 Route-call minimization
 
 Route caching is **required for the MVP**. See §13.3 for the cache contract and §21 of the architecture for the rationale.
@@ -2083,7 +2215,7 @@ const MAX_ROUTE_CALLS_PER_RUN = 60;
 ```
 
 - consult the route cache before every broker call;
-- count broker calls against the per-run ceiling;
+- count **HTTP attempts, retries included,** against the per-run ceiling (§11.2) — the shared `RouteBudget` counter is created by the engine and travels through the provider context;
 - on reaching the ceiling, stop planning further events, return status `partial`, and preserve existing generated events for unplanned sources;
 - record the number of cache hits, cache misses, and skipped events in the run status.
 
@@ -2109,6 +2241,8 @@ A run ending with status `partial` must therefore schedule its own continuation:
 - the continuation is an ordinary reconciliation, not a resumed cursor — reconciliation is idempotent, and the events completed in the previous pass now have valid cache entries, so they cost nothing;
 - do not stack continuations: if one is already pending, do not create another;
 - cap consecutive continuations (recommended 10) so a persistent failure cannot loop indefinitely, and report the cap in run status.
+
+The worker, the do-not-stack check, and the counter lifecycle that enforces the cap are specified in §19.6.
 
 This makes convergence a function of total work rather than of the daily cycle, which is what REQ-TRIGGER-002 promises.
 

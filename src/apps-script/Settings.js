@@ -22,9 +22,11 @@ function defaultSettings_() {
       home: { type: 'address', value: '' },
       office: { type: 'address', value: '' },
     },
+    // No fallbackToDefault toggle: falling back to the default origin is
+    // fixed behavior (Technical Design section 10.4), and a validated
+    // setting with no behavioral consumer misleads the user who flips it.
     workingLocation: {
       enabled: true,
-      fallbackToDefault: true,
     },
     generatedEvents: {
       titlePrefix: '[Drivetime Padding]',

@@ -300,6 +300,8 @@ A settings field that no evaluation step consults is not a setting; it is a cont
 
 When optional title-pattern matching is enabled, an ordinary event whose summary matches the pattern shall be eligible when all other required conditions are met.
 
+"Ordinary" is enforced by a type gate ahead of pattern matching: only `default` and `outOfOffice` event types may reach pattern acceptance. Special Calendar types (`focusTime`, `workingLocation`, `birthday`, `fromGmail`) are rejected as `UNSUPPORTED_EVENT_TYPE` even when timed, located, and pattern-matching.
+
 ### REQ-ELIG-003: All-day exclusion
 
 Events represented with date-only start/end values shall be ineligible.
@@ -1199,6 +1201,8 @@ The cache shall never be authoritative. Discarding it may increase broker calls 
 Steady-state route consumption shall be bounded by the number of eligible events per day, not by trigger frequency.
 
 Each reconciliation run shall enforce a maximum number of broker calls. On reaching that ceiling the run shall report `partial`, leave remaining events unplanned, and preserve their existing generated events.
+
+The ceiling counts **HTTP attempts, including transient retries**, not logical route requests. A ceiling enforced above the retry layer would permit up to double the spend during a broker outage — exactly when the bound matters.
 
 ### REQ-PERF-011: Diagnostic route budget
 

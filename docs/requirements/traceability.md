@@ -90,3 +90,17 @@ This matrix links requirement groups to architecture components, technical-desig
 | REQ-UI-017 | Manual synchronization enqueues rather than running inline | — UI, subject to Spike 1 |
 | REQ-CONFIG-006a (clarified) | Shrink cleanup excludes boundary-spanning events | AC-CONFIG-003 |
 | REQ-PERF-009 (clarified) | Zero-second cached routes are valid cache entries | AC-CACHE-013 |
+
+## Requirements added in the seventh review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| REQ-ELIG-002 (enforced) | Type gate ahead of pattern matching; `UNSUPPORTED_EVENT_TYPE` reachable | AC-ELIG-010 |
+| REQ-PERF-010 (extended) | Route ceiling counts HTTP attempts, retries included | AC-CACHE-015 |
+| REQ-PERF-014 (clarified) | Route provenance distinguishes durable, ephemeral, broker | AC-CACHE-014 |
+| REQ-RECON-015 (clarified) | Overlong-source deletions deduplicated by event id | AC-RECOVERY-011 |
+| REQ-PERF-013 (specified) | Continuation worker and counter lifecycle | AC-CACHE-006 |
+| Planning order (TD §23.2, plumbed) | `orderForPlanning` applied before the route budget is spent | — arch pseudocode |
+| Working-location plumbing | `listWorkingLocationEvents` called and passed to origin resolution | AC-ORIGIN-001, AC-ORIGIN-002 |
+| `workingLocation.fallbackToDefault` removed | Setting had no behavioral consumer; fallback is fixed behavior | AC-ORIGIN-003 |
+| Remove-all cleanup contract | Unbounded ownership scan, ordered teardown, reported partial failure | AC-CONFIG-004 |
