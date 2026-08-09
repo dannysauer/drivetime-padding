@@ -644,8 +644,7 @@ Recommended inputs:
 
 - parent event ID;
 - role;
-- source start;
-- source end;
+- source anchor — the one source boundary this companion depends on: `source.start` for outbound, `source.end` for return (Technical Design §14.1);
 - effective origin type and value;
 - destination;
 - route duration, rounded up to 5-minute granularity (§21.4);
@@ -663,7 +662,9 @@ Inputs should be canonically serialized:
 
 Hash using SHA-256.
 
-If the desired fingerprint matches the stored fingerprint, no update is needed.
+A matching fingerprint means the **desired** state has not changed. It does not prove the **observed** event still matches it: Calendar preserves private metadata through a user edit, so a moved, resized, renamed, or reminder-altered generated event still carries a matching fingerprint while sitting in the wrong state. Skipping the write is therefore permitted only when the fingerprint matches **and** the observed owned fields match the desired specification (Technical Design §15.2.1, REQ-GEN-014a).
+
+The fingerprint remains the cheap first check; the owned-field comparison is what makes reconciliation self-healing.
 
 ---
 
@@ -704,16 +705,27 @@ function reconcile(options) {
       return { status: "disabled" };
     }
 
+    // One clock for the whole run. Triggers pass no `now`, so default it
+    // here; every later consumer (window, cache-age checks, provider
+    // context) reuses this value rather than reading the clock again.
+    const now = options.now || new Date();
+
     // Two ranges: plan* selects sources, observe* selects generated
     // events to read. The second is strictly wider (§21.2).
-    const window = calculateWindow(settings.windowDays);
+    const window = calculateWindow(settings.windowDays, now);
     const { events: allEvents, scanComplete } = repository.listWindowEvents(
       "primary",
       window.observeStart,
       window.observeEnd
     );
 
-    const observedGenerated = allEvents.filter(isGeneratedEvent);
+    // Raw Calendar resources are flattened into the ObservedGeneratedEvent
+    // contract (key, parentEventId, fingerprint, observedFields, routeCache)
+    // before anything consumes them. The comparator and the cache lookup
+    // both depend on that shape; raw resources would match nothing.
+    const observedGenerated = allEvents
+      .filter(isGeneratedEvent)
+      .map(normalizeObservedGeneratedEvent);
     const sourceEvents = allEvents.filter(event => !isGeneratedEvent(event));
 
     // Index observed companions by parentEventId|role BEFORE planning, so
@@ -751,7 +763,7 @@ function reconcile(options) {
         directives,
         settings,
         window,
-        options.now,
+        now,
         routeCacheFor(observedByKey, event.id)
       );
 
@@ -772,11 +784,22 @@ function reconcile(options) {
 
     // Companions left beyond a shrunken horizon are invisible to the
     // window read above, so they need their own ownership-filtered pass
-    // (§21.2, technical design §7.6).
-    diff.deletes.push(...findStrandedCompanions(window, settings));
+    // (§21.2, technical design §7.6). The cleanup state travels with the
+    // diff -- merging the events into deletes and discarding the rest
+    // would leave no path to ever lower the high-water mark, and every
+    // later run would repeat the full scan of the vacated range.
+    const cleanup = findStrandedCompanions(window, settings);
+    diff.deletes.push(...cleanup.events);
 
     if (!options.dryRun) {
-      applyDiff(diff);
+      const applied = applyDiff(diff);
+
+      // Lower the mark only when every stranded delete succeeded, and
+      // never on a dry run. A partial cleanup leaves the mark high so the
+      // next run retries the remainder.
+      if (cleanup.shrunk && applied.deletedAll(cleanup.events)) {
+        saveHighWater(window.observeEnd);
+      }
     }
 
     saveRunStatus(diff);

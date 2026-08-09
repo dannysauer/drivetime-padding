@@ -16,3 +16,17 @@
 function normalizeCalendarEvent(rawEvent) {
   throw new Error('Not implemented: Technical Design section 8');
 }
+
+/**
+ * Flattens a raw generated-event resource into the ObservedGeneratedEvent
+ * contract: key, parentEventId, fingerprint, observedFields, routeCache.
+ *
+ * Must run before indexing or comparison. The comparator matches on `key`
+ * and reads `observedFields`; the cache lookup reads `routeCache`. Handing
+ * either one a raw Calendar resource matches nothing, so every companion
+ * looks absent -- duplicates from the comparator, broker calls from the
+ * cache. Technical Design sections 4.9 and 15.1.
+ */
+function normalizeObservedGeneratedEvent(rawEvent) {
+  throw new Error('Not implemented: Technical Design section 4.9');
+}

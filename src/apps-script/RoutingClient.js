@@ -14,17 +14,21 @@
  * Returns RouteResult with fromCache set, which is how the engine tells a
  * metadata patch apart from no write at all.
  */
-function getRouteDuration(origin, destination, requestContext) {
+function getRouteDuration(from, to, requestContext) {
   throw new Error('Not implemented: broker authentication unresolved');
 }
 
 /**
  * Route cache key. ADR 0011, Technical Design section 13.3.
  *
+ * Both endpoints are { type, value } RouteEndpoints in travel order. The
+ * return route swaps them, so a signature that types only the origin would
+ * flatten a placeId configured origin to a string in one direction.
+ *
  * Deliberately excludes source start and end times: MVP routing is not
  * traffic-aware, so rescheduling an appointment must not force a broker call.
  */
-function routeInputHash(origin, destination, travelMode) {
+function routeInputHash(fromEndpoint, toEndpoint, travelMode) {
   throw new Error('Not implemented: Technical Design section 13.3');
 }
 

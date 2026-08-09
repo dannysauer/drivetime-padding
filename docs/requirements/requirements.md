@@ -581,6 +581,12 @@ The system shall be able to request:
 - origin to destination; and
 - destination to origin.
 
+### REQ-ROUTE-011: Uniform endpoint representation
+
+Both ends of every route request shall carry an explicit endpoint type (address or Place ID) in both travel directions.
+
+The return route swaps the endpoints of the outbound route. A representation that types only the origin would, in the return direction, lose whether the configured origin is a Place ID — degrading a precise place reference into address parsing, or failing outright.
+
 ### REQ-ROUTE-005: No guessed fallback
 
 A failed route lookup shall not silently fall back to a fixed or guessed duration in production.
@@ -837,6 +843,12 @@ Managed generated events with no desired eligible source shall be deleted, excep
 A generated event whose source event is absent from a **complete** scan shall be treated as orphaned and deleted. A generated event whose source is absent from an **incomplete** scan shall be preserved, because an incomplete scan establishes only that the source was not reached, not that it is gone.
 
 Preservation shall not be extended to every unevaluated parent. Doing so would strand generated events whose source moved outside the read range, leaving stale travel blocks that age out of view without ever being removed.
+
+### REQ-RECON-013: Absence-based writes require a complete scan
+
+Creates and orphan deletions shall be performed only when the observation scan that failed to find the corresponding event completed successfully.
+
+Both operations act on absence, and a truncated scan can cut between a source event and its own companion — planning the source while its existing companion sits on an unretrieved page, so an absence-gated create would duplicate it on every partial run. Operations based on events actually read (updates, metadata patches) may proceed.
 
 ### REQ-RECON-010: Dry-run support
 
@@ -1178,6 +1190,12 @@ A reconciliation run that stops at the per-run route ceiling shall schedule a co
 
 Consecutive continuations shall be capped and the cap reported in run status, so that a persistent failure cannot loop indefinitely.
 
+### REQ-PERF-017: Schedule-only changes cost no broker calls
+
+A change to a source event that does not alter its route inputs — rescheduling, renaming, or any edit leaving location and effective origin unchanged — shall not cause broker calls while the cached route remains valid.
+
+The route input hash excludes source times for exactly this reason. Rescheduling is the most common calendar edit; charging it two broker calls would waste quota and could push a cheap change into the per-run ceiling.
+
 ### REQ-PERF-016: Route age measured from calculation
 
 A cached route duration shall carry the time the route was calculated, not the time it was read from any cache.
@@ -1192,9 +1210,9 @@ Cache entries live on generated events, which are matched to desired specificati
 
 ### REQ-PERF-014: Route cache persistence
 
-A refreshed route cache entry shall be persisted even when the generated event's user-visible fields are unchanged.
+A refreshed route cache entry shall be persisted even when the generated event's user-visible fields are unchanged, and shall include the complete cache record: route hash, duration, and calculation time.
 
-Persisting only on user-visible change would leave the cache timestamp permanently stale and cause a broker call on every subsequent run, defeating REQ-PERF-010.
+Persisting only on user-visible change would leave the cache timestamp permanently stale. Persisting the duration and timestamp without the hash would leave a missing or corrupted hash in place, so the entry fails validation again on the next run despite the refresh. Either omission causes a broker call on every subsequent run, defeating REQ-PERF-010.
 
 ### REQ-PERF-012: Duration quantization
 

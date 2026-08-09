@@ -639,7 +639,7 @@ function findStrandedCompanions_(window, settings) {
   const highWater = loadHighWater_();            // ISO string or null
   if (!highWater || Date.parse(highWater) <= window.observeEnd.getTime()) {
     saveHighWater_(window.observeEnd);
-    return [];
+    return { shrunk: false, events: [] };
   }
 
   // Owned events only: privateExtendedProperty filters server-side, so this
@@ -650,7 +650,24 @@ function findStrandedCompanions_(window, settings) {
     new Date(Date.parse(highWater))
   );
 
-  return stranded;   // parents are outside the planning window by construction
+  // Deliberately does NOT lower the mark here. The stranded events have
+  // only been found, not deleted; the engine lowers the mark after
+  // applyDiff confirms every one of them was removed.
+  return { shrunk: true, events: stranded };
+}
+```
+
+The return shape is the point. This function is a *finder*; the deletions happen later, inside `applyDiff`, and only their success justifies lowering the mark. Merging the events into the delete list and discarding the `shrunk` flag would leave no execution path that ever lowers the mark, so every subsequent run would repeat the full filtered scan of the vacated range — correct results, quietly unbounded cost. The engine therefore keeps the cleanup state alongside the diff:
+
+```javascript
+const cleanup = findStrandedCompanions_(window, settings);
+diff.deletes.push(...cleanup.events);
+
+if (!options.dryRun) {
+  const applied = applyDiff(diff);
+  if (cleanup.shrunk && applied.deletedAll(cleanup.events)) {
+    saveHighWater_(window.observeEnd);
+  }
 }
 ```
 
@@ -658,7 +675,7 @@ Rules:
 
 - the high-water mark records the furthest `observeEnd` ever used, and is persisted alongside settings;
 - a run whose `observeEnd` is at or beyond the mark simply advances it and does no extra work — the common case costs one property read;
-- a run whose `observeEnd` is short of the mark performs the filtered scan, deletes what it finds, and lowers the mark to the current `observeEnd` **only after the deletions succeed**;
+- a run whose `observeEnd` is short of the mark performs the filtered scan and reports the stranded events; the **engine** lowers the mark to the current `observeEnd` only after `applyDiff` confirms every stranded delete succeeded, and never on a dry run;
 - the scan uses `privateExtendedProperty=dtp=1`, so it lists managed events rather than the whole calendar, and §15.3's safety rule still applies to every deletion.
 
 Lowering the mark only on success matters: a failed or partial cleanup leaves the mark high, so the next run tries again. That keeps the behavior self-healing in the same way as the rest of reconciliation, rather than depending on a single run to get it right.
@@ -797,7 +814,7 @@ Default origin is required for write mode. Dry-run diagnostics may continue and 
 ### 11.1 Public function
 
 ```javascript
-function getRouteDuration(origin, destination, requestContext)
+function getRouteDuration(from, to, requestContext)
   -> RouteResult
 ```
 
@@ -848,10 +865,12 @@ Invalid broker responses become `BROKER_PROTOCOL_ERROR`.
 
 ### 11.4 Route direction
 
-The provider requests two routes:
+The provider requests two routes, each as a pair of `RouteEndpoint`s (§13.3) in travel order:
 
-1. effective origin to event location;
-2. event location to effective origin.
+1. outbound: `from` = effective origin, `to` = `{ type: "address", value: source.location }`;
+2. return: `from` = the event-location endpoint, `to` = the effective origin.
+
+The same endpoint objects flow into `routeInputHash_` and the broker request, so the configured origin keeps its `placeId` type in both directions.
 
 The MVP must not assume symmetry.
 
@@ -878,7 +897,7 @@ interface DrivetimeContext {
     return: RouteCacheEntry | null;
   };
   routingClient: {
-    getRouteDuration(origin, destination, requestContext): RouteResult;
+    getRouteDuration(from, to, requestContext): RouteResult;
   };
 }
 
@@ -1054,17 +1073,32 @@ Each generated event caches the route for its own direction: the outbound event 
 
 The cache is derived state (ADR 0011). Deleting it is always safe.
 
+#### Route endpoints
+
+Both ends of a route share one shape:
+
+```typescript
+interface RouteEndpoint {
+  type: "address" | "placeId";
+  value: string;
+}
+```
+
+The source event's location becomes `{ type: "address", value: location }`; a configured origin is already `{ type, value }`. This uniformity is load-bearing, not stylistic. The return route **swaps** the endpoints — the event location becomes the start and the configured origin becomes the end — so a signature that assumed "first argument is an object, second is a string" would, in the return direction, either call `.value.trim()` on a string or flatten the configured origin to a string and silently discard whether it was a Place ID. Place IDs are a supported origin type; losing the type either breaks return routing or degrades a precise place reference into address-parsing guesswork. The broker request schema (§21.2) already uses `{ type, value }` for both ends, so the client-side shapes now match the wire.
+
 #### Route input hash
 
 ```javascript
-function routeInputHash_(origin, destination, travelMode) {
+function routeInputHash_(from, to, travelMode) {
   return sha256Hex_(canonicalJson_({
-    origin: { type: origin.type, value: origin.value.trim() },
-    destination: destination.trim(),
+    from: { type: from.type, value: from.value.trim() },
+    to: { type: to.type, value: to.value.trim() },
     travelMode: travelMode,
   }));
 }
 ```
+
+`from` and `to` are `RouteEndpoint`s in travel order, so the outbound and return entries hash differently — as they must, since the two directions are cached independently and never assumed symmetrical.
 
 The hash deliberately **excludes source start and end times**. MVP routing is not traffic-aware, so moving an appointment does not change its route, and rescheduling should not force a broker call. When traffic-aware routing is introduced, a departure-time bucket joins the hash inputs.
 
@@ -1217,7 +1251,7 @@ Convert signed byte values to two-digit hexadecimal.
 
 For every desired key:
 
-- no observed event: **create**;
+- no observed event: **create** — only when the scan was complete (§15.2.4);
 - one observed event, fingerprint matches **and** owned fields match: **unchanged**;
 - one observed event, fingerprint matches but owned fields differ: **update** (see §15.2.1);
 - one observed event, cache metadata is stale but everything else matches: **metadata patch** (see §15.2.2);
@@ -1284,6 +1318,26 @@ scanComplete && parent not found   ->  orphan, delete
 The distinction that matters is *evaluated and failed* versus *not present at all*. Only the former is a planning failure; the latter is ordinary cleanup.
 
 `ReconciliationDiff.diagnostics` records `scanComplete`, so a dry run shows why deletions were or were not proposed.
+
+#### 15.2.4 Absence is evidence only when the scan was complete
+
+The rule §15.2.3 states for deletes applies with equal force to creates, because both are **absence-based**: they act on what the scan failed to find rather than on anything it read.
+
+A truncated scan can cut between a source event and its own companion. Pagination fails after the page carrying the source but before the page carrying its return block; the source is planned, the desired return spec finds no observed match, and an absence-gated-only-for-deletes comparator creates a second return block. Every partial run repeats it, and §13.5's duplicate convergence cannot help until a *complete* scan finally reads both copies — this is the same blindness that produced the window-edge duplicates, arriving through a different door.
+
+So the diff outcomes divide by what they rely on:
+
+| Operation | Based on | On incomplete scan |
+|---|---|---|
+| create | absence | **suppressed** |
+| delete (orphan) | absence | **suppressed** (§15.2.3) |
+| update | an observed event | proceeds |
+| metadata patch | an observed event | proceeds |
+| unchanged | an observed event | proceeds |
+
+Presence-based operations proceed because the events they touch were actually read — their data is real regardless of what the scan missed. Suppressing them too would discard sound work and make a flaky page fetch cost a whole run.
+
+A run with suppressed operations reports `partial`, records the suppressed counts in diagnostics, and relies on retry — the next trigger, continuation, or daily run — to complete the scan and perform them.
 
 ### 15.3 Safety rule
 
@@ -1411,12 +1465,13 @@ The same reasoning applies to updates and metadata patches: a patch that lands o
 
 ### 16.6 Metadata-only patch
 
-Refreshing an expired route cache entry writes `routeSecs` and `routeAt` and nothing else:
+Refreshing a route cache entry writes the **complete cache triplet** and nothing else:
 
 ```json
 {
   "extendedProperties": {
     "private": {
+      "routeHash": "hex-sha256",
       "routeSecs": "1455",
       "routeAt": "2026-07-31T14:00:00Z"
     }
@@ -1426,7 +1481,9 @@ Refreshing an expired route cache entry writes `routeSecs` and `routeAt` and not
 
 Start, end, summary, event type, and transparency are omitted from the patch body, so the event does not move and the user sees nothing.
 
-This write is **required**, not optional. `routeAt` is what makes the cache entry valid; if it is not persisted, the entry stays expired and every subsequent run calls the broker again — which is precisely the unbounded cost the cache exists to prevent.
+`routeHash` is in the patch for a reason that is easy to miss: expiry is not the only way an entry becomes unusable. §13.3 also rejects an entry whose hash is missing, corrupted, or mismatched. If the repair wrote only `routeSecs` and `routeAt`, the bad hash would survive the refresh, the entry would fail the hash check again on the very next run, and the broker would be called every time — a freshly stamped cache that never validates. Writing the triplet atomically means one repair heals every miss cause.
+
+This write is **required**, not optional. A valid `routeHash` and fresh `routeAt` are jointly what make the entry usable; persist either without the other and the cost bound quietly fails.
 
 The resulting cost profile:
 
@@ -1435,7 +1492,10 @@ The resulting cost profile:
 | Valid, nothing changed | 0 | 0 |
 | Expired, duration in same bucket | 2 | 1 metadata patch per direction |
 | Expired, duration in a new bucket | 2 | 1 full update per direction |
-| Source event changed | 2 | 1 full update per direction |
+| Source rescheduled or renamed (route inputs unchanged), cache valid | **0** | 1 full update per direction |
+| Source location or effective origin changed | 2 | 1 full update per direction |
+
+The rescheduled row is the payoff of excluding source times from the route input hash (§13.3). Moving an appointment changes the companions' desired times — so the fingerprints change and both events are rewritten — but the drive itself is the same drive, the hash still matches, and the cached duration is reused. A reschedule costs Calendar writes only. Charging it two broker calls, as an earlier revision of this table did, would waste quota on the single most common edit a calendar sees and could push an otherwise cheap change into the per-run ceiling.
 
 One metadata patch per direction per day is a bounded and acceptable cost. Two broker calls per run is not, which is the trade being made.
 

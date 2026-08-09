@@ -29,13 +29,16 @@ deleteGeneratedEvent(observed) -> void   // conditional; see 16.5.1
 
 // Normalization and eligibility
 normalizeCalendarEvent(rawEvent) -> NormalizedEvent
+// Raw generated resources must be flattened before indexing or comparison;
+// the comparator and cache lookup consume this shape, not raw Calendar JSON
+normalizeObservedGeneratedEvent(rawEvent) -> ObservedGeneratedEvent
 evaluateEligibility(event, directives, settings, window) -> EligibilityResult
 resolveOrigin(event, directives, settings, workingLocations) -> ResolvedOrigin
 
 // Routing and provider
 // requestContext carries { role, cacheEntry, now, correlationId }; the client
 // consults the cache before the network and reports fromCache on the result.
-getRouteDuration(origin, destination, requestContext) -> RouteResult
+getRouteDuration(from, to, requestContext) -> RouteResult
 getGeneratedEventSpecs(context) -> PlanningOutcome
 
 // Context construction -- observed companions must be indexed before planning
@@ -45,7 +48,9 @@ routeCacheFor(observedByKey, parentEventId)
   -> { outbound: RouteCacheEntry|null, return: RouteCacheEntry|null }
 
 // Route plan cache (derived state, stored on generated events)
-routeInputHash(origin, destination, travelMode) -> string
+// Endpoints are { type, value } in BOTH directions; the return route swaps
+// them, so a typed-origin/string-destination signature breaks (13.3)
+routeInputHash(fromEndpoint, toEndpoint, travelMode) -> string
 cachedRouteIsUsable(metadata, expectedHash, now) -> boolean
 quantizeDuration(seconds) -> number
 
@@ -53,7 +58,9 @@ quantizeDuration(seconds) -> number
 calculateWindow(windowDays, now)
   -> { planStart: Date, planEnd: Date, observeStart: Date, observeEnd: Date }
 overlapsPlanningRange(event, window) -> boolean   // intersection, not start-containment
-findStrandedCompanions(window, settings) -> ObservedGeneratedEvent[]  // 7.6
+findStrandedCompanions(window, settings) -> { shrunk, events }        // 7.6
+// engine lowers the high-water mark only after applyDiff confirms every
+// stranded delete succeeded, never on dry run
 loadHighWater() / saveHighWater(observeEnd)                           // 7.6
 
 // Comparison helpers

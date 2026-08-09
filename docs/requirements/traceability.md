@@ -70,3 +70,12 @@ This matrix links requirement groups to architecture components, technical-desig
 | REQ-CONFIG-006a | Window reduction actually removes distant companions | AC-CONFIG-002 |
 | REQ-GEN-009a / REQ-GEN-014b | Reminder suppression is maintained, not creation-time | AC-RECOVERY-008 |
 | REQ-PERF-016 | Route age measured from calculation, not from cache read | AC-CACHE-010 |
+
+## Requirements added in the fifth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| REQ-RECON-013 | Absence-based writes require a complete scan | AC-RECOVERY-009 |
+| REQ-PERF-017 | Schedule-only changes cost no broker calls | AC-CACHE-011 |
+| REQ-PERF-014 (extended) | Cache repair persists the full triplet including the hash | AC-CACHE-012 |
+| REQ-ROUTE-011 | Uniform typed endpoints in both directions | AC-ORIGIN-005 |

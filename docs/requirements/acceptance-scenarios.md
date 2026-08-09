@@ -466,6 +466,48 @@ Stamping the read time would let a duration live up to one ephemeral TTL longer 
 
 Without the high-water mark the contracted observation range never reads those events, so they would survive until the rolling window grew back out to them — roughly 82 days here, during which the setting appears to do nothing.
 
+## AC-CACHE-011: Reschedule costs no broker calls
+
+**Given** a source event with matching companions and valid route cache entries  
+**When** the user moves the event two hours later without changing its location  
+**And** reconciliation runs  
+**Then** both companions are updated to surround the new time  
+**And** zero broker calls are made, because the route input hash excludes source times  
+**And** both refreshed companions retain their cached durations.
+
+Rescheduling is the most common calendar edit. If it cost two broker calls, the cache would only protect calendars nobody touches.
+
+## AC-CACHE-012: Corrupt hash is repaired, not just refreshed
+
+**Given** a generated event whose `routeHash` is missing or corrupted while its visible fields are correct  
+**When** reconciliation runs  
+**Then** the cache entry fails validation and the broker is called once per direction  
+**And** the metadata patch persists `routeHash`, `routeSecs`, and `routeAt` together  
+**And** the next run makes zero broker calls.
+
+Patching only the duration and timestamp would leave the bad hash in place, so the entry would fail validation again on every subsequent run — a freshly stamped cache that never becomes usable.
+
+## AC-RECOVERY-009: Incomplete scan does not create duplicates
+
+**Given** a source event with existing companions  
+**And** an observation scan that fails after reading the source but before reaching its return block  
+**When** reconciliation runs  
+**Then** the run records `scanComplete: false`  
+**And** no create is performed for the seemingly missing return block  
+**And** no orphan deletion is performed  
+**And** updates and metadata patches for events that were read proceed normally  
+**And** the run reports `partial`.
+
+Creates and deletes both act on absence, and a truncated scan proves only that an event was not reached — not that it does not exist.
+
+## AC-ORIGIN-005: Place ID origin survives the return route
+
+**Given** the effective origin is configured as a Place ID  
+**When** both routes are calculated  
+**Then** the return request carries the Place ID with its type intact as the destination endpoint  
+**And** the return cache entry is keyed on the typed endpoint pair  
+**And** the Place ID is never flattened to an address string.
+
 ## AC-CACHE-005: Buffer change costs no broker calls
 
 **Given** eligible events with valid route cache entries  

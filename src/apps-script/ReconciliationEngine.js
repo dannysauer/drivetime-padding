@@ -77,7 +77,14 @@ function orderForPlanning_(events, now) {
   throw new Error('Not implemented: Technical Design section 23.2');
 }
 
-function compareDesiredAndObserved(desiredSpecs, observedEvents, planningOutcomes) {
+/**
+ * scanComplete gates BOTH absence-based operations. Creates and orphan
+ * deletes act on what the scan failed to find; a truncated scan proves only
+ * that an event was not reached. Presence-based operations (update, metadata
+ * patch, unchanged) proceed, because the events they touch were actually
+ * read. Technical Design sections 15.2.3 and 15.2.4, REQ-RECON-013.
+ */
+function compareDesiredAndObserved(desiredSpecs, observedEvents, planningOutcomes, scanComplete) {
   throw new Error('Not implemented: Technical Design section 15');
 }
 
@@ -103,8 +110,13 @@ function routeCacheFor_(observedByKey, parentEventId) {
  * observeEnd is derived from the CURRENT windowDays, so reducing that setting
  * hides previously generated companions rather than deleting them. A
  * high-water mark of the furthest horizon ever used drives an
- * ownership-filtered cleanup over the vacated span; the mark is lowered only
- * after those deletions succeed, so a partial cleanup retries next run.
+ * ownership-filtered cleanup over the vacated span.
+ *
+ * Returns { shrunk, events } -- a FINDER, not a deleter. The engine lowers
+ * the mark only after applyDiff confirms every stranded delete succeeded
+ * (and never on dry run). Merging the events into the delete list and
+ * dropping the flag leaves no path that ever lowers the mark, so every
+ * later run repeats the full scan of the vacated range.
  * Technical Design section 7.6, REQ-CONFIG-006a.
  */
 function findStrandedCompanions_(window, settings) {
