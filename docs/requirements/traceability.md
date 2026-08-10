@@ -131,3 +131,17 @@ This matrix links requirement groups to architecture components, technical-desig
 | §7.5 (enforced) | Working-location read failure degrades to default origin with a warning | AC-ORIGIN-003 |
 | §23.1 (plumbed) | Execution cutoff implemented in the reconcile loop | AC-RECOVERY-013 |
 | §11.5 (new) | Broker wire codes mapped to application codes, retryability decided once | AC-SEC-001, AC-RECOVERY-004 |
+
+## Requirements added in the tenth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| §19.5 (hardened) | Manual run re-enqueued after a lock-contention skip | — TD §19.5 |
+| §17.1 (targeted read) | Diagnostics fetch the opened event by id; OUTSIDE_WINDOW reportable | AC-CONFIG-005 |
+| §12.5 (bounded) | Zero-length companions never emitted | AC-OOO-012 |
+| §12.6 (provenance) | Companion type follows the eligibility match, not the source type | AC-ELIG-007, AC-ELIG-009 |
+| §17.6 (new) | Per-event diagnostic payload carried on filtered results | AC-CONFIG-005 — §20.3 card |
+| `loadSettings` contract aligned | Returns `{ settings, validation }` everywhere | — interfaces |
+| §7.6 (dry-run safe) | Dry runs never advance the high-water mark | AC-DRYRUN-001 |
+| §19.6 (serialized) | Continuation counter updated by the engine under the user lock | AC-CACHE-006 |
+| Architecture §14.2 (renamed) | `normalizeCalendarEvent` used consistently | — pseudocode |

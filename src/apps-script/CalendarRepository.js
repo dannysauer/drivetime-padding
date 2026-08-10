@@ -60,6 +60,17 @@ function listAllGeneratedEvents(calendarId) {
   throw new Error('Not implemented: Technical Design section 19.4');
 }
 
+/**
+ * Targeted single-event fetch (Calendar.Events.get), used by diagnostic
+ * runs instead of the window scan: an event beyond the observation range
+ * is invisible to the bounded listing, and the card must be able to say
+ * OUTSIDE_WINDOW rather than nothing. Returns null when the event does
+ * not exist. Technical Design section 17.1.
+ */
+function getEventById(calendarId, eventId) {
+  throw new Error('Not implemented: Technical Design section 17.1');
+}
+
 function createGeneratedEvent(spec) {
   throw new Error('Not implemented: Technical Design section 16');
 }

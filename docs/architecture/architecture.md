@@ -758,6 +758,16 @@ function reconcile(options) {
         new Error("eventIdFilter requires dryRun"), options);
     }
 
+    // Counted HERE, under the lock -- not in the trigger handler. A
+    // handler-side increment races the reset a concurrent successful run
+    // performs, losing one or the other; behind the lock the two cannot
+    // interleave, and a skipped run never reaches this line so no refund
+    // path exists. Before any substantive work, so a crashed continuation
+    // still counted itself (technical design §19.6).
+    if (options.reason === "continuation" && !options.dryRun) {
+      incrementContinuationCount();
+    }
+
     // One clock for the whole run. Triggers pass no `now`, so default it
     // here; every later consumer (window, cache-age checks, provider
     // context) reuses this value rather than reading the clock again.
@@ -766,11 +776,43 @@ function reconcile(options) {
     // Two ranges: plan* selects sources, observe* selects generated
     // events to read. The second is strictly wider (§21.2).
     const window = calculateWindow(settings.windowDays, now);
-    const { events: allEvents, scanComplete } = repository.listWindowEvents(
-      "primary",
-      window.observeStart,
-      window.observeEnd
-    );
+
+    // Diagnostics read narrowly: the opened event by id plus its managed
+    // companions by parent metadata, never the full window scan. An event
+    // beyond the observation range is invisible to the bounded listing --
+    // the card could not even say OUTSIDE_WINDOW, only silence -- and a
+    // full window read on every card open is exactly the hot path the
+    // hourly budget protects (technical design §17.1). The targeted reads
+    // are complete for the one parent this run compares.
+    let allEvents;
+    let scanComplete;
+    let diagnosticRedirected = false;
+    if (options.eventIdFilter) {
+      let targetId = options.eventIdFilter;
+      let target = repository.getEventById("primary", targetId);
+
+      // Opening a COMPANION redirects to its parent: a companion has no
+      // desired state of its own, and diagnosing it directly would leave
+      // its parent unevaluated -- the comparator would then classify the
+      // very event the user is inspecting as an orphan and propose
+      // deleting it (technical design §17.1).
+      if (target && isGeneratedEvent(target)) {
+        diagnosticRedirected = true;
+        targetId = target.extendedProperties.private.parent;
+        target = repository.getEventById("primary", targetId);
+      }
+
+      const companions = repository.listCompanionsByParent("primary", targetId);
+      allEvents = (target ? [target] : [])
+        .concat(companions.map(companion => companion.rawEvent));
+      scanComplete = true;
+    } else {
+      ({ events: allEvents, scanComplete } = repository.listWindowEvents(
+        "primary",
+        window.observeStart,
+        window.observeEnd
+      ));
+    }
 
     // Raw Calendar resources are flattened into the ObservedGeneratedEvent
     // contract (key, parentEventId, fingerprint, observedFields, routeCache)
@@ -808,6 +850,12 @@ function reconcile(options) {
     // window read cannot reach them (technical design §15.2.6).
     const strandedOverlong = [];
 
+    // Per-event payload for the diagnostic card (technical design §17.6).
+    // Eligibility, directives, origin, and route provenance are loop
+    // locals; without an explicit capture they are discarded and the
+    // filtered run's result would carry nothing for the card to render.
+    let eventDiagnostics = null;
+
     // Working-location events feed origin resolution. Fetched once per run,
     // over the OBSERVATION range, not the planning range -- an evaluated
     // source can extend past planEnd (intersection eligibility), and a
@@ -820,15 +868,16 @@ function reconcile(options) {
     // where working locations are unsupported, an unguarded call would
     // throw into the run-wide catch and fail every synchronization --
     // technical design §7.5 requires unavailable data to degrade to the
-    // default origin, not fail the run.
+    // default origin, not fail the run (fetchWorkingLocationsSafely
+    // catches, records WORKING_LOCATION_UNAVAILABLE, returns []).
+    //
+    // Filtered diagnostics fetch inside the loop over the ONE source's
+    // span instead -- an observation-range listing per card open is
+    // exactly the cost the targeted read exists to remove.
     let workingLocations = [];
-    if (settings.workingLocation.enabled) {
-      try {
-        workingLocations = repository.listWorkingLocationEvents(
-          "primary", window.observeStart, window.observeEnd);
-      } catch (error) {
-        recordRunWarning("WORKING_LOCATION_UNAVAILABLE", error);
-      }
+    if (settings.workingLocation.enabled && !options.eventIdFilter) {
+      workingLocations = fetchWorkingLocationsSafely(
+        repository, window.observeStart, window.observeEnd);
     }
 
     // One shared HTTP-attempt budget for the whole run, decremented by the
@@ -849,19 +898,8 @@ function reconcile(options) {
     // events can exhaust the route budget while the appointment the user
     // is about to drive to sits unplanned (technical design §23.2).
     // Events without timestamps (cancelled tombstones) sort last.
-    let orderedSources = orderForPlanning(sourceEvents.map(normalizeEvent), now);
-
-    // Event diagnostics plan ONLY the opened event. Without the filter, a
-    // full-window pass can spend the 20-attempt hourly allowance on
-    // unrelated uncached sources before reaching the one the card is
-    // about; observed comparison is scoped the same way below. Rejected
-    // outside dry runs -- a write-mode run scoped to one event would
-    // treat everything else's companions as orphans (technical design
-    // §17.1).
-    if (options.eventIdFilter) {
-      orderedSources = orderedSources.filter(
-        event => event.id === options.eventIdFilter);
-    }
+    const orderedSources = orderForPlanning(
+      sourceEvents.map(normalizeCalendarEvent), now);
 
     for (const event of orderedSources) {
       // Approaching the Apps Script execution deadline: stop planning,
@@ -884,13 +922,22 @@ function reconcile(options) {
           reason: eligibility.reason
         });
 
+        if (options.eventIdFilter) {
+          eventDiagnostics = captureEventDiagnostics(
+            event, eligibility, directives, null, null);
+        }
+
         // A source edited past MAX_SOURCE_DURATION breaks the observability
         // guarantee: it stays readable while its companions may sit behind
         // observeStart, where the window read above cannot see them. Keyed
         // on the duration, not the reason -- a multi-day all-day conversion
         // strands companions the same way but classifies ALL_DAY_EVENT
         // before the duration is ever tested (technical design §15.2.6).
-        if (sourceExceedsDurationCap(event) &&
+        // Skipped on filtered diagnostics: §17.1 skips the cleanup passes,
+        // and the targeted read already listed this parent's companions
+        // unbounded -- the comparator sees them without a second fetch.
+        if (!options.eventIdFilter &&
+            sourceExceedsDurationCap(event) &&
             !bothRolesObserved(observedByKey, event.id)) {
           strandedOverlong.push(
             ...repository.listCompanionsByParent("primary", event.id)
@@ -899,13 +946,29 @@ function reconcile(options) {
         continue;
       }
 
+      if (settings.workingLocation.enabled && options.eventIdFilter) {
+        // Dates, not the NormalizedEvent's ISO strings -- the unfiltered
+        // call above passes calculateWindow's Date outputs, and a mixed
+        // signature would make every diagnostic throw inside the safe
+        // wrapper and degrade the origin to default with a spurious
+        // WORKING_LOCATION_UNAVAILABLE warning.
+        workingLocations = fetchWorkingLocationsSafely(
+          repository, new Date(event.start), new Date(event.end));
+      }
+
       const origin = resolveOrigin(event, directives, settings, workingLocations);
 
+      // eligibility.matchedBy travels with the context: the companion type
+      // follows the MATCH, not the source type -- an OOO source qualified
+      // through the title pattern gets ordinary companions (technical
+      // design §12.6, AC-ELIG-007), and only the match can tell those
+      // paths apart.
       const context = buildProviderContext(
         event,
         directives,
         settings,
         origin,
+        eligibility.matchedBy,
         window,
         now,
         routeBudget,
@@ -915,22 +978,35 @@ function reconcile(options) {
       const outcome = DrivetimeProvider.getGeneratedEventSpecs(context);
       planningOutcomes.set(event.id, outcome);
 
+      if (options.eventIdFilter) {
+        eventDiagnostics = captureEventDiagnostics(
+          event, eligibility, directives, origin, outcome);
+      }
+
       if (outcome.state === "planned") {
         desiredSpecs.push(...outcome.specs);
       }
     }
 
-    // A filtered diagnostic compares only the opened event's companions;
-    // handing the comparator the full observed set would report every
-    // other parent's companions as orphans of unevaluated sources.
-    const observedForCompare = options.eventIdFilter
-      ? observedGenerated.filter(
-          event => event.parentEventId === options.eventIdFilter)
-      : observedGenerated;
+    // Both loop branches capture, so a filtered run with no payload here
+    // means the targeted read resolved NO source event: the id is gone, or
+    // a companion's parent reference points at a purged event. Synthesize
+    // the not-found payload rather than return null -- silence is the
+    // failure mode the targeted read exists to eliminate, and an orphaned
+    // companion is exactly the event a user most needs explained
+    // (technical design §17.1).
+    if (options.eventIdFilter && !eventDiagnostics) {
+      eventDiagnostics = buildUnresolvedEventDiagnostics(
+        options.eventIdFilter,
+        diagnosticRedirected ? "PARENT_NOT_FOUND" : "EVENT_NOT_FOUND");
+    }
 
+    // A filtered diagnostic already read only the opened event's
+    // companions (the targeted read above), so the comparator naturally
+    // sees nothing it could misreport as another parent's orphans.
     const diff = compareDesiredAndObserved(
       desiredSpecs,
-      observedForCompare,
+      observedGenerated,
       planningOutcomes,
       scanComplete
     );
@@ -947,7 +1023,7 @@ function reconcile(options) {
     // results (technical design §17.1).
     const cleanup = options.eventIdFilter
       ? { shrunk: false, events: [], scanComplete: true }
-      : findStrandedCompanions(window, settings);
+      : findStrandedCompanions(window, settings, options.dryRun);
     diff.deletes.push(...cleanup.events);
 
     // Deduplicate by event id before merging. An overlong source with one
@@ -1011,7 +1087,7 @@ function reconcile(options) {
     // silently failed (REQ-ERROR-006). A write-mode run with applied null
     // (out of time before application) reports `partial`, so the
     // continuation machinery below reschedules the deferred work.
-    const result = buildRunResult(diff, applied, options);
+    const result = buildRunResult(diff, applied, options, eventDiagnostics);
 
     // Dry runs return their proposal but never persist it — and never
     // touch continuation state or triggers. The stored last-run record is

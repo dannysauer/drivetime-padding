@@ -160,6 +160,10 @@ function buildFailureResult_(errorOrValidation, options) {
  * high-water mark of the furthest horizon ever used drives an
  * ownership-filtered cleanup over the vacated span.
  *
+ * dryRun suppresses even the mark-ADVANCE on the common path: advancing is
+ * a persistence too, and a preview that raised the mark would change
+ * whether a later reduced-window run classifies as a shrink.
+ *
  * Returns { shrunk, events, scanComplete } -- a FINDER, not a deleter.
  * The engine lowers the mark only after applyDiff confirms every stranded
  * delete succeeded AND the scan itself was complete (and never on dry
@@ -176,6 +180,6 @@ function buildFailureResult_(errorOrValidation, options) {
  * ordering means the delete wins.
  * Technical Design section 7.6, REQ-CONFIG-006a.
  */
-function findStrandedCompanions_(window, settings) {
+function findStrandedCompanions_(window, settings, dryRun) {
   throw new Error('Not implemented: Technical Design section 7.6');
 }

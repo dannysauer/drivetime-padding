@@ -400,7 +400,9 @@ A start-time containment test would fail this scenario, and because ineligibilit
 **And** title-pattern matching is enabled with a pattern its title matches  
 **When** reconciliation runs  
 **Then** the event qualifies through the pattern  
-**And** ordinary generated events are produced, since the toggle governs automatic OOO inclusion rather than the event type.
+**And** the companions are ordinary events, not `outOfOffice`, because the provider received `matchedBy: "titlePattern"` and keys the type on the match rather than the source type.
+
+The toggle governs automatic OOO treatment, not just inclusion. Keying the companion type on the source's event type would emit exactly the OOO blocks the user switched off.
 
 ## AC-ELIG-008: Blank summary does not match a broad pattern
 
@@ -571,7 +573,8 @@ Without the observation range extending past `planEnd`, `timeMax` would exclude 
 **Given** an eligible event has no generated companions  
 **When** dry-run reconciliation executes  
 **Then** the result reports two creates  
-**And** Calendar remains unchanged.
+**And** Calendar remains unchanged  
+**And** stored automation state — the last-run record, the window high-water mark, and the continuation counter — is unchanged, so a preview never alters how a later real run classifies or reports.
 
 ---
 
@@ -630,11 +633,12 @@ Definitive ineligibility carries deletion authority, but the window scan cannot 
 
 **Given** a source event whose origin and destination resolve to coincident endpoints  
 **And** the broker returns a zero-second duration  
-**When** reconciliation runs twice within the cache lifetime  
+**When** reconciliation runs twice within the carrying tier's lifetime — the durable cache age limit when a companion exists to carry the entry, or the shorter ephemeral TTL when the zero-padding rule (§12.5) emitted no companions  
 **Then** the second run makes no broker call  
-**And** the cached zero is accepted by validation rather than treated as absent.
+**And** the cached zero is accepted by validation rather than treated as absent  
+**And** the entry is served from the tier that carries it.
 
-Zero is a legitimate duration. A truthiness check on the cached value would reject it before validation, forcing a broker call and metadata rewrite on every run.
+Zero is a legitimate duration. A truthiness check on the cached value would reject it before validation, forcing a broker call and metadata rewrite on every run. The two tiers have different lifetimes: the ephemeral tier is capped by CacheService well under `ROUTE_CACHE_MAX_AGE_HOURS` (§20.3), so a companion-less zero route re-fetched after ephemeral eviction is conformant — §12.5's bound is two broker calls per ephemeral TTL, not per durable lifetime.
 
 ## AC-CONFIG-003: Companion spanning the reduced horizon is not double-handled
 
@@ -720,3 +724,24 @@ Absence from `planningOutcomes` plus a complete scan means orphan. Sources skipp
 **Then** the run returns a structured result with status `failed` and an `INVALID_SETTINGS` error  
 **And** the stored last-run record reflects that failure  
 **And** the home card does not continue to display the previous run's success.
+
+## AC-OOO-012: Coincident endpoints with zero buffer produce no blocks
+
+**Given** an eligible source event whose origin and destination coincide (zero-second route)  
+**And** the effective buffer is 0 minutes  
+**When** reconciliation runs  
+**Then** no companion is created for either direction  
+**And** any existing companions for that source are deleted as orphans of a planned parent  
+**And** no insert of a zero-length event is ever attempted.
+
+Calendar rejects zero-length events; without this rule every reconciliation would end `partial` on an insert that can never succeed.
+
+## AC-CONFIG-005: Diagnosing an event outside the window reports the reason
+
+**Given** a source event starting beyond the planning horizon  
+**When** the user opens the event diagnostic card  
+**Then** the event is fetched by id rather than through the window scan  
+**And** the card reports `OUTSIDE_WINDOW`  
+**And** no full window listing is performed for the card open.
+
+A window-scan-based diagnostic would return silence for exactly the events users most wonder about.

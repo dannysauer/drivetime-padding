@@ -22,21 +22,24 @@ function removeAutomation() {
 /**
  * One-off trigger handler behind the "Synchronize now" card action. Deletes
  * its own trigger, then runs the shared engine with reason 'manual'
- * (REQ-RECON-011). Technical Design section 19.5.
+ * (REQ-RECON-011). On a lock-contention skip it re-enqueues: the user was
+ * told "Synchronization started" and the pending trigger is already
+ * deleted -- dropping the run here silently breaks that promise.
+ * Technical Design section 19.5.
  */
 function runManualReconciliation(e) {
   throw new Error('Not implemented: Technical Design section 19.5');
 }
 
 /**
- * One-off trigger handler behind partial-run continuations. Deletes its own
- * trigger, increments dtp.continuationCount BEFORE running (a crashed run
- * must still count itself or a persistent failure loops for free), then
- * runs the shared engine. A lock-contention skip refunds the count and
- * re-enqueues -- a skip did no work and must not burn cap allowance. The
- * counter resets to 0 on any successful non-dry run; the cap is enforced
- * at enqueue time, and the engine records continuationCapReached from the
- * enqueue return value. Technical Design section 19.6.
+ * One-off trigger handler behind partial-run continuations. Deletes its
+ * own trigger, then runs the shared engine. The counter increment lives
+ * in the ENGINE, under the user lock, before substantive work -- a
+ * handler-side increment races the reset a concurrent successful run
+ * performs. A lock-contention skip never reached the counter, so the
+ * handler just re-enqueues; the counter resets to 0 on any successful
+ * non-dry run; the cap is enforced at enqueue time. Technical Design
+ * section 19.6.
  */
 function runContinuationReconciliation(e) {
   throw new Error('Not implemented: Technical Design section 19.6');

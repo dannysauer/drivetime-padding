@@ -8,7 +8,9 @@ Write operations take the observed event rather than an event ID, so the ownersh
 
 ```javascript
 // Settings
-loadSettings() -> UserSettings
+// Never throws on validation problems: the engine branches on the tiers
+// (structurallyValid gates every run, writeReady gates writes -- 5.3)
+loadSettings() -> { settings: UserSettings, validation: ValidationResult }
 saveSettings(settings) -> UserSettings
 validateSettings(settings) -> ValidationResult
 
@@ -29,6 +31,10 @@ listGeneratedEventsBetween(calendarId, start, end)
 // absent). Used by the overlong-source cleanup (15.2.6) and the
 // out-of-window restoration pass (15.2.7)
 listCompanionsByParent(calendarId, parentEventId) -> ObservedGeneratedEvent[]
+// Targeted single-event fetch for diagnostic runs (17.1): the window scan
+// cannot see an event beyond the observation range, and the card must be
+// able to say OUTSIDE_WINDOW rather than nothing
+getEventById(calendarId, eventId) -> RawCalendarEvent | null
 // Unbounded ownership scan for "remove all generated events" -- window
 // scans miss events that aged out of the rolling range (19.4)
 listAllGeneratedEvents(calendarId)
@@ -47,6 +53,10 @@ normalizeCalendarEvent(rawEvent) -> NormalizedEvent
 normalizeObservedGeneratedEvent(rawEvent) -> ObservedGeneratedEvent
 evaluateEligibility(event, directives, settings, window) -> EligibilityResult
 resolveOrigin(event, directives, settings, workingLocations) -> ResolvedOrigin
+// Wraps listWorkingLocationEvents: a read failure records
+// WORKING_LOCATION_UNAVAILABLE (18.2) and returns [], so origin resolution
+// degrades to the default origin instead of failing the run (7.5)
+fetchWorkingLocationsSafely(repository, start, end) -> RawCalendarEvent[]
 
 // Routing and provider
 // requestContext carries { role, cacheEntry, now, budget, correlationId };
@@ -76,7 +86,9 @@ calculateWindow(windowDays, now)
 overlapsPlanningRange(event, window) -> boolean   // intersection, not start-containment
 // Stranded = start at or after the new horizon; a companion SPANNING the
 // boundary is visible to the ordinary read, which alone decides its fate
-findStrandedCompanions(window, settings)
+// dryRun suppresses even the mark-ADVANCE on the common path -- a preview
+// must not change whether a later run classifies as a shrink
+findStrandedCompanions(window, settings, dryRun)
   -> { shrunk, events, scanComplete }                                  // 7.6
 // engine lowers the high-water mark only after applyDiff confirms every
 // stranded delete succeeded AND the cleanup scan was complete, never on
@@ -105,7 +117,9 @@ runReconciliation(options) -> ReconciliationResult
 // Returns what Calendar ACCEPTED; run status is built from this, not from
 // the proposed diff (technical design 17.5, REQ-ERROR-006)
 applyDiff(diff) -> ApplyResult
-buildRunResult(diff, applied, options) -> ReconciliationResult   // applied null on dry run
+// applied null on dry run; eventDiagnostics null except on
+// eventIdFilter runs, where it becomes result.eventDiagnostics (17.6)
+buildRunResult(diff, applied, options, eventDiagnostics) -> ReconciliationResult
 // Top-level error boundary: a run-wide throw (settings, window read)
 // becomes a failed result and reaches the stored record (arch 14.2)
 buildFailureResult(error, options) -> ReconciliationResult
@@ -132,6 +146,16 @@ resolveOutOfWindowCompanions(diff, cleanup, repository) -> void
 // dry runs -- the broker calls happened
 diagnosticBudgetRemaining(now) -> number
 recordDiagnosticRouteSpend(count, now) -> void
+// Assembles the per-event diagnostic payload (17.6) for eventIdFilter
+// runs; origin and outcome are null when eligibility already rejected;
+// routes copied from outcome.routes (17.4)
+captureEventDiagnostics(event, eligibility, directives, origin, outcome)
+  -> EventDiagnostics
+// Fallback payload when the targeted read resolves no source event
+// (17.1): a synthesized ineligible EligibilityResult with reason
+// EVENT_NOT_FOUND or PARENT_NOT_FOUND -- the card must never render
+// silence for exactly the orphaned events users most wonder about
+buildUnresolvedEventDiagnostics(eventId, reason) -> EventDiagnostics
 
 // Triggers
 ensureTriggers() -> TriggerHealth
@@ -140,11 +164,13 @@ removeAutomation() -> CleanupResult
 // (technical design 19.5; one-off trigger, subject to Spike 1)
 onSynchronizeNow(e) -> ActionResponse
 runManualReconciliation(e) -> ReconciliationResult
-// Partial-run continuation worker (19.6): counter incremented on entry,
-// refunded on lock-contention skips, reset by any successful non-dry run,
-// cap enforced at enqueue time. Called by the ENGINE after a partial run;
-// the return value is how continuationCapReached reaches run status.
+// Partial-run continuation worker (19.6). The counter is incremented by
+// the ENGINE under the user lock (a handler-side increment races the
+// reset a concurrent successful run performs); skipped runs never reach
+// the counter, so no refund path exists -- the handler just re-enqueues.
+// Reset by any successful non-dry run; cap enforced at enqueue time; the
+// enqueue return value is how continuationCapReached reaches run status.
 enqueueContinuation() -> { scheduled: boolean, capReached: boolean }
-resetContinuationCount() / decrementContinuationCount()
+incrementContinuationCount() / resetContinuationCount()
 runContinuationReconciliation(e) -> ReconciliationResult
 ```

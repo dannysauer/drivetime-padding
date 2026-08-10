@@ -197,7 +197,11 @@ TITLE_PATTERN_DISABLED
 TITLE_PATTERN_NO_MATCH
 INVALID_TITLE_PATTERN
 OUTSIDE_WINDOW
+EVENT_NOT_FOUND
+PARENT_NOT_FOUND
 ```
+
+`EVENT_NOT_FOUND` and `PARENT_NOT_FOUND` are synthesized only by diagnostic runs when the targeted read resolves nothing (§17.1); the eligibility evaluator itself never produces them — an event it is handed necessarily exists.
 
 ### 4.6 ResolvedOrigin
 
@@ -673,11 +677,17 @@ Widening the general read is the wrong fix — it would cost a large listing on 
 ```javascript
 const OBSERVE_HIGH_WATER_KEY = 'dtp.observeHighWater';
 
-function findStrandedCompanions_(window, settings) {
+function findStrandedCompanions_(window, settings, dryRun) {
   const highWater = loadHighWater_();            // ISO string or null
   if (!highWater || Date.parse(highWater) <= window.observeEnd.getTime()) {
-    saveHighWater_(window.observeEnd);
-    return { shrunk: false, events: [] };
+    // ADVANCING the mark is a persistence too, and dry runs persist
+    // nothing: a preview that raised the mark would change whether a
+    // later reduced-window run classifies as a shrink and performs
+    // cleanup -- a dry run altering real behavior.
+    if (!dryRun) {
+      saveHighWater_(window.observeEnd);
+    }
+    return { shrunk: false, events: [], scanComplete: true };
   }
 
   // Owned events only: privateExtendedProperty filters server-side, so this
@@ -716,7 +726,7 @@ function findStrandedCompanions_(window, settings) {
 The return shape is the point. This function is a *finder*; the deletions happen later, inside `applyDiff`, and only their success justifies lowering the mark. Merging the events into the delete list and discarding the `shrunk` flag would leave no execution path that ever lowers the mark, so every subsequent run would repeat the full filtered scan of the vacated range — correct results, quietly unbounded cost. The engine therefore keeps the cleanup state alongside the diff:
 
 ```javascript
-const cleanup = findStrandedCompanions_(window, settings);
+const cleanup = findStrandedCompanions_(window, settings, options.dryRun);
 diff.deletes.push(...cleanup.events);
 
 if (!options.dryRun) {
@@ -971,6 +981,12 @@ interface DrivetimeContext {
   settings: UserSettings;
   directives: ParsedDirectives;
   origin: ResolvedOrigin;
+  /**
+   * Which eligibility path accepted this source. Decides the companion
+   * type (12.6): an OOO source qualified through the title pattern gets
+   * ordinary companions, and only this field can tell the paths apart.
+   */
+  matchedBy: "outOfOffice" | "titlePattern";
   /** Injected clock. Cache age is time-dependent; tests must control it. */
   now: Date;
   /**
@@ -1097,22 +1113,30 @@ end = source.end + quantize(returnRoute.duration) + buffer
 
 Use integer seconds internally to avoid drift. Because durations are quantized to 5 minutes and buffers are whole minutes, generated timestamps land on whole minutes whenever the source event does.
 
+**Zero-length blocks are never emitted.** A zero-second route (coincident endpoints, §13.3) with a zero-minute buffer — both explicitly allowed — makes `quantize(duration) + buffer === 0`, and the formulas above would produce a companion whose start equals its end. Calendar rejects zero-length events, so every reconciliation would end `partial` on an insert that can never succeed. When a direction's total padding is zero, the provider emits **no spec for that role**: a zero-minute drive with zero buffer needs no travel block. The outcome is still `planned`, so a stale companion for that role is cleaned up through the ordinary orphan path — desired state genuinely contains no block.
+
+No companion also means **no durable cache carrier** — the route cache lives in companion metadata (§13.3). To keep the cost bound, a broker result with no durable home is written to the **ephemeral cache** (§20.3; entries are keyed by the same route input hash and interchangeable between tiers). That bounds the degenerate case at two broker calls per ephemeral TTL instead of two per run; with any nonzero buffer a block exists and the durable tier carries the entry as usual.
+
 ### 12.6 Generated type
 
-If source `eventType === 'outOfOffice'`:
+The companion type follows the **eligibility match provenance**, not the source's event type:
+
+If `matchedBy === 'outOfOffice'` (automatic OOO inclusion, §9.2 step 10):
 
 ```text
 generated eventType = outOfOffice
 ```
 
-Otherwise:
+If `matchedBy === 'titlePattern'`:
 
 ```text
 generated eventType = default
 transparency = source transparency when supported
 ```
 
-"Otherwise" here means a `default`-typed source: eligibility step 7 (§9.2) has already rejected every other special type as `UNSUPPORTED_EVENT_TYPE`, so the provider never sees a `fromGmail` or `focusTime` source to silently convert.
+The distinction matters for exactly one case: a real OOO source that qualifies **through the pattern** because `includeOutOfOffice` is off. Keying on the source type would emit OOO companions the toggle was switched off to prevent; AC-ELIG-007 requires ordinary companions on that path, and the toggle governs automatic OOO *treatment*, not just automatic OOO *inclusion*. This is why `matchedBy` travels in the provider context (§12.1) — without it the provider cannot distinguish the two paths.
+
+A `default`-typed source can only ever have matched by pattern, and eligibility step 7 (§9.2) has already rejected every other special type as `UNSUPPORTED_EVENT_TYPE`, so the provider never sees a `fromGmail` or `focusTime` source to silently convert.
 
 The exact Calendar API write contract for OOO events must be validated in a prototype before public release.
 
@@ -1705,10 +1729,13 @@ interface ReconciliationOptions {
 
 `eventIdFilter` scopes a run to one source event, and is how the event diagnostic card (§20.3) avoids spending its 20-attempt hourly allowance planning unrelated events before reaching the one that was opened. When set:
 
-- planning evaluates only the matching source;
-- the comparator receives only that parent's observed companions — handing it the full observed set would report every other parent's companions as orphans of unevaluated sources;
+- the **window scan is replaced by a targeted read**: the opened event via `getEventById` plus its managed companions via `listCompanionsByParent`. This is a correctness requirement, not just economy — an event beyond the observation range is invisible to the bounded listing, so a window-scan-based filter would leave the card with silence instead of the `OUTSIDE_WINDOW` reason the user needs; and it removes the full window listing from the hot card-open path. Eligibility still evaluates against the planning range, so the out-of-range diagnosis is reported correctly;
+- when the opened event is itself a **generated companion**, the filter is redirected to its `parent` id before the targeted read. The companion is derived state with no planning story of its own; diagnosing it literally would classify it as an unparented orphan and, on a hypothetical write run, propose deleting the very event the user asked about. The working-location fetch is likewise scoped to the diagnosed event's span rather than the observation range;
+- when the targeted read resolves **no source event** — the id no longer exists, or a companion's `parent` reference points at a purged event — the result still carries a diagnostic payload: `eventDiagnostics` holds a synthesized ineligible `EligibilityResult` with reason `EVENT_NOT_FOUND` (or `PARENT_NOT_FOUND` when a companion redirect failed) and null/empty remaining fields. Silence is the failure mode the targeted read exists to eliminate, and an orphaned companion is exactly the event a user most needs explained. The dry-run diff may simultaneously propose deleting such a companion; that is honest reporting — with its parent gone it *is* an orphan — and the card presents the reason alongside it;
+- planning and comparison therefore naturally cover only that parent — nothing else was read, so nothing else can be misreported as an orphan;
 - the cleanup passes (window-shrink, overlong) are skipped — the card cannot act on or display them, and the shrink scan costs real Calendar quota on the hot card-open path;
-- the engine **rejects the option on non-dry runs**: a write-mode run scoped to one event would carry deletion authority over a comparison that deliberately cannot see everything else. The rejection is a returned failed result, not silent acceptance.
+- the engine **rejects the option on non-dry runs**: a write-mode run scoped to one event would carry deletion authority over a comparison that deliberately cannot see everything else. The rejection is a returned failed result, not silent acceptance;
+- the result carries the per-event diagnostic payload (§17.6) the card renders.
 
 Full trigger reconciliation never sets it.
 
@@ -1753,6 +1780,18 @@ Use:
 interface PlanningOutcome {
   state: "planned" | "ineligible" | "failed";
   specs: GeneratedEventSpec[];
+  /** Route resolutions performed during planning, with provenance. Present
+      whenever a route was resolved, including roles the zero-padding rule
+      (§12.5) emitted no spec for and routes fetched before a later failure;
+      empty when planning failed before routing. The diagnostic payload
+      (§17.6) is built from this — specs cannot carry it: provenance never
+      reaches `privateProperties`, and a zero-emission role has no spec. */
+  routes?: Array<{
+    role: "outbound" | "return";
+    durationSeconds: number;                // raw
+    quantizedSeconds: number;
+    source: "durable" | "ephemeral" | "broker";
+  }>;
   error?: AppErrorRecord;
 }
 ```
@@ -1784,9 +1823,43 @@ interface ApplyResult {
 
 The `ReconciliationResult` and the stored last-run record (§20.2) are built **from this object**, not from the proposed diff. The distinction is REQ-ERROR-006: the diff says what the run intended, the `ApplyResult` says what Calendar accepted, and only the second can honestly claim success. A run whose `failures` list is non-empty reports `partial` (or `failed` when nothing applied), merges each failure's `AppErrorRecord` into `errors`, and counts it in the stored record — otherwise a rejected write vanishes: the UI shows success, and nothing distinguishes "done" from "silently dropped".
 
-A write-mode run can also end with no `ApplyResult`: when the execution budget expires after the diff is computed but before application (§23.1), the engine skips `applyDiff` rather than risk a hard kill mid-apply, and `buildRunResult(diff, null, options)` on a non-dry run reports `partial` — the diff was proposed, nothing was applied, and the continuation machinery reschedules it.
+A write-mode run can also end with no `ApplyResult`: when the execution budget expires after the diff is computed but before application (§23.1), the engine skips `applyDiff` rather than risk a hard kill mid-apply, and `buildRunResult(diff, null, options, null)` on a non-dry run reports `partial` — the diff was proposed, nothing was applied, and the continuation machinery reschedules it.
 
 On a dry run there is no `ApplyResult`; the result is built from the diff, carries `dryRun: true`, and is **returned but never persisted**. The stored last-run record is what the home card presents as the last outcome (§19.5, §20.2), and the event diagnostic card runs dry-run planning routinely — letting it overwrite the record would replace real applied counts with proposal counts moments after a genuine run.
+
+### 17.6 Per-event diagnostic payload
+
+The aggregate result cannot feed the event card: §20.3 requires eligibility, directive interpretation, selected origin, effective buffer, and route durations for the opened event, and all of those are planning-loop locals that appear nowhere in `ReconciliationResult` or the diff. Without a defined carrier, `buildEventCard` would have to reimplement planning to display what the engine just computed.
+
+On `eventIdFilter` runs the engine therefore captures them:
+
+```typescript
+interface EventDiagnostics {
+  eventId: string;
+  eligibility: EligibilityResult;
+  directives: ParsedDirectives | null;      // null when never parsed
+  origin: ResolvedOrigin | null;            // null when ineligible
+  effectiveBufferMinutes: number | null;
+  /** Copied from PlanningOutcome.routes (§17.4) — the provider is the only
+      layer that sees provenance. Empty when the outcome is null or planning
+      failed before routing. */
+  routes: Array<{
+    role: "outbound" | "return";
+    durationSeconds: number;                // raw
+    quantizedSeconds: number;
+    source: "durable" | "ephemeral" | "broker";
+  }>;
+  outcome: PlanningOutcome | null;
+}
+```
+
+`ReconciliationResult` gains an optional field, populated only when `eventIdFilter` was set:
+
+```typescript
+eventDiagnostics?: EventDiagnostics;
+```
+
+Unfiltered runs never populate it — capturing per-event detail for a whole window would bloat every result for one consumer that never reads it there.
 
 ---
 
@@ -1989,7 +2062,18 @@ function enqueueManualRun_() {
 // every other entry point (REQ-RECON-011).
 function runManualReconciliation(e) {
   deleteTriggerById_(e && e.triggerUid);
-  return runReconciliation({ reason: 'manual' });
+  const result = runReconciliation({ reason: 'manual' });
+
+  // Lock contention did no work, but the user was already told
+  // "Synchronization started" -- and this handler just deleted the only
+  // pending trigger. Re-enqueue, exactly like the continuation handler:
+  // contention is transient (locks release when the holding execution
+  // ends), and dropping the run here would silently break the promise
+  // the card made.
+  if (result.status === 'skipped') {
+    enqueueManualRun_();
+  }
+  return result;
 }
 ```
 
@@ -2029,20 +2113,19 @@ function enqueueContinuation_() {
   return { scheduled: true, capReached: false };
 }
 
-// One-off trigger handler. Deletes its own trigger, counts itself, runs
-// the shared engine (REQ-RECON-011).
+// One-off trigger handler. Deletes its own trigger, then runs the shared
+// engine (REQ-RECON-011). The counter increment happens INSIDE the engine,
+// under the user lock -- see the lifecycle rules below.
 function runContinuationReconciliation(e) {
   deleteTriggerById_(e && e.triggerUid);
-  incrementContinuationCount_();
   const result = runReconciliation({ reason: 'continuation' });
 
-  // Lock contention did no work and proved nothing about the deferred
-  // backlog -- it must not burn cap allowance. Refund and retry. This
-  // cannot loop unboundedly: Apps Script locks release when the holding
-  // execution ends (hard 6-minute execution ceiling), so contention is
-  // inherently transient.
+  // Lock contention did no work and never reached the counter (the
+  // increment lives behind the lock), so there is nothing to refund --
+  // just retry. This cannot loop unboundedly: Apps Script locks release
+  // when the holding execution ends (hard 6-minute execution ceiling),
+  // so contention is inherently transient.
   if (result.status === 'skipped') {
-    decrementContinuationCount_();
     enqueueContinuation_();
   }
   return result;
@@ -2052,9 +2135,9 @@ function runContinuationReconciliation(e) {
 The **counter lifecycle** is what makes the cap enforceable:
 
 - stored in User Properties under `dtp.continuationCount` — unlike pendingness it cannot be derived, because it must survive across runs;
-- incremented by the continuation handler on entry, so a continuation that crashes mid-run still counted itself and cannot loop for free;
-- refunded (and the continuation re-enqueued) when the run was `skipped` for lock contention — a skip did no work, so counting it would let repeated contention exhaust the allowance with nothing done;
-- reset to `0` by any **non-dry** run that completes with status `success`, whatever its reason — success means the deferred work drained, so the next `partial` episode starts a fresh allowance;
+- **incremented by the engine, under the user lock, after the cheap gate checks and before the window read** (`reason === 'continuation'`, non-dry): the lock is what serializes the counter against the concurrent successful run that resets it — a handler-side increment races that reset, losing it or leaving a stale refund. Counting before substantive work preserves crash-safety: a continuation that dies mid-run still counted itself. The gate checks it sits behind cannot loop on the allowance either — each one either terminates the episode (a failed result schedules nothing) or is transient (a skip re-enqueues without counting);
+- a `skipped` run never touched the counter (the increment is behind the lock it failed to take), so there is no refund path — the handler simply re-enqueues;
+- reset to `0` by any **non-dry** run that completes with status `success`, whatever its reason — success means the deferred work drained, so the next `partial` episode starts a fresh allowance. Increment and reset are both under the lock, so they cannot interleave;
 - when the cap is reached, `enqueueContinuation_` returns `capReached: true` and the engine records `continuationCapReached` on the run status.
 
 **Dry runs are exempt from all of this.** A diagnostic dry run that would end `partial` neither schedules a continuation nor resets the counter — a diagnostic must not mutate trigger state (see the engine pseudocode, Architecture §14.2).
@@ -2101,7 +2184,7 @@ Dry runs never write this record (§17.5). Only runs that actually applied a dif
 
 ### 20.3 Event diagnostic mode
 
-The current-event card may invoke dry-run planning for one event. It should display:
+The current-event card invokes a dry-run reconcile scoped by `eventIdFilter` (§17.1) and renders `ReconciliationResult.eventDiagnostics` (§17.6) — the defined carrier for the per-event fields below, which are otherwise planning-loop locals the card could not reach without reimplementing planning. It should display:
 
 - eligibility result;
 - directive interpretation;

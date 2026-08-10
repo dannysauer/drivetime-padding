@@ -40,6 +40,13 @@ function defaultSettings_() {
  * Must deep-merge against defaults rather than Object.assign: a stored
  * document containing a partial nested object would otherwise drop the
  * remaining keys of that object.
+ *
+ * Returns { settings, validation } and never throws on validation
+ * problems -- the engine branches on the validation tiers
+ * (structurallyValid gates every run, writeReady gates writes; Technical
+ * Design section 5.3). Returning a bare UserSettings would make the
+ * engine's destructuring yield undefined for both fields and send every
+ * run into the failure boundary.
  */
 function loadSettings() {
   throw new Error('Not implemented: Technical Design section 5');
