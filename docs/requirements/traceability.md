@@ -117,3 +117,17 @@ This matrix links requirement groups to architecture components, technical-desig
 | REQ-PERF-011 (enforced) | Diagnostic budget feeds the RouteBudget via an hourly counter | AC-CACHE-004 |
 | §19.4 (extended) | Remove-all persists `enabled = false` before removing triggers | AC-CONFIG-004 |
 | Architecture §14.2 (widened) | Working-location fetch covers evaluated sources' full spans | AC-ORIGIN-001, AC-ORIGIN-002 |
+
+## Requirements added in the ninth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| §7.6 (hardened) | Shrink cleanup scan paginated; truncation never lowers the high-water mark | AC-CONFIG-002 |
+| §17.2 (completed) | Skipped and disabled runs return the full result shape | — REQ-RECON-012 |
+| REQ-PRIV-006 (honored) | Remove-all replaces settings with a disabled tombstone, deleting origins | AC-CONFIG-004 |
+| Spike 1 workload (corrected) | Quota measured against the 40-hour observation tail, not the 8-hour lookback | — open-questions |
+| §17.1 (specified) | `eventIdFilter` scopes diagnostics to the opened event, dry-run only | AC-CACHE-004 |
+| §5.3 (tiered) | Structural validity gates all runs; write-readiness gates writes; whitespace-only origins normalized | AC-ORIGIN-004 |
+| §7.5 (enforced) | Working-location read failure degrades to default origin with a warning | AC-ORIGIN-003 |
+| §23.1 (plumbed) | Execution cutoff implemented in the reconcile loop | AC-RECOVERY-013 |
+| §11.5 (new) | Broker wire codes mapped to application codes, retryability decided once | AC-SEC-001, AC-RECOVERY-004 |

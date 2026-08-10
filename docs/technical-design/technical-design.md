@@ -324,6 +324,28 @@ interface ReconciliationDiff {
 }
 ```
 
+### 4.11 ReconciliationDiagnostics
+
+```typescript
+interface ReconciliationDiagnostics {
+  /** From the window read (7.2.1); gates absence-based operations. */
+  scanComplete: boolean;
+  /** Absence-based operations withheld on an incomplete scan (15.2.4). */
+  suppressedCreates: number;
+  suppressedDeletes: number;
+  /** Route economics for the run (13.3, 23.3). */
+  cacheHits: number;
+  cacheMisses: number;
+  routeAttemptsUsed: number;
+  /** Set when a partial run could not schedule its continuation (19.6). */
+  continuationCapReached?: boolean;
+  /** Non-fatal degradations, e.g. WORKING_LOCATION_UNAVAILABLE (18.2). */
+  warnings: Array<{ code: string; message: string }>;
+}
+```
+
+`warnings` is the sanctioned home for problems that degrade a run without failing it — an optional read that threw, a fallback that fired. `recordRunWarning(code, error)` appends here; warning codes live in the §18.2 registry like every other stable code, because an ad-hoc string is unfindable by the diagnostics UI and untestable by fixtures.
+
 ---
 
 ## 5. Settings Storage and Migration
@@ -374,7 +396,10 @@ Validation returns all errors rather than failing after the first error.
 
 ```typescript
 interface ValidationResult {
-  valid: boolean;
+  /** Types, ranges, regex compile. Gates EVERY run, including dry runs. */
+  structurallyValid: boolean;
+  /** structurallyValid AND a non-blank default origin. Gates writes only. */
+  writeReady: boolean;
   errors: Array<{
     field: string;
     code: string;
@@ -382,6 +407,8 @@ interface ValidationResult {
   }>;
 }
 ```
+
+The two tiers exist because their consumers differ. Structurally invalid settings — a string where a boolean belongs, a regex that will not compile — cannot be planned against at all, so every run stops and returns the errors. A **missing default origin** is different: the settings are perfectly interpretable, only writes are unsafe, and §10.4 explicitly promises that dry-run diagnostics continue and report `MISSING_DEFAULT_ORIGIN` per event. Folding it into a single `valid` flag would block exactly the diagnostic that tells a new user what to configure.
 
 Validation covers the **complete** `UserSettings` schema, not a selected subset. Settings arrive from User Properties, which can hold anything a corrupted write or a faulty migration left behind, and every field is consumed later without further checking.
 
@@ -404,8 +431,8 @@ Rules:
 | `eligibility.titlePattern` | string; must compile as a regex when `titlePatternEnabled` |
 | `origins.{default,home,office}` | object with exactly `type` and `value` |
 | `origins.*.type` | string, `address` or `placeId` |
-| `origins.*.value` | string; may be empty for `home` and `office` |
-| `origins.default.value` | non-empty string required for write-mode reconciliation |
+| `origins.*.value` | string; may be empty for `home` and `office` — **whitespace-only values are normalized to empty**, so the fallback-to-default path fires instead of a blank endpoint reaching the broker |
+| `origins.default.value` | non-blank after `trim()` required for write-mode reconciliation (`writeReady`) — route hashing trims the value, so a whitespace-only "configured" default would pass a bare non-empty check and then hash and route an empty endpoint |
 | `workingLocation.enabled` | boolean |
 | `generatedEvents.titlePrefix` | non-empty string, recommended maximum 80 characters |
 
@@ -665,18 +692,24 @@ function findStrandedCompanions_(window, settings) {
   // repaired. Stranded means wholly beyond the horizon: start at or after
   // observeEnd. Anything spanning the boundary is visible to the ordinary
   // read, which alone decides its fate.
-  const stranded = repository.listGeneratedEventsBetween(
+  // Paginated to completion, and completeness is reported. This scan has
+  // the same truncation hazard as the main window read: delete one page,
+  // satisfy deletedAll, lower the mark -- and every later page is
+  // permanently outside all future scans.
+  const scan = repository.listGeneratedEventsBetween(
     'primary',
     window.observeEnd,
     new Date(Date.parse(highWater))
-  ).filter(function (event) {
+  );
+  const stranded = scan.events.filter(function (event) {
     return Date.parse(event.observedFields.start) >= window.observeEnd.getTime();
   });
 
   // Deliberately does NOT lower the mark here. The stranded events have
   // only been found, not deleted; the engine lowers the mark after
-  // applyDiff confirms every one of them was removed.
-  return { shrunk: true, events: stranded };
+  // applyDiff confirms every one of them was removed -- and only when the
+  // scan that found them was complete.
+  return { shrunk: true, events: stranded, scanComplete: scan.scanComplete };
 }
 ```
 
@@ -688,7 +721,7 @@ diff.deletes.push(...cleanup.events);
 
 if (!options.dryRun) {
   const applied = applyDiff(diff);
-  if (cleanup.shrunk && applied.deletedAll(cleanup.events)) {
+  if (cleanup.shrunk && cleanup.scanComplete && applied.deletedAll(cleanup.events)) {
     saveHighWater_(window.observeEnd);
   }
 }
@@ -698,7 +731,7 @@ Rules:
 
 - the high-water mark records the furthest `observeEnd` ever used, and is persisted alongside settings;
 - a run whose `observeEnd` is at or beyond the mark simply advances it and does no extra work — the common case costs one property read;
-- a run whose `observeEnd` is short of the mark performs the filtered scan and reports the stranded events; the **engine** lowers the mark to the current `observeEnd` only after `applyDiff` confirms every stranded delete succeeded, and never on a dry run;
+- a run whose `observeEnd` is short of the mark performs the filtered scan and reports the stranded events; the **engine** lowers the mark to the current `observeEnd` only after `applyDiff` confirms every stranded delete succeeded **and the scan itself was complete** — a truncated scan can delete its one retrieved page, satisfy `deletedAll`, and strand every later page outside all future scans — and never on a dry run;
 - the scan uses `privateExtendedProperty=dtp=1`, so it lists managed events rather than the whole calendar, and §15.3's safety rule still applies to every deletion;
 - only events **starting** at or after the new `observeEnd` count as stranded — an event spanning the boundary appears in the ordinary observation read too, and queuing it here as well would race a cleanup delete against the comparator's repair.
 
@@ -904,6 +937,27 @@ The provider requests two routes, each as a pair of `RouteEndpoint`s (§13.3) in
 The same endpoint objects flow into `routeInputHash_` and the broker request, so the configured origin keeps its `placeId` type in both directions.
 
 The MVP must not assume symmetry.
+
+### 11.5 Broker error mapping
+
+The broker's wire vocabulary (Architecture §19.4) and the application's error codes (§18.2) are different namespaces, and the routing client is the single place they meet. The mapping is normative — without it an implementation can propagate wire codes the UI does not recognize, or misclassify a retryable outage as a protocol error:
+
+| HTTP status | Broker `code` | Application code | Retryable (§11.2) |
+|---|---|---|---|
+| 400 | `INVALID_REQUEST` | `BROKER_PROTOCOL_ERROR` | no |
+| 400 | `INVALID_ORIGIN` | `INVALID_ORIGIN` | no |
+| 400 | `INVALID_DESTINATION` | `INVALID_DESTINATION` | no |
+| 404 / 400 | `NO_ROUTE` | `NO_ROUTE` | no |
+| 401 / 403 | `AUTHENTICATION_FAILED` | `BROKER_AUTH_FAILED` | no |
+| 429 | `RATE_LIMITED` | `BROKER_RATE_LIMITED` | no (until a `Retry-After` policy exists) |
+| 502 / 503 / 504 | `UPSTREAM_UNAVAILABLE` | `BROKER_UNAVAILABLE` | yes — one immediate retry |
+| 500 | `INTERNAL_ERROR` | `BROKER_UNAVAILABLE` | yes — one immediate retry |
+| *(no response)* | `UrlFetchApp` throw — timeout, DNS failure, connection reset | `BROKER_UNAVAILABLE` | yes — one immediate retry |
+| any | body missing, unparseable, or code unrecognized | `BROKER_PROTOCOL_ERROR` | no |
+
+The transport row matters as much as the HTTP rows: a fetch exception is the single most transient failure class, and routing it through the body-missing catch-all would classify an ordinary outage as a non-retryable protocol error.
+
+The **application code decides retryability and user messaging**; the HTTP status and broker code are inputs to the mapping, never consulted downstream. An unrecognized broker code maps to `BROKER_PROTOCOL_ERROR` even on a 2xx — a response the client cannot interpret is not a success.
 
 ---
 
@@ -1649,7 +1703,14 @@ interface ReconciliationOptions {
 
 `now` injection supports deterministic tests.
 
-`eventIdFilter` may optimize current-event diagnostics, but full trigger reconciliation does not depend on it.
+`eventIdFilter` scopes a run to one source event, and is how the event diagnostic card (§20.3) avoids spending its 20-attempt hourly allowance planning unrelated events before reaching the one that was opened. When set:
+
+- planning evaluates only the matching source;
+- the comparator receives only that parent's observed companions — handing it the full observed set would report every other parent's companions as orphans of unevaluated sources;
+- the cleanup passes (window-shrink, overlong) are skipped — the card cannot act on or display them, and the shrink scan costs real Calendar quota on the hot card-open path;
+- the engine **rejects the option on non-dry runs**: a write-mode run scoped to one event would carry deletion authority over a comparison that deliberately cannot see everything else. The rejection is a returned failed result, not silent acceptance.
+
+Full trigger reconciliation never sets it.
 
 ### 17.2 Return value
 
@@ -1723,6 +1784,8 @@ interface ApplyResult {
 
 The `ReconciliationResult` and the stored last-run record (§20.2) are built **from this object**, not from the proposed diff. The distinction is REQ-ERROR-006: the diff says what the run intended, the `ApplyResult` says what Calendar accepted, and only the second can honestly claim success. A run whose `failures` list is non-empty reports `partial` (or `failed` when nothing applied), merges each failure's `AppErrorRecord` into `errors`, and counts it in the stored record — otherwise a rejected write vanishes: the UI shows success, and nothing distinguishes "done" from "silently dropped".
 
+A write-mode run can also end with no `ApplyResult`: when the execution budget expires after the diff is computed but before application (§23.1), the engine skips `applyDiff` rather than risk a hard kill mid-apply, and `buildRunResult(diff, null, options)` on a non-dry run reports `partial` — the diff was proposed, nothing was applied, and the continuation machinery reschedules it.
+
 On a dry run there is no `ApplyResult`; the result is built from the diff, carries `dryRun: true`, and is **returned but never persisted**. The stored last-run record is what the home card presents as the last outcome (§19.5, §20.2), and the event diagnostic card runs dry-run planning routinely — letting it overwrite the record would replace real applied counts with proposal counts moments after a genuine run.
 
 ---
@@ -1780,6 +1843,12 @@ LOCK_CONTENTION
 EXECUTION_BUDGET_EXCEEDED
 ROUTE_BUDGET_EXCEEDED
 UNEXPECTED_ERROR
+```
+
+Warnings (non-fatal; surface in `ReconciliationDiagnostics.warnings`, §4.11):
+
+```text
+WORKING_LOCATION_UNAVAILABLE
 ```
 
 `ROUTE_TOO_LONG` and `ROUTE_BUDGET_EXCEEDED` are both **planning failures**, not ineligibility. Per §17.3 they preserve existing generated events rather than deleting them.
@@ -1862,7 +1931,7 @@ listAllGeneratedEvents(calendarId)
 2. **persist `settings.enabled = false`**, still under the lock. Trigger removal alone is temporary: the engine's own first check is `settings.enabled`, `ensureTriggers()` is explicitly required to recreate missing triggers, and a later manual synchronization or trigger repair against an enabled settings object would regenerate everything the user just asked to remove. The persisted flag is what makes "disable automation" mean disabled;
 3. **remove the add-on's triggers**, so no later run recreates events after cleanup;
 4. run the unbounded scan and delete every returned event through `deleteGeneratedEvent` — §15.3's marker rule and §16.5.1's conditional delete apply to these deletions like any other;
-5. clear reconciliation state: the high-water mark and the continuation counter;
+5. clear stored add-on state: the high-water mark, the continuation counter, the diagnostic spend counter, the last-run record, and — when the cleanup completed without failures — **replace the settings document with a minimal disabled tombstone** `{ schemaVersion, enabled: false }`. Configured origins are personal data (home and office addresses), and REQ-PRIV-006 promises their removal; the tombstone rather than full deletion is what keeps trigger repair gated on the disabled flag (§19.3) instead of resurrecting defaults. A cleanup with failures retains settings so the retry has its configuration;
 6. release the lock and report a `CleanupResult`.
 
 If the lock cannot be acquired within the wait, the action reports that a synchronization is in progress and asks the user to retry — it must not proceed unserialized.

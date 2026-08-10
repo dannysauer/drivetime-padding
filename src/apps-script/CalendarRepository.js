@@ -21,12 +21,18 @@ function listWorkingLocationEvents(calendarId, start, end) {
 }
 
 /**
- * Ownership-filtered listing (privateExtendedProperty=dtp=1).
+ * Ownership-filtered listing (privateExtendedProperty=dtp=1), paginated to
+ * completion, returning { events, scanComplete }.
  *
  * Used by the window-shrink cleanup pass: when windowDays is reduced, the
  * observation range contracts and companions beyond the new horizon are never
  * read, so they can never be classified outside-window and deleted. Filtering
- * server-side keeps that pass cheap. Technical Design section 7.6.
+ * server-side keeps that pass cheap.
+ *
+ * scanComplete matters here just like the main window read: a truncated
+ * scan could delete its one retrieved page, satisfy deletedAll, and lower
+ * the high-water mark with later pages stranded outside every future scan.
+ * Technical Design section 7.6.
  */
 function listGeneratedEventsBetween(calendarId, start, end) {
   throw new Error('Not implemented: Technical Design section 7.6');

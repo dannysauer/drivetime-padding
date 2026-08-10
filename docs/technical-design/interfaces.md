@@ -19,9 +19,11 @@ parseDirectives(description) -> ParsedDirectives
 listWindowEvents(calendarId, observeStart, observeEnd)
   -> { events: RawCalendarEvent[], scanComplete: boolean }
 listWorkingLocationEvents(calendarId, start, end) -> RawCalendarEvent[]
-// Ownership-filtered (privateExtendedProperty=dtp=1); used for the
-// window-shrink cleanup pass in technical design 7.6
-listGeneratedEventsBetween(calendarId, start, end) -> ObservedGeneratedEvent[]
+// Ownership-filtered (privateExtendedProperty=dtp=1), paginated to
+// completion with completeness reported -- a truncated shrink scan must
+// not lower the high-water mark (technical design 7.6)
+listGeneratedEventsBetween(calendarId, start, end)
+  -> { events: ObservedGeneratedEvent[], scanComplete: boolean }
 // Ownership + parent filtered, no time bounds, EXCLUDES cancelled
 // tombstones (a deleted companion keeps its dtp metadata and must read as
 // absent). Used by the overlong-source cleanup (15.2.6) and the
@@ -74,9 +76,11 @@ calculateWindow(windowDays, now)
 overlapsPlanningRange(event, window) -> boolean   // intersection, not start-containment
 // Stranded = start at or after the new horizon; a companion SPANNING the
 // boundary is visible to the ordinary read, which alone decides its fate
-findStrandedCompanions(window, settings) -> { shrunk, events }        // 7.6
+findStrandedCompanions(window, settings)
+  -> { shrunk, events, scanComplete }                                  // 7.6
 // engine lowers the high-water mark only after applyDiff confirms every
-// stranded delete succeeded, never on dry run
+// stranded delete succeeded AND the cleanup scan was complete, never on
+// dry run
 loadHighWater() / saveHighWater(observeEnd)                           // 7.6
 
 // Comparison helpers
@@ -105,6 +109,18 @@ buildRunResult(diff, applied, options) -> ReconciliationResult   // applied null
 // Top-level error boundary: a run-wide throw (settings, window read)
 // becomes a failed result and reaches the stored record (arch 14.2)
 buildFailureResult(error, options) -> ReconciliationResult
+// Complete ReconciliationResult for skipped/disabled outcomes -- bare
+// status objects would make callers special-case those states (17.2)
+buildStatusOnlyResult(status, reason, options) -> ReconciliationResult
+// Execution-budget degradation (23.1): wall-clock check plus marking every
+// unprocessed source failed (EXECUTION_BUDGET_EXCEEDED) before the loop
+// stops -- a bare break orphans their companions
+elapsedExceedsExecutionBudget(runStartMs) -> boolean
+markRemainingSourcesFailed(orderedSources, currentEvent, planningOutcomes) -> void
+// Non-fatal run warnings (codes from the 18.2 registry, e.g.
+// WORKING_LOCATION_UNAVAILABLE): appends to
+// ReconciliationDiagnostics.warnings (4.11) without failing the run
+recordRunWarning(code, error) -> void
 // Engine post-pass on the diff: one unbounded parent lookup per pending
 // create; a same-key match converts the create to an update -- a dragged
 // companion is restored, not duplicated. Restoration supersedes the shrink

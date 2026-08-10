@@ -160,11 +160,14 @@ function buildFailureResult_(errorOrValidation, options) {
  * high-water mark of the furthest horizon ever used drives an
  * ownership-filtered cleanup over the vacated span.
  *
- * Returns { shrunk, events } -- a FINDER, not a deleter. The engine lowers
- * the mark only after applyDiff confirms every stranded delete succeeded
- * (and never on dry run). Merging the events into the delete list and
- * dropping the flag leaves no path that ever lowers the mark, so every
- * later run repeats the full scan of the vacated range.
+ * Returns { shrunk, events, scanComplete } -- a FINDER, not a deleter.
+ * The engine lowers the mark only after applyDiff confirms every stranded
+ * delete succeeded AND the scan itself was complete (and never on dry
+ * run). A truncated scan could delete its one retrieved page, satisfy
+ * deletedAll, and strand every later page outside all future scans.
+ * Merging the events into the delete list and dropping the flags leaves
+ * no path that ever lowers the mark, so every later run repeats the full
+ * scan of the vacated range.
  *
  * Stranded means START at or after the new horizon. Events.list bounds
  * timeMin on event end, so a companion spanning the boundary shows up in

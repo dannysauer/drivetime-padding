@@ -695,8 +695,16 @@ function reconcile(options) {
   const lock = LockService.getUserLock();
 
   if (!lock.tryLock(5000)) {
-    return { status: "skipped", reason: "lock-contention" };
+    // Complete ReconciliationResult shape, not a bare status object --
+    // REQ-RECON-012 requires the structured fields on every run, and
+    // callers must not special-case one state (technical design §17.2).
+    return buildStatusOnlyResult("skipped", "lock-contention", options);
   }
+
+  // Wall clock for the execution budget (§23.1 of the technical design).
+  // Distinct from the injected domain clock `now`: tests can freeze
+  // domain time, but elapsed runtime is real either way.
+  const runStart = Date.now();
 
   // Hoisted above the try so the finally can record diagnostic broker
   // spend even when the run throws -- otherwise a diagnostic that fails
@@ -713,16 +721,41 @@ function reconcile(options) {
     // must reach the stored record with INVALID_SETTINGS, and the failure
     // carries the validation errors so the diagnostic card can show the
     // user what is wrong (technical design §5.3) instead of a bare error.
+    //
+    // Two tiers (technical design §5.3): structural validity (types,
+    // ranges, regex) gates EVERY run; write-readiness (a configured
+    // default origin) gates writes only. A dry-run diagnostic proceeds
+    // without a default origin and reports MISSING_DEFAULT_ORIGIN per
+    // event (§10.4) -- blocking it here would hide exactly the
+    // diagnostics that tell the user what to configure.
     const { settings, validation } = loadSettings();
-    if (!validation.valid) {
+    if (!validation.structurallyValid) {
       const failure = buildFailureResult(validation, options);
       if (!options.dryRun) {
         saveRunStatus(failure);
       }
       return failure;
     }
+
+    // Disabled is checked BEFORE write-readiness. The remove-all tombstone
+    // is {schemaVersion, enabled: false} with no origins -- a disabled
+    // install must report "disabled", not manufacture a MISSING_DEFAULT_
+    // ORIGIN failure record moments after cleanup cleared the last one.
     if (!settings.enabled) {
-      return { status: "disabled" };
+      return buildStatusOnlyResult("disabled", null, options);
+    }
+
+    if (!options.dryRun && !validation.writeReady) {
+      const failure = buildFailureResult(validation, options);
+      saveRunStatus(failure);
+      return failure;
+    }
+
+    // §17.1: a scoped run carries deletion authority over a comparison
+    // that deliberately cannot see everything else. Dry runs only.
+    if (options.eventIdFilter && !options.dryRun) {
+      return buildFailureResult(
+        new Error("eventIdFilter requires dryRun"), options);
     }
 
     // One clock for the whole run. Triggers pass no `now`, so default it
@@ -782,9 +815,21 @@ function reconcile(options) {
     // excluded by a planEnd-bounded query, silently degrading its origin
     // to the default. The observation range covers every evaluated
     // source's full span by construction (technical design §7.2, §10.3).
-    const workingLocations = settings.workingLocation.enabled
-      ? repository.listWorkingLocationEvents("primary", window.observeStart, window.observeEnd)
-      : [];
+    //
+    // Guarded independently: this read is OPTIONAL data. On accounts
+    // where working locations are unsupported, an unguarded call would
+    // throw into the run-wide catch and fail every synchronization --
+    // technical design §7.5 requires unavailable data to degrade to the
+    // default origin, not fail the run.
+    let workingLocations = [];
+    if (settings.workingLocation.enabled) {
+      try {
+        workingLocations = repository.listWorkingLocationEvents(
+          "primary", window.observeStart, window.observeEnd);
+      } catch (error) {
+        recordRunWarning("WORKING_LOCATION_UNAVAILABLE", error);
+      }
+    }
 
     // One shared HTTP-attempt budget for the whole run, decremented by the
     // routing client for every request on the wire, retries included
@@ -804,9 +849,31 @@ function reconcile(options) {
     // events can exhaust the route budget while the appointment the user
     // is about to drive to sits unplanned (technical design §23.2).
     // Events without timestamps (cancelled tombstones) sort last.
-    const orderedSources = orderForPlanning(sourceEvents.map(normalizeEvent), now);
+    let orderedSources = orderForPlanning(sourceEvents.map(normalizeEvent), now);
+
+    // Event diagnostics plan ONLY the opened event. Without the filter, a
+    // full-window pass can spend the 20-attempt hourly allowance on
+    // unrelated uncached sources before reaching the one the card is
+    // about; observed comparison is scoped the same way below. Rejected
+    // outside dry runs -- a write-mode run scoped to one event would
+    // treat everything else's companions as orphans (technical design
+    // §17.1).
+    if (options.eventIdFilter) {
+      orderedSources = orderedSources.filter(
+        event => event.id === options.eventIdFilter);
+    }
 
     for (const event of orderedSources) {
+      // Approaching the Apps Script execution deadline: stop planning,
+      // but FIRST give every unprocessed source a failed outcome
+      // (EXECUTION_BUDGET_EXCEEDED). Absence from planningOutcomes plus a
+      // complete scan reads as orphaned -- a bare break would hand
+      // deletion authority over the remaining sources' companions to the
+      // degradation path (technical design §23.1).
+      if (elapsedExceedsExecutionBudget(runStart)) {
+        markRemainingSourcesFailed(orderedSources, event, planningOutcomes);
+        break;
+      }
       const directives = parseDirectives(event.description);
       const eligibility = evaluateEligibility(event, directives, settings, window);
 
@@ -853,9 +920,17 @@ function reconcile(options) {
       }
     }
 
+    // A filtered diagnostic compares only the opened event's companions;
+    // handing the comparator the full observed set would report every
+    // other parent's companions as orphans of unevaluated sources.
+    const observedForCompare = options.eventIdFilter
+      ? observedGenerated.filter(
+          event => event.parentEventId === options.eventIdFilter)
+      : observedGenerated;
+
     const diff = compareDesiredAndObserved(
       desiredSpecs,
-      observedGenerated,
+      observedForCompare,
       planningOutcomes,
       scanComplete
     );
@@ -866,7 +941,13 @@ function reconcile(options) {
     // diff -- merging the events into deletes and discarding the rest
     // would leave no path to ever lower the high-water mark, and every
     // later run would repeat the full scan of the vacated range.
-    const cleanup = findStrandedCompanions(window, settings);
+    // Skipped entirely on a filtered diagnostic: the scan of the vacated
+    // range costs real Calendar quota on the hot card-open path, a dry
+    // run can never lower the mark, and the card does not render cleanup
+    // results (technical design §17.1).
+    const cleanup = options.eventIdFilter
+      ? { shrunk: false, events: [], scanComplete: true }
+      : findStrandedCompanions(window, settings);
     diff.deletes.push(...cleanup.events);
 
     // Deduplicate by event id before merging. An overlong source with one
@@ -887,6 +968,14 @@ function reconcile(options) {
     // parent|role key converts the create into an update -- restoration,
     // the documented recovery for a manual move (technical design §15.2.7).
     //
+    // §23.1: apply already-computed safe diffs only IF SUFFICIENT TIME
+    // REMAINS. On a run already at the deadline, starting the restoration
+    // lookups and applyDiff risks a hard kill mid-apply -- no catch runs,
+    // no status is saved, no continuation is enqueued. Skipping leaves a
+    // clean partial: the diff is recomputed next run, and reconciliation
+    // is idempotent.
+    const outOfTime = elapsedExceedsExecutionBudget(runStart);
+
     // Takes the cleanup state too: a companion dragged into a vacated
     // range beyond a shrunken horizon is in BOTH lists -- queued for
     // deletion by the shrink cleanup and wanted back by this pass.
@@ -894,17 +983,23 @@ function reconcile(options) {
     // cleanup.events (it is not stranded; its desired position is inside
     // the window), or applyDiff would delete the freshly restored event --
     // and deletedAll(cleanup.events) could never be satisfied, freezing
-    // the high-water mark forever.
-    resolveOutOfWindowCompanions(diff, cleanup, repository);
+    // the high-water mark forever. Skipped when out of time on a write
+    // run: its unbounded lookups only matter to an application that will
+    // not happen.
+    if (options.dryRun || !outOfTime) {
+      resolveOutOfWindowCompanions(diff, cleanup, repository);
+    }
 
     let applied = null;
-    if (!options.dryRun) {
+    if (!options.dryRun && !outOfTime) {
       applied = applyDiff(diff);
 
-      // Lower the mark only when every stranded delete succeeded, and
-      // never on a dry run. A partial cleanup leaves the mark high so the
-      // next run retries the remainder.
-      if (cleanup.shrunk && applied.deletedAll(cleanup.events)) {
+      // Lower the mark only when every stranded delete succeeded AND the
+      // cleanup scan was complete, and never on a dry run. A truncated
+      // scan could delete its one retrieved page, satisfy deletedAll, and
+      // strand every later page outside all future scans. A partial
+      // cleanup leaves the mark high so the next run retries.
+      if (cleanup.shrunk && cleanup.scanComplete && applied.deletedAll(cleanup.events)) {
         saveHighWater(window.observeEnd);
       }
     }
@@ -913,7 +1008,9 @@ function reconcile(options) {
     // proposed. applyDiff returns per-operation results (technical design
     // §17.5); a rejected create or delete must reach the saved counts and
     // the returned status, or the UI reports success over writes that
-    // silently failed (REQ-ERROR-006).
+    // silently failed (REQ-ERROR-006). A write-mode run with applied null
+    // (out of time before application) reports `partial`, so the
+    // continuation machinery below reschedules the deferred work.
     const result = buildRunResult(diff, applied, options);
 
     // Dry runs return their proposal but never persist it — and never

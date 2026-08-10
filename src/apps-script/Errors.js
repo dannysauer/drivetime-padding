@@ -27,4 +27,8 @@ const ERROR_CODES = {
   EXECUTION_BUDGET_EXCEEDED: 'EXECUTION_BUDGET_EXCEEDED',
   ROUTE_BUDGET_EXCEEDED: 'ROUTE_BUDGET_EXCEEDED',
   UNEXPECTED_ERROR: 'UNEXPECTED_ERROR',
+
+  // Non-fatal warnings: surface in ReconciliationDiagnostics.warnings
+  // (Technical Design section 4.11), never fail the run.
+  WORKING_LOCATION_UNAVAILABLE: 'WORKING_LOCATION_UNAVAILABLE',
 };

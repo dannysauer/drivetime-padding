@@ -685,6 +685,7 @@ The ceiling bounds wire traffic. Counting logical calls instead would double the
 **When** the action runs  
 **Then** `settings.enabled` is persisted as `false` before the triggers are removed  
 **And** every managed event is deleted, including those no window-bounded scan would read  
+**And** on full success the stored settings are replaced with a minimal disabled tombstone, removing configured origin addresses  
 **And** the result reports deleted and failed counts, with a retry offered when any deletion failed  
 **And** a later manual synchronization or trigger repair does not regenerate events or triggers.
 

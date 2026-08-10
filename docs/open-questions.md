@@ -88,7 +88,7 @@ Question 1 is the single hardest open item. It does not block Phases 1–3, whic
 
 | # | Question | Blocks |
 |---|---|---|
-| 1 | Real Apps Script runtime for a 60-day forward window plus the 8-hour lookback | REQ-PERF-005 |
+| 1 | Real Apps Script runtime for the full observation read: 60-day forward window **plus 32-hour margins at both ends** — the Calendar query starts 40 hours in the past (8-hour planning lookback + 32-hour observe margin) and ends 32 hours past the planning horizon, per TD §7.2 | REQ-PERF-005 |
 | 2 | Whether `MAX_ROUTE_CALLS_PER_RUN = 60` is the right ceiling | TD §23.3 |
 | 3 | Whether `ScriptApp` `atHour()` supports the per-user UTC conversion in TD §19.2 | REQ-TIME-013 |
 | 4 | Practical event count before pagination and execution budget interact badly | REQ-PERF-008 |
@@ -104,7 +104,7 @@ Recorded so they are not relitigated.
 | How to stop unbounded route spend | Route plan cache, required for MVP — ADR 0011, TD §13.3 |
 | Whether to refresh routes near departure | No. Reimplements an explicit non-goal — ADR 0011 |
 | How to avoid rewriting events when a cached duration expires | Quantize durations up to 5-minute buckets — TD §12.3 |
-| How far back the read window extends | `MAX_TRAVEL_MINUTES + maxBufferMinutes` = 8 hours — ADR 0012 |
+| How far back the **planning** window extends | `MAX_TRAVEL_MINUTES + maxBufferMinutes` = 8 hours — ADR 0012. The Calendar **read** extends a further `OBSERVE_MARGIN` (32 hours) beyond it at each end, so the query itself starts 40 hours back — TD §7.2 |
 | Maximum supported travel duration | Six hours; longer routes yield a diagnostic and no events — REQ-TIME-012 |
 | Whether to plan source events already in progress | Yes. Skipping them orphan-deletes their return blocks — ADR 0012 |
 | Ordering under execution pressure | Upcoming events first, then in-progress — TD §23.2 |
