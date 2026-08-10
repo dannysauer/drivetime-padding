@@ -959,6 +959,28 @@ function reconcile(options) {
 
       const origin = resolveOrigin(event, directives, settings, workingLocations);
 
+      // Null means every fallback bottomed out at a blank default origin
+      // (technical design §10.4). Reachable only on dry runs -- writeReady
+      // gates write mode on a configured default -- and it must become a
+      // per-event FAILED outcome here, not a throw into the run-wide
+      // catch: §10.4 promises the diagnostic continues and reports
+      // MISSING_DEFAULT_ORIGIN, and the catch fires before
+      // eventDiagnostics captures anything. failed preserves existing
+      // companions like any other planning failure (§17.3).
+      if (!origin) {
+        const outcome = {
+          state: "failed",
+          specs: [],
+          error: buildAppError("MISSING_DEFAULT_ORIGIN", event)
+        };
+        planningOutcomes.set(event.id, outcome);
+        if (options.eventIdFilter) {
+          eventDiagnostics = captureEventDiagnostics(
+            event, eligibility, directives, null, outcome);
+        }
+        continue;
+      }
+
       // eligibility.matchedBy travels with the context: the companion type
       // follows the MATCH, not the source type -- an OOO source qualified
       // through the title pattern gets ordinary companions (technical
@@ -1068,35 +1090,53 @@ function reconcile(options) {
     }
 
     // Daily-only ownership sweep for companions moved outside the
-    // observation range whose parent was then DELETED (technical design
-    // §15.2.8). Restoration above is create-driven, so it never fires for
-    // a parent that no longer plans; without this sweep such a stray is
-    // permanent. Candidates are anchor-selected (parent time inside the
-    // slacked planning range) so historical companions cost almost
-    // nothing, and each candidate parent gets one point read -- absent
-    // parent means its companions join the deletes, deduplicated by id
-    // like the overlong pass.
+    // observation range whose parent no longer plans them (technical
+    // design §15.2.8). Restoration above is create-driven, so it never
+    // fires for such a parent; without this sweep the stray is permanent.
+    // Candidates are anchor-selected (parent time inside the slacked
+    // planning range, event id absent from the window read) so history
+    // costs almost nothing; each candidate parent gets one point read and
+    // a STATE decision: absent/cancelled parent, live-but-out-of-window
+    // parent, and in-window INELIGIBLE parent all mean delete; a PLANNED
+    // parent keeps its candidates (restoration owns them) unless the key
+    // is already satisfied in-window (stranded duplicate); FAILED
+    // preserves. Deletes deduplicated by id like the overlong pass.
     //
     // Budget-aware on BOTH sides: gated on a fresh check (the restoration
-    // lookups above may have consumed what the earlier check saw), and
-    // outOfTime is re-evaluated afterward -- paging a full-history listing
-    // into applyDiff with the budget spent is the hard-kill-mid-apply the
-    // gate exists to prevent. A sweep skipped for time acts on days-old
-    // state anyway; it waits for tomorrow's daily run.
-    if (options.reason === "daily-trigger" &&
+    // lookups above may have consumed what the earlier check saw), the
+    // listing stops paging early when the budget nears, and outOfTime is
+    // re-evaluated afterward -- paging a full-history listing into
+    // applyDiff with the budget spent is the hard-kill-mid-apply the gate
+    // exists to prevent. A sweep skipped or truncated acts on days-old
+    // state anyway; the remainder waits for tomorrow's daily run.
+    // Gated on scanComplete as well: "not evaluated this run" is only
+    // trustworthy when the window read evaluated everything -- on a
+    // truncated read an unretrieved in-window source has no outcome and
+    // its healthy companion would look like an out-of-window stray
+    // (technical design §15.2.8, same hazard as §15.2.4). Takes the FULL
+    // observed list, not the key index: candidates are identified by
+    // event id, and an in-window duplicate collapsed out of the index
+    // must not read as absent from the window.
+    if (options.reason === "daily-trigger" && scanComplete &&
         !elapsedExceedsExecutionBudget(runStart)) {
-      const orphaned = findDeletedParentOrphans(
-        observedByKey, window, repository);
+      const swept = sweepOutOfWindowCompanions(
+        observedGenerated, planningOutcomes, window, repository,
+        () => elapsedExceedsExecutionBudget(runStart));
       const queuedIds = new Set(diff.deletes.map(event => event.id));
       diff.deletes.push(
-        ...orphaned.filter(event => !queuedIds.has(event.id))
+        ...swept.filter(event => !queuedIds.has(event.id))
       );
       outOfTime = elapsedExceedsExecutionBudget(runStart);
     }
 
     let applied = null;
     if (!options.dryRun && !outOfTime) {
-      applied = applyDiff(diff);
+      // applyDiff re-checks the budget BETWEEN operations and defers the
+      // remainder (ApplyResult.deferredOps) -- the single gate above
+      // cannot cover an arbitrarily large diff, and a hard kill mid-apply
+      // skips the catch, the status write, and the continuation
+      // (technical design §17.5, §23.1). deferredOps > 0 reports partial.
+      applied = applyDiff(diff, runStart);
 
       // Lower the mark only when every stranded delete succeeded AND the
       // cleanup scan was complete, and never on a dry run. A truncated

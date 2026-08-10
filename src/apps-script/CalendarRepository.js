@@ -51,12 +51,25 @@ function listCompanionsByParent(calendarId, parentEventId) {
 }
 
 /**
- * Unbounded ownership scan (dtp=1, no time bounds, paginated to completion)
- * for the "remove all generated events" action. Window-bounded scans miss
- * managed events that aged out of the rolling range; "all" must mean all.
- * Technical Design section 19.4.
+ * One page of the unbounded ownership scan (dtp=1, no time bounds). The
+ * CONSUMER owns the paging loop and its budget checks -- a paginate-to-
+ * completion contract hides a multi-page scan behind a single call, ahead
+ * of any deadline check. The removal worker interleaves this with
+ * deletion: each delete shrinks the set, so re-fetching the first page
+ * resumes with no persisted cursor. Technical Design section 19.4.
  */
-function listAllGeneratedEvents(calendarId) {
+function listGeneratedEventsPage(calendarId, pageToken) {
+  throw new Error('Not implemented: Technical Design section 19.4');
+}
+
+/**
+ * Convenience wrapper over the paged scan for read-only consumers (the
+ * section 15.2.8 sweep): pages until done or shouldStop() returns true,
+ * reporting truncation via scanComplete. Window-bounded scans miss
+ * managed events that aged out of the rolling range; "all" must mean all.
+ * Technical Design sections 15.2.8 and 19.4.
+ */
+function listAllGeneratedEvents(calendarId, shouldStop) {
   throw new Error('Not implemented: Technical Design section 19.4');
 }
 

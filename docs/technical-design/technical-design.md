@@ -733,7 +733,7 @@ const cleanup = findStrandedCompanions_(window, settings, options.dryRun);
 diff.deletes.push(...cleanup.events);
 
 if (!options.dryRun) {
-  const applied = applyDiff(diff);
+  const applied = applyDiff(diff, runStart);
   if (cleanup.shrunk && cleanup.scanComplete && applied.deletedAll(cleanup.events)) {
     saveHighWater_(window.observeEnd);
   }
@@ -860,8 +860,10 @@ A regex compile error is a settings validation error and blocks write-mode recon
 
 ```javascript
 function resolveOrigin(event, directives, settings, workingLocations)
-  -> ResolvedOrigin
+  -> ResolvedOrigin | null
 ```
+
+`null` means no usable origin exists after every fallback — the chain bottomed out at a default origin that is blank (§10.4). It is not an error inside the resolver; the engine decides what a missing origin means for the run.
 
 ### 10.2 Per-event override
 
@@ -881,6 +883,10 @@ If multiple working-location events overlap, choose the one with the most specif
 ### 10.4 Default fallback
 
 Default origin is required for write mode. Dry-run diagnostics may continue and report `MISSING_DEFAULT_ORIGIN` without writing.
+
+That promise needs a concrete carrier in the planning path, not just a validation tier. When `resolveOrigin` returns `null` — every fallback exhausted, default blank — the engine does **not** call the provider (there is nothing to route from). It records a per-event **failed** planning outcome carrying a `MISSING_DEFAULT_ORIGIN` error (§17.4, §18.2), and on `eventIdFilter` runs captures the diagnostic payload with `origin: null` and that outcome, so the card renders the actionable reason instead of the run dying in the top-level catch before anything was captured. `failed` is the correct state: existing companions are preserved, exactly as for any other planning failure (§17.3).
+
+The path is reachable only on dry runs by construction — `writeReady` gates write-mode runs on a configured default origin (§5.3) — which is why the outcome must flow through the diagnostic payload rather than relying on the write-gate failure record.
 
 ---
 
@@ -1556,15 +1562,18 @@ Two interactions need pinning:
 
 Discovery therefore cannot be driven by desired specs. The **daily maintenance run** (`reason === "daily-trigger"`, never dry) performs an ownership sweep:
 
-1. run the unbounded, ownership-filtered scan the remove-all action already requires (`listAllGeneratedEvents`, §19.4);
-2. a returned event is a **candidate** when it is absent from the window read's observed index *and* its `anchor` (§13.2) falls within `[planStart − (MAX_SOURCE_DURATION + SWEEP_DISCOVERY_SLACK_MINUTES), planEnd + MAX_SOURCE_DURATION)`. The duration term covers whichever source boundary the role anchors — the two differ by at most the cap, and an outbound anchor sits a full duration behind the source's end. `SWEEP_DISCOVERY_SLACK_MINUTES` (recommended 2880 — 48 hours, two daily cycles) covers the time between the stray's creation and its discovery: `planStart` advances continuously, so a sweep bounded only by the duration cap would out-run an outbound anchor before the next daily firing — and out-run even a return anchor if one daily run is missed. Events with a missing or unparseable anchor are skipped;
-3. one `getEventById` per unique candidate parent. Parent absent or a cancelled tombstone → the parent's candidates join `diff.deletes`, deduplicated by event id exactly as §15.2.6. Parent exists → leave its companions alone: the parent is a live source, and this run's ordinary planning (restoration included) is already responsible for it.
+1. page the unbounded, ownership-filtered listing — `listAllGeneratedEvents(calendarId, shouldStop)`, the read-only wrapper over §19.4's paged scan — stopping early when the execution budget nears;
+2. a returned event is a **candidate** when no event with its **id** appears in the window read (identity, not `parent|role` key — a key test would hide exactly the out-of-window *duplicate* whose key an in-window copy satisfies) *and* its `anchor` (§13.2) falls within `[planStart − (MAX_SOURCE_DURATION + SWEEP_DISCOVERY_SLACK_MINUTES), planEnd + MAX_SOURCE_DURATION)`. The duration term covers whichever source boundary the role anchors — the two differ by at most the cap, and an outbound anchor sits a full duration behind the source's end. `SWEEP_DISCOVERY_SLACK_MINUTES` (recommended 2880 — 48 hours, two daily cycles) covers the time between the stray's creation and its discovery: `planStart` advances continuously, so a sweep bounded only by the duration cap would out-run an outbound anchor before the next daily firing — and out-run even a return anchor if one daily run is missed. Events with a missing or unparseable anchor are skipped;
+3. one `getEventById` per unique candidate parent, then a decision on the **parent's state**, not bare existence:
+   - parent **absent or a cancelled tombstone** → the parent's candidates join `diff.deletes`, deduplicated by event id exactly as §15.2.6;
+   - parent **live but not evaluated this run** (it sits outside the planning range — moved beyond the horizon or into the deep past together with its companion) → the candidates are **deleted too**. An out-of-window source's desired state is no companions (`OUTSIDE_WINDOW` carries deletion authority, §15.2), ordinary planning cannot see the source to say so, and once the anchor ages past the discovery slack the sweep never looks again — "parent exists, leave it" would make this stray exactly as permanent as the deleted-parent one. The companions regenerate when the source re-enters the window;
+   - parent **evaluated this run** (it was in the window read, so `planningOutcomes` has it): `ineligible` → delete the candidates — ineligibility carries deletion authority and the comparator could not reach these out-of-range events; `planned` → delete a candidate only when its `parent|role` key is already satisfied by an in-window observed event (the candidate is then a stranded duplicate §13.5 can never reach) and otherwise leave it — §15.2.7's restoration is updating that very event this run; `failed` → preserve, like every companion of a failed parent (§17.3).
 
-The deletion is safe without `scanComplete`: the swept events were **read** (by the unbounded scan), and the parent's absence comes from a **point read** — `getEventById` returning nothing means the resource is gone, not that a page went unretrieved. §15.3's marker rule and §16.5.1's conditional delete apply unchanged.
+The **absent-parent** rule is safe without `scanComplete`: the swept events were **read** (by the unbounded scan), and the parent's absence comes from a **point read** — `getEventById` returning nothing means the resource is gone, not that a page went unretrieved. §15.3's marker rule and §16.5.1's conditional delete apply unchanged. The **state-keyed** rules are different: "not evaluated this run" is trustworthy only when the window read actually evaluated everything in the window, so **the sweep runs only when the window scan reported `scanComplete`**. On a truncated read, an in-window source sitting on the unretrieved page has no planning outcome, its healthy or restorable companion looks like an out-of-window candidate, and the live-but-unevaluated rule would delete it — the same absence-under-truncation hazard §15.2.4 guards the comparator against. A sweep skipped for an incomplete scan retries tomorrow, like every other deferral in this section.
 
 Steady-state cost is one paginated ownership listing per day plus a small fixed band of point reads: the discovery slack deliberately reaches behind the observation range, so companions of sources that ended roughly 40–80 hours ago are candidates each day until their anchors age out of the band — a handful of lookups per day for a typical calendar, each finding a live parent and skipping. Beyond that band, the §7.2 completeness proof applies: a companion whose anchor lies inside the range sits inside the observation range *unless it was moved out*, so the remaining lookups are proportional to anomalies, normally zero.
 
-The sweep is **budget-aware**: it runs only when `elapsedExceedsExecutionBudget` is still false when its turn comes (after the restoration pass), and the engine re-evaluates the budget after the sweep before applying the diff (§23.1). A sweep skipped for time simply waits for the next daily run — it acts on days-old state by construction, so a one-day deferral costs nothing, while an unbounded listing racing the execution ceiling into `applyDiff` risks the hard-kill-mid-apply failure the budget gate exists to prevent.
+The sweep is **budget-aware**: it runs only when `elapsedExceedsExecutionBudget` is still false when its turn comes (after the restoration pass), its listing stops paging early when the budget nears (`listAllGeneratedEvents` takes a `shouldStop` guard and reports the truncation via `scanComplete`), and the engine re-evaluates the budget after the sweep before applying the diff (§23.1). A truncated listing is safe to act on: candidate selection only *finds* strays, and each deletion decision rests on its own point read — truncation merely means some strays wait for tomorrow's sweep. A sweep skipped or cut short costs nothing, while an unbounded listing racing the execution ceiling into `applyDiff` risks the hard-kill-mid-apply failure the budget gate exists to prevent.
 
 Why daily only: a per-calendar-trigger sweep would pay the unbounded listing on every edit, and a stray outside the observation range is invisible in the user's near-term view — a one-day discovery bound matches the daily cycle that already backstops eventual consistency (REQ-TRIGGER-002). The residual case — source deleted and automation disabled before the next daily run ever fires — is accepted; the remove-all action's unbounded cleanup (§19.4) still reaches such events.
 
@@ -1843,10 +1852,15 @@ interface ApplyResult {
     spec?: GeneratedEventSpec;
     error: AppErrorRecord;
   }>;
+  /** Operations never attempted: the execution budget expired
+      mid-application (§23.1). Not failures — nothing was rejected. */
+  deferredOps: number;
   /** True when every one of the given observed events was deleted. */
   deletedAll(events: ObservedGeneratedEvent[]): boolean;
 }
 ```
+
+`applyDiff(diff, runStart)` is itself budget-aware: it checks `elapsedExceedsExecutionBudget` **between operations** and stops when the budget nears, counting the remainder as `deferredOps`. The engine's single pre-application check is necessary but not sufficient — a diff with many writes can pass it and still cross the Apps Script hard deadline partway through application, and a hard kill bypasses the catch, the status write, and continuation scheduling: exactly the failure the gate exists to prevent, reintroduced one layer down. A run with `deferredOps > 0` reports `partial` (the deferred work is real, just postponed), the continuation machinery reschedules it, and the recomputed diff on the next pass picks up whatever was deferred — reconciliation is idempotent, so nothing is lost. Deferred operations are never merged into `failures`: nothing was rejected, and counting them as failures would make a clean budget-bounded run look broken.
 
 The `ReconciliationResult` and the stored last-run record (§20.2) are built **from this object**, not from the proposed diff. The distinction is REQ-ERROR-006: the diff says what the run intended, the `ApplyResult` says what Calendar accepted, and only the second can honestly claim success. A run whose `failures` list is non-empty reports `partial` (or `failed` when nothing applied), merges each failure's `AppErrorRecord` into `errors`, and counts it in the stored record — otherwise a rejected write vanishes: the UI shows success, and nothing distinguishes "done" from "silently dropped".
 
@@ -2020,9 +2034,18 @@ This action must require explicit confirmation.
 **"All" means all, not "all within the current window."** Managed events age out of the rolling observation range but stay on the calendar as history, and a window shrink or an old overlong source can leave managed events far outside any range a reconciliation run reads. A cleanup built on the window-bounded scans would silently miss them. The repository therefore exposes an **unbounded, ownership-filtered, paginated** scan for exactly this action:
 
 ```javascript
-listAllGeneratedEvents(calendarId)
+// One page at a time -- the CONSUMER owns the paging loop and its budget
+// checks. A paginate-to-completion contract would hide a multi-page scan
+// behind a single call, ahead of any deadline check (19.4 step 4).
+listGeneratedEventsPage(calendarId, pageToken)
+  -> { events: ObservedGeneratedEvent[], nextPageToken: string | null }
+// privateExtendedProperty: dtp=1; no timeMin/timeMax
+
+// Convenience wrapper over the paged listing for read-only consumers (the
+// 15.2.8 sweep): pages until done OR shouldStop() returns true, reporting
+// truncation via scanComplete
+listAllGeneratedEvents(calendarId, shouldStop)
   -> { events: ObservedGeneratedEvent[], scanComplete: boolean }
-// privateExtendedProperty: dtp=1; no timeMin/timeMax; nextPageToken to completion
 ```
 
 The unbounded scan plus one conditional delete per historical companion **cannot live inside the card callback**. CardService actions have the same short execution budget that already forced manual synchronization to enqueue (§19.5), and this action's work grows with the user's entire history — an established user with hundreds of aged-out companions would hit the ceiling mid-cleanup, losing the confirmation card and leaving events and personal settings behind at exactly the moment the user is preparing to uninstall. The action therefore splits into a cheap synchronous half and an enqueued worker.
@@ -2037,11 +2060,11 @@ The unbounded scan plus one conditional delete per historical companion **cannot
 **The cleanup worker** (`runRemovalCleanup`, one-off trigger handler):
 
 1. deletes every pending trigger for its own handler (the §19.5 collapse rule);
-2. acquires the user lock with a generous wait; on failure increments the progress record's `contentionRetries`, re-enqueues itself, and exits. Contention retries do **not** count against the pass cap — no work was done — but are bounded separately by `MAX_REMOVAL_CONTENTION_RETRIES` (recommended 10), past which the record is marked `failed`. Without their own bound, a persistently contended lock would chain re-enqueues forever with the record showing `running`; counting them as passes would instead let zero-work retries exhaust the cap and report failure when nothing went wrong. Genuine long contention is already unlikely: `enabled` is false by the time the worker exists, so post-disable runs exit at the gate in seconds;
+2. acquires the user lock with a generous wait; on failure increments the progress record's `contentionRetries`, re-enqueues itself, and exits. Contention retries do **not** count against the pass cap — no work was done — but are bounded separately by `MAX_REMOVAL_CONTENTION_RETRIES` (recommended 10). At that cap the worker makes **one final short lock attempt solely to write the settings tombstone** before marking the record `failed`; if even that fails, it marks the record `failed` *without touching settings* — an unlocked settings write would reopen the enable-flow clobber race step 6 exists to close — and the REQ-PRIV-006 removal completes on the next retry of the action, whose card half starts by acquiring the lock. Without their own bound, a persistently contended lock would chain re-enqueues forever with the record showing `running`; counting them as passes would instead let zero-work retries exhaust the cap and report failure when nothing went wrong. Genuine long contention is already unlikely: `enabled` is false by the time the worker exists, so post-disable runs exit at the gate in seconds;
 3. re-checks `settings.enabled`: if the user re-enabled the add-on between passes, the cleanup **aborts** and marks the progress record `aborted` — deleting companions a re-enabled automation is actively maintaining would just churn recreations against the user's changed intent;
-4. runs the unbounded scan and deletes returned events through `deleteGeneratedEvent` — §15.3's marker rule and §16.5.1's conditional delete apply unchanged — checking `elapsedExceedsExecutionBudget` between deletions (§23.1). When the budget expires with work remaining, it folds the pass's counts into the progress record, re-enqueues itself, and exits;
+4. **interleaves paging and deletion** rather than scanning to completion first: fetch one ownership-filtered page (`listGeneratedEventsPage`), delete its events through `deleteGeneratedEvent` — §15.3's marker rule and §16.5.1's conditional delete apply unchanged — checking `elapsedExceedsExecutionBudget` between pages and between deletions (§23.1). A materialize-everything-then-delete contract would put the entire multi-page scan ahead of the first budget check: a history large enough to spend the deadline on pagination alone would hard-kill the worker mid-scan, and — with no cursor to resume from — every retry would repeat the same full scan and die the same way, forever. The walk order within a pass: attempt every event on the fetched page that has not already failed this pass; if the page produced **any successful deletion**, re-fetch from the start (the set shrank, and the first page now holds fresh work); if it produced **none** — every event on it already failed — advance via `nextPageToken` instead (the **no-progress guard**: re-fetching an all-failing first page would spin forever). The scan is **complete only when this walk runs off the end of the listing** — a fetch yields no attemptable events *and* no `nextPageToken` — meaning every remaining managed event was attempted this pass and either deleted or recorded as a failure; an all-failing first page is *not* completion, it is the cue to advance to the pages behind it. Interleaving needs no persisted cursor: each deletion shrinks the result set, so re-fetching the first page after a kill or a re-enqueue naturally resumes where the deletions stopped, and cross-pass, failed events are simply retried. When the budget expires with work remaining, the worker folds the pass's counts into the progress record, re-enqueues itself, and exits;
 5. working passes are capped at `MAX_REMOVAL_PASSES` (recommended 20 — a generous multiple of any realistic history at ~thousands of deletions per pass). At the cap the record is marked failed with the counts so far; the action can be offered again;
-6. on a pass that completes the scan with **zero failures**: **re-check `settings.enabled` one last time, still under the lock, immediately before touching stored state** — then clear stored add-on state (the high-water mark, the continuation counter, the diagnostic spend counter, the last-run record) and **replace the settings document with a minimal disabled tombstone** `{ schemaVersion, enabled: false }`. Configured origins are personal data (home and office addresses), and REQ-PRIV-006 promises their removal; the tombstone rather than full deletion is what keeps trigger repair gated on the disabled flag (§19.3) instead of resurrecting defaults. A cleanup with failures retains settings so the retry has its configuration.
+6. on **any terminal outcome other than `aborted`** — the scan completed (with or without failures) or the pass cap was reached; the contention cap follows step 2's final-attempt rule instead, since it is by definition the path holding no lock — **re-check `settings.enabled` one last time, still under the lock, immediately before touching stored state**, then **replace the settings document with the minimal disabled tombstone** `{ schemaVersion, enabled: false }`. Configured origins are personal data (home and office addresses), and REQ-PRIV-006 promises their removal — a promise that cannot be conditional on Calendar accepting every delete: a user whose cleanup ends `failed` and who proceeds to uninstall instead of retrying would otherwise leave their home address in User Properties indefinitely. Nothing about retrying needs the addresses — the scan is ownership-filtered and deletion needs only the events themselves — so the retry keeps the `CleanupProgress` record and loses nothing. The tombstone rather than full deletion is what keeps trigger repair gated on the disabled flag (§19.3) instead of resurrecting defaults. On the fully-successful path the worker additionally clears the remaining stored state — the high-water mark, the continuation counter, the diagnostic spend counter, the last-run record; a `failed` outcome retains those alongside `CleanupProgress` for the retry. Only `aborted` retains the settings document: the user re-enabled mid-flow, and the tombstone would clobber the very configuration they just restored.
 
 The step-6 re-check closes the re-enable race from the other side too: **the enable flow acquires the same user lock before persisting `enabled = true`** (and is rejected with a cleanup-in-progress notice while a pass holds it). Without that, a settings save landing between the worker's step-3 check and its step-6 tombstone would be silently clobbered — the user's just-entered origin addresses destroyed and automation switched back off moments after they enabled it. With both rules, a re-enable can only land between passes, and the next pass aborts at step 3.
 
@@ -2462,7 +2485,7 @@ Track elapsed runtime inside the reconciliation loop.
 If nearing a conservative execution threshold:
 
 - stop planning new source events — **but first mark every unprocessed source** with a planning outcome of `failed` (`EXECUTION_BUDGET_EXCEEDED`), so the comparator preserves their existing companions;
-- apply already-computed safe diffs if sufficient time remains;
+- apply already-computed safe diffs if sufficient time remains — and the application itself re-checks the budget **between operations**, deferring the remainder (`ApplyResult.deferredOps`, §17.5) rather than trusting one pre-application check to cover an arbitrarily large diff;
 - record partial status;
 - allow daily or subsequent trigger execution to continue.
 

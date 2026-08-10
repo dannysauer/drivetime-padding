@@ -155,3 +155,13 @@ This matrix links requirement groups to architecture components, technical-desig
 | §13.2 (extended) | `anchor` persisted on every companion; sweeps cost nothing for history | AC-RECOVERY-015 |
 | §19.5 (serialized) | Manual enqueue check-and-create under the user lock; handlers collapse duplicate triggers | — TD §19.5 |
 | §19.4 (asynchronous) | Remove-all card action bounded; cleanup runs as budget-bounded worker passes with persisted progress | AC-CONFIG-004 |
+
+## Requirements added in the twelfth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| §10.4 (carried) | Missing default origin becomes a per-event failed outcome in the diagnostic payload, not a run-wide throw | — §20.3 card |
+| §19.4 (resumable) | Cleanup pages and deletes interleaved; retries resume without a persisted cursor | AC-CONFIG-004 |
+| REQ-RECON-017 (state-keyed) | Sweep decides on parent state: out-of-window and ineligible live parents delete too | AC-RECOVERY-015 |
+| §17.5 (deferred) | `applyDiff` budget-aware between operations; remainder deferred, not failed | AC-RECOVERY-013 |
+| REQ-PRIV-006 (unconditional) | Settings tombstone on every terminal cleanup outcome except user abort | AC-CONFIG-004 |

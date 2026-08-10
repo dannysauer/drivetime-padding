@@ -35,9 +35,15 @@ listCompanionsByParent(calendarId, parentEventId) -> ObservedGeneratedEvent[]
 // cannot see an event beyond the observation range, and the card must be
 // able to say OUTSIDE_WINDOW rather than nothing
 getEventById(calendarId, eventId) -> RawCalendarEvent | null
-// Unbounded ownership scan for "remove all generated events" -- window
-// scans miss events that aged out of the rolling range (19.4)
-listAllGeneratedEvents(calendarId)
+// One page of the unbounded ownership scan; the consumer owns the paging
+// loop and its budget checks. The removal worker interleaves this with
+// deletion so retries resume without a persisted cursor (19.4)
+listGeneratedEventsPage(calendarId, pageToken)
+  -> { events: ObservedGeneratedEvent[], nextPageToken: string | null }
+// Read-only wrapper over the paged scan (the 15.2.8 sweep): pages until
+// done or shouldStop() fires, reporting truncation via scanComplete --
+// window scans miss events that aged out of the rolling range
+listAllGeneratedEvents(calendarId, shouldStop)
   -> { events: ObservedGeneratedEvent[], scanComplete: boolean }
 createGeneratedEvent(spec) -> RawCalendarEvent
 updateGeneratedEvent(observed, spec) -> RawCalendarEvent
@@ -52,7 +58,12 @@ normalizeCalendarEvent(rawEvent) -> NormalizedEvent
 // numeric; everything else maps to null, never 0 (technical design 13.3)
 normalizeObservedGeneratedEvent(rawEvent) -> ObservedGeneratedEvent
 evaluateEligibility(event, directives, settings, window) -> EligibilityResult
-resolveOrigin(event, directives, settings, workingLocations) -> ResolvedOrigin
+// null when every fallback bottoms out at a blank default (10.4): the
+// engine records a per-event failed outcome (MISSING_DEFAULT_ORIGIN)
+// instead of routing -- reachable only on dry runs, since writeReady
+// gates write mode on a configured default
+resolveOrigin(event, directives, settings, workingLocations)
+  -> ResolvedOrigin | null
 // Wraps listWorkingLocationEvents: a read failure records
 // WORKING_LOCATION_UNAVAILABLE (18.2) and returns [], so origin resolution
 // degrades to the default origin instead of failing the run (7.5)
@@ -115,8 +126,10 @@ compareDesiredAndObserved(desiredSpecs, observedEvents, planningOutcomes, scanCo
 // Reconciliation
 runReconciliation(options) -> ReconciliationResult
 // Returns what Calendar ACCEPTED; run status is built from this, not from
-// the proposed diff (technical design 17.5, REQ-ERROR-006)
-applyDiff(diff) -> ApplyResult
+// the proposed diff (technical design 17.5, REQ-ERROR-006). Budget-aware:
+// checks elapsedExceedsExecutionBudget between operations and defers the
+// remainder (deferredOps -- not failures; deferred > 0 reports partial)
+applyDiff(diff, runStartMs) -> ApplyResult
 // applied null on dry run; eventDiagnostics null except on
 // eventIdFilter runs, where it becomes result.eventDiagnostics (17.6)
 buildRunResult(diff, applied, options, eventDiagnostics) -> ReconciliationResult
@@ -135,18 +148,30 @@ markRemainingSourcesFailed(orderedSources, currentEvent, planningOutcomes) -> vo
 // WORKING_LOCATION_UNAVAILABLE): appends to
 // ReconciliationDiagnostics.warnings (4.11) without failing the run
 recordRunWarning(code, error) -> void
+// Constructs an AppErrorRecord (18.1) from a registry code (18.2):
+// message and retryability from the registry entry, sourceEventId from
+// the event. Used by the engine's per-event failure paths, e.g. the
+// MISSING_DEFAULT_ORIGIN outcome (10.4)
+buildAppError(code, event) -> AppErrorRecord
 // Engine post-pass on the diff: one unbounded parent lookup per pending
 // create; a same-key match converts the create to an update -- a dragged
 // companion is restored, not duplicated. Restoration supersedes the shrink
 // cleanup: a matched event is removed from diff.deletes AND cleanup.events
 // (15.2.7)
 resolveOutOfWindowCompanions(diff, cleanup, repository) -> void
-// Daily-run ownership sweep (15.2.8): unbounded scan, anchor-selected
-// candidates (absent from the observed index, anchor inside the slacked
-// planning range), one getEventById per candidate parent; returns the
-// companions of absent/cancelled parents for deletion -- restoration is
-// create-driven and cannot reach a stray whose parent was deleted
-findDeletedParentOrphans(observedByKey, window, repository)
+// Daily-run ownership sweep (15.2.8): unbounded scan (paged, stops early
+// when shouldStop fires), anchor-selected candidates (event id absent
+// from the window read, anchor inside the slacked planning range), one
+// getEventById per candidate parent, then a parent-STATE decision:
+// absent/cancelled, live-but-out-of-window, and in-window ineligible all
+// delete; planned keeps its candidates (restoration owns them) unless the
+// key is already satisfied in-window (stranded duplicate); failed
+// preserves -- restoration is create-driven and cannot reach a stray
+// whose parent no longer plans. Runs only on a COMPLETE window scan, and
+// takes the full observed list, never the key index: the id test must
+// see in-window duplicates the index collapsed away
+sweepOutOfWindowCompanions(observedGenerated, planningOutcomes, window,
+                           repository, shouldStop)
   -> ObservedGeneratedEvent[]
 // Hourly diagnostic allowance (20.3): budget the routing client actually
 // decrements when reason === 'event-diagnostic'; spend recorded even on
@@ -170,10 +195,14 @@ ensureTriggers() -> TriggerHealth
 // enabled=false, removes triggers, and enqueues the cleanup worker; the
 // unbounded scan-and-delete lives in the worker (19.4)
 removeAutomation() -> ActionResponse
-// Budget-bounded cleanup passes: deletes until the execution budget nears,
-// persists cumulative counts in CleanupProgress (dtp.removalProgress),
-// re-enqueues until the scan completes (capped at MAX_REMOVAL_PASSES);
-// tombstone written only by a pass finishing with zero failures (19.4)
+// Budget-bounded cleanup passes: pages and deletes interleaved (fetch a
+// page, delete it, re-fetch -- deletions shrink the set, so retries
+// resume with no persisted cursor), persists cumulative counts in
+// CleanupProgress (dtp.removalProgress), re-enqueues until the scan
+// completes (capped at MAX_REMOVAL_PASSES; contention retries bounded
+// separately); every terminal outcome except a user abort writes the
+// settings tombstone -- REQ-PRIV-006 cannot be conditional on Calendar
+// accepting every delete (19.4)
 runRemovalCleanup(e) -> CleanupProgress
 // Manual sync enqueues -- card callbacks cannot fit a full reconcile
 // (technical design 19.5; one-off trigger, subject to Spike 1). The

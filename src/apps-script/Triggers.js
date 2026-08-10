@@ -33,11 +33,14 @@ function removeAutomation() {
  * triggers, takes the user lock (re-enqueues on contention, bounded by
  * MAX_REMOVAL_CONTENTION_RETRIES -- contention does not burn working
  * passes), aborts if the user re-enabled between passes, then deletes
- * scanned events until the execution budget nears -- folding counts into
- * dtp.removalProgress and re-enqueueing until the scan completes (capped
- * at MAX_REMOVAL_PASSES). Only a pass that finishes with zero failures
- * re-checks enabled one last time, clears stored state, and writes the
- * settings tombstone (REQ-PRIV-006). Technical Design 19.4.
+ * pages of scanned events until the execution budget nears -- paging and
+ * deletion interleave, so a retry resumes with no persisted cursor --
+ * folding counts into dtp.removalProgress and re-enqueueing until the
+ * scan completes (capped at MAX_REMOVAL_PASSES). Every terminal outcome
+ * except a user abort re-checks enabled one last time and writes the
+ * settings tombstone: origin addresses are personal data and their
+ * removal cannot be conditional on Calendar accepting every delete
+ * (REQ-PRIV-006). Technical Design 19.4.
  */
 function runRemovalCleanup(e) {
   throw new Error('Not implemented: Technical Design section 19.4');

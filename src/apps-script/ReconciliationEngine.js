@@ -25,9 +25,15 @@ function runReconciliation(options) {
  *
  * Replaces execute delete-then-create: eventType is immutable after
  * creation, so a type change cannot be patched (section 15.2.5).
+ *
+ * Budget-aware: checks elapsedExceedsExecutionBudget between operations
+ * and defers the remainder as ApplyResult.deferredOps -- one pre-
+ * application gate cannot cover an arbitrarily large diff, and a hard
+ * kill mid-apply skips status persistence and continuation scheduling.
+ * Deferred is not failed: nothing was rejected. Section 23.1.
  * Technical Design section 17.5.
  */
-function applyDiff_(diff) {
+function applyDiff_(diff, runStartMs) {
   throw new Error('Not implemented: Technical Design section 17.5');
 }
 

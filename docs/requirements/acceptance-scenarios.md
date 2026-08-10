@@ -690,7 +690,7 @@ The ceiling bounds wire traffic. Counting logical calls instead would double the
 **Then** the card action returns within the callback budget, having persisted `settings.enabled` as `false`, removed the triggers, and enqueued the cleanup worker  
 **And** the worker deletes every managed event in budget-bounded passes, including events no window-bounded scan would read, re-enqueueing itself until the scan completes  
 **And** cumulative progress is persisted and shown by the home card while cleanup is running  
-**And** on full success the stored settings are replaced with a minimal disabled tombstone, removing configured origin addresses  
+**And** on every terminal outcome except a user-initiated abort — success and failure alike — the stored settings are replaced with a minimal disabled tombstone, removing configured origin addresses  
 **And** the final record reports deleted and failed counts, with a retry offered when any deletion failed  
 **And** a later manual synchronization or trigger repair does not regenerate events or triggers.
 
@@ -757,4 +757,8 @@ A window-scan-based diagnostic would return silence for exactly the events users
 **And** the companion is deleted  
 **And** historical companions whose anchors lie outside the slacked planning range trigger no parent lookups.
 
-Restoration (AC-RECOVERY-012) is driven by a pending create, which requires a live parent; a deleted parent leaves nothing pending and both resources invisible to the bounded scan. Only a scan independent of desired state can find the stray, and the anchor is what keeps that scan from probing every historical event daily.
+**Given** instead the source still exists but was moved outside the planning range together with its companion  
+**When** the next daily maintenance run executes  
+**Then** the point read finds the live parent, sees it was not evaluated this run, and the companion is deleted — an out-of-window source's desired state is no companions, and they regenerate when it re-enters the window.
+
+Restoration (AC-RECOVERY-012) is driven by a pending create, which requires a live parent planning inside the window; a deleted or out-of-window parent leaves nothing pending and the stray invisible to the bounded scan. Only a scan independent of desired state can find it, and the anchor is what keeps that scan from probing every historical event daily.
