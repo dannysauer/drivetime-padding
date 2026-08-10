@@ -62,6 +62,12 @@ const MAX_REMOVAL_CONTENTION_RETRIES = 10;
 // planStart's advance before the next firing, even with one missed run.
 // Technical Design section 15.2.8.
 const SWEEP_DISCOVERY_SLACK_MINUTES = 2880;
+// updatedMin bound for the sweep's listing: a stray was necessarily MOVED,
+// and a move bumps `updated`, so the sweep only lists recently-touched
+// events -- the discovery slack plus one daily cycle. The persisted
+// watermark below stretches both this bound and the anchor band over any
+// gap of skipped or incomplete sweeps.
+const SWEEP_UPDATED_LOOKBACK_MINUTES = SWEEP_DISCOVERY_SLACK_MINUTES + 1440;
 
 // Storage keys.
 const SETTINGS_KEY = 'dtp.settings';
@@ -82,6 +88,10 @@ const DIAGNOSTIC_SPEND_KEY = 'dtp.diagnosticRouteSpend';
 // Remove-all cleanup progress: survives the worker's re-enqueues and feeds
 // the home card's status surface. Technical Design section 19.4.
 const REMOVAL_PROGRESS_KEY = 'dtp.removalProgress';
+// Injected `now` of the last sweep whose listing and window scan were both
+// complete. Stretches the sweep's updatedMin bound and anchor band over
+// gaps of skipped or incomplete sweeps. Technical Design section 15.2.8.
+const SWEEP_COMPLETED_AT_KEY = 'dtp.sweepCompletedAt';
 const CURRENT_SETTINGS_SCHEMA = 1;
 
 // Generated-event metadata. ADR 0009 -- this property is the deletion-safety

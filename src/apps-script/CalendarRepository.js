@@ -4,15 +4,19 @@
  */
 
 /**
- * Lists every event in the observation range, following nextPageToken to
- * completion. Returns { events, scanComplete }.
+ * Lists every event in the observation range, following nextPageToken
+ * until done OR shouldStop() fires, returning { events, scanComplete }.
  *
  * Pagination is not optional, and scanComplete is not decoration. Silent
  * truncation would make source events invisible while their companions remain
  * observed; the comparator uses scanComplete to decide whether an unmatched
  * companion is genuinely orphaned or merely unreached (section 15.2.3).
+ * Deadline-aware because a busy 180-day calendar can span enough pages to
+ * spend the whole runtime inside this one call, ahead of every engine-side
+ * budget check -- an early return with scanComplete false degrades the run
+ * to partial instead of a hard kill (section 7.2.1).
  */
-function listWindowEvents(calendarId, observeStart, observeEnd) {
+function listWindowEvents(calendarId, observeStart, observeEnd, shouldStop) {
   throw new Error('Not implemented: Technical Design section 7.2.1');
 }
 
@@ -63,14 +67,20 @@ function listGeneratedEventsPage(calendarId, pageToken) {
 }
 
 /**
- * Convenience wrapper over the paged scan for read-only consumers (the
- * section 15.2.8 sweep): pages until done or shouldStop() returns true,
- * reporting truncation via scanComplete. Window-bounded scans miss
- * managed events that aged out of the rolling range; "all" must mean all.
- * Technical Design sections 15.2.8 and 19.4.
+ * Ownership-filtered listing bounded by updatedMin, for the daily orphan
+ * sweep. A stray exists only because it was manually MOVED out of the
+ * observation range, and a move bumps the event's `updated` timestamp --
+ * so the server-side bound returns just the recently-touched events among
+ * which strays can exist, instead of the full history a read-only pass
+ * could never resume through. EXCLUDES cancelled tombstones: updatedMin
+ * listings force deleted entries in, and a companion the engine just
+ * deleted (bumped `updated`, intact anchor, cancelled parent) would
+ * otherwise re-enter the diff as a 404-bound delete for days. Pages until
+ * done or shouldStop() fires, reporting truncation via scanComplete.
+ * Technical Design section 15.2.8.
  */
-function listAllGeneratedEvents(calendarId, shouldStop) {
-  throw new Error('Not implemented: Technical Design section 19.4');
+function listGeneratedEventsUpdatedSince(calendarId, updatedMin, shouldStop) {
+  throw new Error('Not implemented: Technical Design section 15.2.8');
 }
 
 /**

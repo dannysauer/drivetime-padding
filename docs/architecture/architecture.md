@@ -249,12 +249,14 @@ The UI does not contain business logic. Manual synchronization calls the same en
 `CalendarRepository` hides Advanced Calendar API details and exposes business-oriented methods such as:
 
 ```javascript
-listWindowEvents(calendarId, timeMin, timeMax)
-listGeneratedEvents(calendarId, timeMin, timeMax)
+listWindowEvents(calendarId, observeStart, observeEnd, shouldStop)
+listGeneratedEventsBetween(calendarId, start, end)
 createGeneratedEvent(spec)
-updateGeneratedEvent(eventId, spec)
-deleteGeneratedEvent(eventId)
+updateGeneratedEvent(observed, spec)
+deleteGeneratedEvent(observed)
 ```
+
+(The write operations take the observed event, not a bare id, so ownership can be re-verified at write time; the window read is deadline-aware. The Technical Design interface reference is the authoritative listing.)
 
 The reconciliation engine should not directly call `Calendar.Events.insert`, `patch`, or `delete`.
 
@@ -290,10 +292,12 @@ The drivetime provider receives an immutable context containing:
 - resolved origin;
 - routing client.
 
-It returns zero or more `GeneratedEventSpec` objects. For the MVP it returns exactly two when successful:
+It returns zero or more `GeneratedEventSpec` objects. For the MVP a successful outcome carries up to two:
 
 - `outbound`;
-- `return`.
+- `return`;
+
+with a role omitted when its quantized route duration plus buffer is zero — Calendar rejects zero-length events (Technical Design §12.5).
 
 The provider never writes to Calendar.
 
@@ -808,10 +812,17 @@ function reconcile(options) {
         .concat(companions.map(companion => companion.rawEvent));
       scanComplete = true;
     } else {
+      // Deadline-aware: the read checks the guard between pages and
+      // returns the retrieved prefix with scanComplete false when the
+      // budget nears -- a paginate-to-completion contract could spend the
+      // entire runtime inside this one call, before any engine-side
+      // check runs (technical design §7.2.1). Truncation is a
+      // first-class state downstream (§15.2.4, §15.2.8, §7.6).
       ({ events: allEvents, scanComplete } = repository.listWindowEvents(
         "primary",
         window.observeStart,
-        window.observeEnd
+        window.observeEnd,
+        () => elapsedExceedsExecutionBudget(runStart)
       ));
     }
 
@@ -916,6 +927,14 @@ function reconcile(options) {
       const directives = parseDirectives(event.description);
       const eligibility = evaluateEligibility(event, directives, settings, window);
 
+      // Computed in the engine because the diagnostic capture needs it
+      // even when planning never runs or fails before specs exist -- the
+      // card's effectiveBufferMinutes cannot be inferred from timestamps
+      // that were never produced (technical design §17.6).
+      const effectiveBuffer = directives.bufferMinutes != null
+        ? directives.bufferMinutes
+        : settings.defaultBufferMinutes;
+
       if (!eligibility.eligible) {
         planningOutcomes.set(event.id, {
           state: "ineligible",
@@ -925,7 +944,7 @@ function reconcile(options) {
 
         if (options.eventIdFilter) {
           eventDiagnostics = captureEventDiagnostics(
-            event, eligibility, directives, null, null);
+            event, eligibility, directives, null, null, effectiveBuffer);
         }
 
         // A source edited past MAX_SOURCE_DURATION breaks the observability
@@ -976,9 +995,19 @@ function reconcile(options) {
         planningOutcomes.set(event.id, outcome);
         if (options.eventIdFilter) {
           eventDiagnostics = captureEventDiagnostics(
-            event, eligibility, directives, null, outcome);
+            event, eligibility, directives, null, outcome, effectiveBuffer);
         }
         continue;
+      }
+
+      // A directive that named an unconfigured home/office origin fell
+      // back to default -- the user's explicit selection was ignored, and
+      // §10.2 requires that to be visible, not silent (technical design
+      // §18.2, DIRECTIVE_ORIGIN_UNCONFIGURED). Compared by NAME, not by
+      // source: an honored `origin=default` directive must not warn, and
+      // the design does not pin which source value it reports.
+      if (directives.origin && origin.name !== directives.origin) {
+        recordRunWarning("DIRECTIVE_ORIGIN_UNCONFIGURED", null);
       }
 
       // eligibility.matchedBy travels with the context: the companion type
@@ -1003,7 +1032,7 @@ function reconcile(options) {
 
       if (options.eventIdFilter) {
         eventDiagnostics = captureEventDiagnostics(
-          event, eligibility, directives, origin, outcome);
+          event, eligibility, directives, origin, outcome, effectiveBuffer);
       }
 
       if (outcome.state === "planned") {
@@ -1086,16 +1115,29 @@ function reconcile(options) {
     // run: its unbounded lookups only matter to an application that will
     // not happen.
     if (options.dryRun || !outOfTime) {
-      resolveOutOfWindowCompanions(diff, cleanup, repository);
+      // Budget-aware INSIDE the pass, not just gated ahead of it: one
+      // unbounded lookup per pending create can consume the remaining
+      // runtime on a large diff, and a hard kill here skips status
+      // persistence and the continuation. The guard stops further
+      // lookups; outOfTime is then re-evaluated so an application that
+      // would follow a truncated restoration is skipped -- unresolved
+      // creates must never be applied blindly (technical design
+      // §15.2.7).
+      resolveOutOfWindowCompanions(diff, cleanup, repository,
+        () => elapsedExceedsExecutionBudget(runStart));
+      outOfTime = elapsedExceedsExecutionBudget(runStart);
     }
 
     // Daily-only ownership sweep for companions moved outside the
     // observation range whose parent no longer plans them (technical
     // design §15.2.8). Restoration above is create-driven, so it never
     // fires for such a parent; without this sweep the stray is permanent.
-    // Candidates are anchor-selected (parent time inside the slacked
-    // planning range, event id absent from the window read) so history
-    // costs almost nothing; each candidate parent gets one point read and
+    // The listing is updatedMin-bounded -- a stray was necessarily MOVED,
+    // and moves bump `updated`, so a full-history scan (which a read-only
+    // pass could never resume through) is not needed. Candidates are
+    // anchor-selected (parent time inside the slacked planning range,
+    // event id absent from the window read) so history costs almost
+    // nothing; each candidate parent gets one point read and
     // a STATE decision: absent/cancelled parent, live-but-out-of-window
     // parent, and in-window INELIGIBLE parent all mean delete; a PLANNED
     // parent keeps its candidates (restoration owns them) unless the key
@@ -1117,10 +1159,14 @@ function reconcile(options) {
     // observed list, not the key index: candidates are identified by
     // event id, and an in-window duplicate collapsed out of the index
     // must not read as absent from the window.
+    // Takes the injected clock: updatedMin and the anchor band must both
+    // derive from the same `now`, and the sweep watermark
+    // (dtp.sweepCompletedAt) stretches both over any gap of skipped or
+    // incomplete sweeps.
     if (options.reason === "daily-trigger" && scanComplete &&
         !elapsedExceedsExecutionBudget(runStart)) {
       const swept = sweepOutOfWindowCompanions(
-        observedGenerated, planningOutcomes, window, repository,
+        observedGenerated, planningOutcomes, window, now, repository,
         () => elapsedExceedsExecutionBudget(runStart));
       const queuedIds = new Set(diff.deletes.map(event => event.id));
       diff.deletes.push(
@@ -1197,10 +1243,25 @@ function reconcile(options) {
     // AFTER its broker calls still spent them, and skipping the record
     // would hand every reopened card a fresh allowance (technical design
     // §20.3). Recorded under the lock this run still holds.
-    if (isDiagnostic && routeBudget) {
-      recordDiagnosticRouteSpend(initialBudget - routeBudget.remaining, now);
+    //
+    // Guarded, with the lock release in an INNER finally: the spend
+    // record is itself a User Properties write and can throw. Unguarded,
+    // that throw would replace the structured result this function is
+    // returning AND skip the release below -- an accounting failure must
+    // not cost the run its result or strand the lock until timeout. The
+    // result is already built, so the failure can only be LOGGED
+    // (DIAGNOSTIC_SPEND_RECORD_FAILED); the ceiling is protected by
+    // diagnosticBudgetRemaining failing CLOSED on its own read errors
+    // (technical design §18.2, §20.3).
+    try {
+      if (isDiagnostic && routeBudget) {
+        recordDiagnosticRouteSpend(initialBudget - routeBudget.remaining, now);
+      }
+    } catch (error) {
+      logWarning("DIAGNOSTIC_SPEND_RECORD_FAILED", error);
+    } finally {
+      lock.releaseLock();
     }
-    lock.releaseLock();
   }
 }
 ```

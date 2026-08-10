@@ -31,4 +31,10 @@ const ERROR_CODES = {
   // Non-fatal warnings: surface in ReconciliationDiagnostics.warnings
   // (Technical Design section 4.11), never fail the run.
   WORKING_LOCATION_UNAVAILABLE: 'WORKING_LOCATION_UNAVAILABLE',
+  // Directive named an unconfigured home/office origin; resolution fell
+  // back to default. Recorded by the engine, not the resolver (10.2).
+  DIRECTIVE_ORIGIN_UNCONFIGURED: 'DIRECTIVE_ORIGIN_UNCONFIGURED',
+  // Hourly diagnostic-spend write threw in the engine finally; recorded,
+  // never rethrown -- accounting must not cost the run its result.
+  DIAGNOSTIC_SPEND_RECORD_FAILED: 'DIAGNOSTIC_SPEND_RECORD_FAILED',
 };

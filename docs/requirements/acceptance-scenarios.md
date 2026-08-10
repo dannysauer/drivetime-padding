@@ -291,7 +291,7 @@ Calendar preserves private extended properties through a user edit, so the store
 **Then** both values quantize to 1500 seconds  
 **And** the fingerprint is unchanged  
 **And** the diff records a **metadata patch**, not an update and not `unchanged`  
-**And** the patch body contains only `routeSecs` and `routeAt`  
+**And** the patch body contains only the route cache triplet — `routeHash`, `routeSecs`, and `routeAt` — so a missing or mismatched hash is repaired in the same write  
 **And** the event's start, end, summary, event type, and transparency are not written  
 **And** a subsequent run within 24 hours makes zero broker calls.
 

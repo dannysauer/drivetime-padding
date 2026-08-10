@@ -57,7 +57,7 @@ The same appointment is reconciled again four hours later. Nothing has changed.
 - fingerprints match observed metadata;
 - zero creates, updates, or deletes.
 
-The next day the cache ages past `ROUTE_CACHE_MAX_AGE_HOURS`. Both directions are re-routed. The broker returns 1455s outbound, which quantizes to 1500s — identical to the stored value — so the fingerprint is unchanged and still no Calendar write occurs. Only `routeSecs` and `routeAt` are refreshed.
+The next day the cache ages past `ROUTE_CACHE_MAX_AGE_HOURS`. Both directions are re-routed. The broker returns 1455s outbound, which quantizes to 1500s — identical to the stored value — so the fingerprint is unchanged and still no Calendar write occurs. Only the route cache triplet — `routeHash`, `routeSecs`, and `routeAt` — is refreshed.
 
 ## Example: appointment already in progress
 

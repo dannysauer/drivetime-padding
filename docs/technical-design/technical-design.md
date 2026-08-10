@@ -32,6 +32,7 @@ Implications:
 Recommended conventions:
 
 - functions ending in `_` are module-private by convention;
+- **any name that appears in the interface reference (`interfaces.md`) or the architecture pseudocode is written without the suffix, everywhere** — in this document's snippets and in the source skeletons alike. Apps Script's syntax check does not catch unresolved globals, so a pseudocode call and a stub definition that differ only by a trailing underscore fail at first runtime rather than at review. The `_` suffix is reserved for genuinely file-private helpers no other document references (e.g. `manualRunPending_`, `deepClone_`);
 - public functions use stable names required by triggers or CardService actions;
 - pure logic functions accept ordinary objects and return ordinary objects;
 - infrastructure wrappers isolate Apps Script services.
@@ -635,7 +636,9 @@ Use Advanced Calendar service `Calendar.Events.list` with:
 
 One call covers both ranges. Read over the **observation** range, then apply the planning range when deciding which source events to evaluate — a source that does not overlap `[planStart, planEnd)` is reported `OUTSIDE_WINDOW`.
 
-The scan must be driven to completion. Whether every page was retrieved determines if an unmatched companion can safely be treated as an orphan (§15.2.3), so the repository reports scan completeness alongside the events.
+The scan is driven to completion **when time permits**, and its completeness is reported rather than assumed: `listWindowEvents(calendarId, observeStart, observeEnd, shouldStop)` checks the guard between pages and, when the execution deadline nears, returns the safely retrieved prefix with `scanComplete: false` instead of consuming every `nextPageToken` unconditionally. A busy 180-day calendar (or a slow Calendar API) can span enough pages that a paginate-to-completion contract would spend the whole runtime inside one repository call, hard-killing the execution before any of the engine's own budget checks — no partial result, no continuation. A truncated read is already a first-class state everywhere downstream: absence-based operations are suppressed (§15.2.4), the sweep is skipped (§15.2.8), and the high-water mark stays put (§7.6), so returning early degrades the run to `partial` rather than to nothing.
+
+Whether every page was retrieved determines if an unmatched companion can safely be treated as an orphan (§15.2.3), so the repository reports scan completeness alongside the events.
 
 Pagination must be supported using `nextPageToken`.
 
@@ -680,15 +683,15 @@ Widening the general read is the wrong fix — it would cost a large listing on 
 ```javascript
 const OBSERVE_HIGH_WATER_KEY = 'dtp.observeHighWater';
 
-function findStrandedCompanions_(window, settings, dryRun) {
-  const highWater = loadHighWater_();            // ISO string or null
+function findStrandedCompanions(window, settings, dryRun) {
+  const highWater = loadHighWater();            // ISO string or null
   if (!highWater || Date.parse(highWater) <= window.observeEnd.getTime()) {
     // ADVANCING the mark is a persistence too, and dry runs persist
     // nothing: a preview that raised the mark would change whether a
     // later reduced-window run classifies as a shrink and performs
     // cleanup -- a dry run altering real behavior.
     if (!dryRun) {
-      saveHighWater_(window.observeEnd);
+      saveHighWater(window.observeEnd);
     }
     return { shrunk: false, events: [], scanComplete: true };
   }
@@ -729,13 +732,13 @@ function findStrandedCompanions_(window, settings, dryRun) {
 The return shape is the point. This function is a *finder*; the deletions happen later, inside `applyDiff`, and only their success justifies lowering the mark. Merging the events into the delete list and discarding the `shrunk` flag would leave no execution path that ever lowers the mark, so every subsequent run would repeat the full filtered scan of the vacated range — correct results, quietly unbounded cost. The engine therefore keeps the cleanup state alongside the diff:
 
 ```javascript
-const cleanup = findStrandedCompanions_(window, settings, options.dryRun);
+const cleanup = findStrandedCompanions(window, settings, options.dryRun);
 diff.deletes.push(...cleanup.events);
 
 if (!options.dryRun) {
   const applied = applyDiff(diff, runStart);
   if (cleanup.shrunk && cleanup.scanComplete && applied.deletedAll(cleanup.events)) {
-    saveHighWater_(window.observeEnd);
+    saveHighWater(window.observeEnd);
   }
 }
 ```
@@ -867,7 +870,7 @@ function resolveOrigin(event, directives, settings, workingLocations)
 
 ### 10.2 Per-event override
 
-A directive selects a named configured origin. If the selected optional origin is empty, fall back to default and emit a diagnostic warning.
+A directive selects a named configured origin. If the selected optional origin is empty, fall back to default and emit a diagnostic warning — concretely: the **engine** records `DIRECTIVE_ORIGIN_UNCONFIGURED` (§18.2) whenever `directives.origin` is set but the resolved origin's `name` differs from the requested one. The comparison is by **name**, not by `source`: an honored `origin=default` directive resolves to the very origin it asked for and must not warn, and the design deliberately does not pin whether that case reports `source: "directive"` or `source: "default"`. The resolver itself stays a pure lookup; the warning travels in `ReconciliationDiagnostics.warnings` (§4.11), and the event card explains the ignored selection from there plus the origin in the diagnostic payload (§17.6).
 
 ### 10.3 Working-location overlap
 
@@ -904,7 +907,7 @@ function getRouteDuration(from, to, requestContext)
 The client consults the cache before the network:
 
 ```text
-cachedRouteIsUsable_(requestContext.cacheEntry, expectedHash, requestContext.now)
+cachedRouteIsUsable(requestContext.cacheEntry, expectedHash, requestContext.now)
   -> reuse the cached duration, no broker call
   -> otherwise call the broker and return a result marked for persistence
 ```
@@ -953,7 +956,7 @@ The provider requests two routes, each as a pair of `RouteEndpoint`s (§13.3) in
 1. outbound: `from` = effective origin, `to` = `{ type: "address", value: source.location }`;
 2. return: `from` = the event-location endpoint, `to` = the effective origin.
 
-The same endpoint objects flow into `routeInputHash_` and the broker request, so the configured origin keeps its `placeId` type in both directions.
+The same endpoint objects flow into `routeInputHash` and the broker request, so the configured origin keeps its `placeId` type in both directions.
 
 The MVP must not assume symmetry.
 
@@ -1056,7 +1059,7 @@ The cache lives in the observed companion's private metadata (§13.3), but the p
 
 The engine therefore resolves observed companions by `parentEventId|role` *before* planning and passes their cache entries down. That ordering is not an optimization; it is what makes the cache exist.
 
-**Cache policy stays in the routing client.** The provider passes the entry through and never inspects it: `cachedRouteIsUsable_` and the reuse rule live in `RoutingClient` (§13.3), so there is one place where staleness is decided. This preserves ADR 0014 — the provider computes desired state and knows nothing about infrastructure — while giving the routing layer the data it needs.
+**Cache policy stays in the routing client.** The provider passes the entry through and never inspects it: `cachedRouteIsUsable` and the reuse rule live in `RoutingClient` (§13.3), so there is one place where staleness is decided. This preserves ADR 0014 — the provider computes desired state and knows nothing about infrastructure — while giving the routing layer the data it needs.
 
 `now` is injected rather than read from the clock so that cache-age behavior is deterministic under test (§17.1, §24.1).
 
@@ -1078,7 +1081,7 @@ Raw broker durations are rounded **up** to a 5-minute granularity before any oth
 ```javascript
 const ROUTE_GRANULARITY_SECONDS = 300;
 
-function quantizeDuration_(seconds) {
+function quantizeDuration(seconds) {
   return Math.ceil(seconds / ROUTE_GRANULARITY_SECONDS) * ROUTE_GRANULARITY_SECONDS;
 }
 ```
@@ -1232,7 +1235,7 @@ The source event's location becomes `{ type: "address", value: location }`; a co
 #### Route input hash
 
 ```javascript
-function routeInputHash_(from, to, travelMode) {
+function routeInputHash(from, to, travelMode) {
   return sha256Hex_(canonicalJson_({
     from: { type: from.type, value: from.value.trim() },
     to: { type: to.type, value: to.value.trim() },
@@ -1250,7 +1253,7 @@ It also excludes the buffer: the buffer is applied after routing and is already 
 #### Reuse rule
 
 ```javascript
-function cachedRouteIsUsable_(meta, expectedHash, now) {
+function cachedRouteIsUsable(meta, expectedHash, now) {
   if (!meta.routeHash || meta.routeHash !== expectedHash) return false;
   if (!meta.routeAt) return false;
 
@@ -1456,7 +1459,7 @@ The fingerprint remains valuable as the cheap first check — it answers "do I n
 
 #### 15.2.2 Metadata-only patches
 
-Route cache entries live in the same private extended properties. When a cache entry is refreshed but the quantized duration lands in the same bucket, the event's owned fields are unchanged and only `routeSecs` and `routeAt` need to be written.
+Route cache entries live in the same private extended properties. When a cache entry is refreshed but the quantized duration lands in the same bucket, the event's owned fields are unchanged and only the route cache triplet — `routeHash`, `routeSecs`, and `routeAt` — needs to be written. The full triplet, not just the two time-varying fields: a missing or corrupted hash must be repaired by the same patch, or the entry fails validation on every later read and the broker is called daily (§16.6, AC-CACHE-012).
 
 This is a distinct diff category. It must not be folded into `unchanged`, because skipping the write would leave `routeAt` permanently stale and force a broker call on every subsequent run — defeating the cost bound the cache exists to provide. It must not be folded into `update` either, since it changes nothing the user can see.
 
@@ -1551,6 +1554,8 @@ The comparator stays pure: it has no repository access, so it emits the create a
 
 Cost: one `Events.list` per parent with an absent desired role. For a genuinely new source the lookup returns nothing and the create proceeds — that is the common case, and it prices each new eligible event at one extra list call at creation time, once. Calendar list quota is not the scarce resource; broker calls are, and this path spends none.
 
+The pass is **budget-aware internally**: it takes a `shouldStop` guard and checks it between lookups, because a diff with many pending creates multiplies the per-parent lookups past what any single up-front check can bound — the same one-gate-cannot-cover-a-loop reasoning as `applyDiff` (§17.5). When the guard fires, the pass stops issuing lookups and the engine re-evaluates the execution budget before application: a create whose lookup never ran must not be applied blindly (that is the duplicate this section exists to prevent), and with the deadline reached the run skips application entirely, reports `partial`, and lets the continuation recompute the diff.
+
 Two interactions need pinning:
 
 - **The lookup excludes cancelled tombstones.** `listCompanionsByParent` must filter `status: "cancelled"` — a manually deleted companion comes back with its `dtp` metadata intact (§7.3), and matching it here would convert the recreate into an update of a deleted resource, breaking restoration on every run. The same exclusion protects §15.2.6's delete path from 404s on tombstones.
@@ -1562,8 +1567,8 @@ Two interactions need pinning:
 
 Discovery therefore cannot be driven by desired specs. The **daily maintenance run** (`reason === "daily-trigger"`, never dry) performs an ownership sweep:
 
-1. page the unbounded, ownership-filtered listing — `listAllGeneratedEvents(calendarId, shouldStop)`, the read-only wrapper over §19.4's paged scan — stopping early when the execution budget nears;
-2. a returned event is a **candidate** when no event with its **id** appears in the window read (identity, not `parent|role` key — a key test would hide exactly the out-of-window *duplicate* whose key an in-window copy satisfies) *and* its `anchor` (§13.2) falls within `[planStart − (MAX_SOURCE_DURATION + SWEEP_DISCOVERY_SLACK_MINUTES), planEnd + MAX_SOURCE_DURATION)`. The duration term covers whichever source boundary the role anchors — the two differ by at most the cap, and an outbound anchor sits a full duration behind the source's end. `SWEEP_DISCOVERY_SLACK_MINUTES` (recommended 2880 — 48 hours, two daily cycles) covers the time between the stray's creation and its discovery: `planStart` advances continuously, so a sweep bounded only by the duration cap would out-run an outbound anchor before the next daily firing — and out-run even a return anchor if one daily run is missed. Events with a missing or unparseable anchor are skipped;
+1. list ownership-filtered events **updated since the sweep watermark**: `listGeneratedEventsUpdatedSince(calendarId, updatedMin, shouldStop)`, with `updatedMin` the *earlier* of `now − SWEEP_UPDATED_LOOKBACK_MINUTES` (recommended 4320 — 72 hours, the anchor discovery slack plus one daily cycle) and the persisted **last-completed-sweep timestamp** (`dtp.sweepCompletedAt`, written under the lock by every non-dry sweep whose listing and window scan were both complete; absent on a fresh install, where `now − SWEEP_UPDATED_LOOKBACK_MINUTES` applies — a new install has no older strays). `now` is the run's injected clock, threaded into the sweep — reading the wall clock here would unpin the lookback boundary from the anchor band derived from the same `now`. Every stray this section hunts was *manually moved* — that is what put it outside the observation range — and a move bumps the event's `updated` timestamp, so `updatedMin` filters server-side to exactly the recently-touched events among which strays can exist. **Cancelled tombstones are excluded** before candidate selection: an `updatedMin` listing force-includes deleted entries, and a companion the engine itself just deleted has a bumped `updated`, an intact anchor, and a cancelled parent — it would otherwise re-enter the diff as a 404-bound delete for days after every routine cleanup. A full-history scan is not just expensive, it is **unresumable**: a read-only pass deletes nothing and persists no cursor, so a budget-truncated unbounded listing would return the same prefix every day while a stray on a later page aged out of the anchor band unexamined, permanently. The watermark closes the mirror-image gap: skipped or truncated sweeps (missed daily triggers, incomplete window scans) leave `dtp.sweepCompletedAt` behind, so the next completed sweep reaches back over the whole gap instead of only 72 hours;
+2. a returned event is a **candidate** when no event with its **id** appears in the window read (identity, not `parent|role` key — a key test would hide exactly the out-of-window *duplicate* whose key an in-window copy satisfies) *and* its `anchor` (§13.2) falls within `[planStart − (MAX_SOURCE_DURATION + SWEEP_DISCOVERY_SLACK_MINUTES), planEnd + MAX_SOURCE_DURATION)`. The duration term covers whichever source boundary the role anchors — the two differ by at most the cap, and an outbound anchor sits a full duration behind the source's end. `SWEEP_DISCOVERY_SLACK_MINUTES` (recommended 2880 — 48 hours, two daily cycles) covers the time between the stray's creation and its discovery: `planStart` advances continuously, so a sweep bounded only by the duration cap would out-run an outbound anchor before the next daily firing. When the sweep watermark shows a longer gap (skipped or incomplete sweeps), the effective slack widens to `max(SWEEP_DISCOVERY_SLACK_MINUTES, now − sweepCompletedAt)` — the anchor band and the `updatedMin` bound stretch over the same gap together, or a past-anchored stray from early in the gap would be listed but no longer selected. Events with a missing or unparseable anchor are skipped;
 3. one `getEventById` per unique candidate parent, then a decision on the **parent's state**, not bare existence:
    - parent **absent or a cancelled tombstone** → the parent's candidates join `diff.deletes`, deduplicated by event id exactly as §15.2.6;
    - parent **live but not evaluated this run** (it sits outside the planning range — moved beyond the horizon or into the deep past together with its companion) → the candidates are **deleted too**. An out-of-window source's desired state is no companions (`OUTSIDE_WINDOW` carries deletion authority, §15.2), ordinary planning cannot see the source to say so, and once the anchor ages past the discovery slack the sweep never looks again — "parent exists, leave it" would make this stray exactly as permanent as the deleted-parent one. The companions regenerate when the source re-enters the window;
@@ -1571,9 +1576,9 @@ Discovery therefore cannot be driven by desired specs. The **daily maintenance r
 
 The **absent-parent** rule is safe without `scanComplete`: the swept events were **read** (by the unbounded scan), and the parent's absence comes from a **point read** — `getEventById` returning nothing means the resource is gone, not that a page went unretrieved. §15.3's marker rule and §16.5.1's conditional delete apply unchanged. The **state-keyed** rules are different: "not evaluated this run" is trustworthy only when the window read actually evaluated everything in the window, so **the sweep runs only when the window scan reported `scanComplete`**. On a truncated read, an in-window source sitting on the unretrieved page has no planning outcome, its healthy or restorable companion looks like an out-of-window candidate, and the live-but-unevaluated rule would delete it — the same absence-under-truncation hazard §15.2.4 guards the comparator against. A sweep skipped for an incomplete scan retries tomorrow, like every other deferral in this section.
 
-Steady-state cost is one paginated ownership listing per day plus a small fixed band of point reads: the discovery slack deliberately reaches behind the observation range, so companions of sources that ended roughly 40–80 hours ago are candidates each day until their anchors age out of the band — a handful of lookups per day for a typical calendar, each finding a live parent and skipping. Beyond that band, the §7.2 completeness proof applies: a companion whose anchor lies inside the range sits inside the observation range *unless it was moved out*, so the remaining lookups are proportional to anomalies, normally zero.
+Steady-state cost is one small `updatedMin`-bounded listing per day — recently-patched in-window companions (excluded by the id test at no further cost) plus any strays — and a small band of point reads: the discovery slack deliberately reaches behind the observation range, so recently-updated companions of sources that ended roughly 40–80 hours ago can be candidates until their anchors age out of the band, a handful of lookups each finding a live parent and skipping. Beyond that, the §7.2 completeness proof applies: a companion whose anchor lies inside the range sits inside the observation range *unless it was moved out*, so the remaining lookups are proportional to anomalies, normally zero.
 
-The sweep is **budget-aware**: it runs only when `elapsedExceedsExecutionBudget` is still false when its turn comes (after the restoration pass), its listing stops paging early when the budget nears (`listAllGeneratedEvents` takes a `shouldStop` guard and reports the truncation via `scanComplete`), and the engine re-evaluates the budget after the sweep before applying the diff (§23.1). A truncated listing is safe to act on: candidate selection only *finds* strays, and each deletion decision rests on its own point read — truncation merely means some strays wait for tomorrow's sweep. A sweep skipped or cut short costs nothing, while an unbounded listing racing the execution ceiling into `applyDiff` risks the hard-kill-mid-apply failure the budget gate exists to prevent.
+The sweep is **budget-aware**: it runs only when `elapsedExceedsExecutionBudget` is still false when its turn comes (after the restoration pass), its listing stops paging early when the budget nears (the `shouldStop` guard, truncation reported via `scanComplete`), and the engine re-evaluates the budget after the sweep before applying the diff (§23.1). A truncated listing is safe to act on: candidate selection only *finds* strays, and each deletion decision rests on its own point read — truncation merely means some strays wait for tomorrow's sweep. A sweep skipped or cut short costs nothing, while an unbounded listing racing the execution ceiling into `applyDiff` risks the hard-kill-mid-apply failure the budget gate exists to prevent.
 
 Why daily only: a per-calendar-trigger sweep would pay the unbounded listing on every edit, and a stray outside the observation range is invisible in the user's near-term view — a one-day discovery bound matches the daily cycle that already backstops eventual consistency (REQ-TRIGGER-002). The residual case — source deleted and automation disabled before the next daily run ever fires — is accepted; the remove-all action's unbounded cleanup (§19.4) still reaches such events.
 
@@ -1880,6 +1885,9 @@ interface EventDiagnostics {
   eligibility: EligibilityResult;
   directives: ParsedDirectives | null;      // null when never parsed
   origin: ResolvedOrigin | null;            // null when ineligible
+  /** Directive override or settings default, supplied by the engine at
+      capture time — never inferred from spec timestamps, which do not
+      exist when planning failed before producing specs. */
   effectiveBufferMinutes: number | null;
   /** Copied from PlanningOutcome.routes (§17.4) — the provider is the only
       layer that sees provenance. Empty when the outcome is null or planning
@@ -1963,7 +1971,13 @@ Warnings (non-fatal; surface in `ReconciliationDiagnostics.warnings`, §4.11):
 
 ```text
 WORKING_LOCATION_UNAVAILABLE
+DIRECTIVE_ORIGIN_UNCONFIGURED
+DIAGNOSTIC_SPEND_RECORD_FAILED
 ```
+
+`DIRECTIVE_ORIGIN_UNCONFIGURED`: a directive named a `home` or `office` origin that is not configured, and resolution fell back to the default (§10.2). Recorded by the **engine** after `resolveOrigin` — the resolver stays a pure lookup — whenever `directives.origin` is set but the resolved origin's `name` differs from the requested one (never for an honored `origin=default`). Without a registered code the fallback §10.2 requires would have no carrier, and the event card could not explain that the user's explicit selection was ignored.
+
+`DIAGNOSTIC_SPEND_RECORD_FAILED`: the hourly diagnostic-spend write threw inside the engine's `finally`. The failure is caught and **logged** with this code rather than rethrown — an accounting error must not replace the run's already-built structured result or strand the user lock (Architecture §14.2). It cannot retroactively join that run's `warnings`: the result was assembled and persisted before the `finally` ran. The ceiling is protected from the other side instead — `diagnosticBudgetRemaining` **fails closed**, returning `0` when its own Properties read throws, so an outage that breaks spend *writes* (the same service) cannot simultaneously mint fresh allowances; at worst one run's spend goes unrecorded against a working counter.
 
 `ROUTE_TOO_LONG` and `ROUTE_BUDGET_EXCEEDED` are both **planning failures**, not ineligibility. Per §17.3 they preserve existing generated events rather than deleting them.
 
@@ -2040,12 +2054,6 @@ This action must require explicit confirmation.
 listGeneratedEventsPage(calendarId, pageToken)
   -> { events: ObservedGeneratedEvent[], nextPageToken: string | null }
 // privateExtendedProperty: dtp=1; no timeMin/timeMax
-
-// Convenience wrapper over the paged listing for read-only consumers (the
-// 15.2.8 sweep): pages until done OR shouldStop() returns true, reporting
-// truncation via scanComplete
-listAllGeneratedEvents(calendarId, shouldStop)
-  -> { events: ObservedGeneratedEvent[], scanComplete: boolean }
 ```
 
 The unbounded scan plus one conditional delete per historical companion **cannot live inside the card callback**. CardService actions have the same short execution budget that already forced manual synchronization to enqueue (§19.5), and this action's work grows with the user's entire history — an established user with hundreds of aged-out companions would hit the ceiling mid-cleanup, losing the confirmation card and leaving events and personal settings behind at exactly the moment the user is preparing to uninstall. The action therefore splits into a cheap synchronous half and an enqueued worker.
@@ -2064,7 +2072,7 @@ The unbounded scan plus one conditional delete per historical companion **cannot
 3. re-checks `settings.enabled`: if the user re-enabled the add-on between passes, the cleanup **aborts** and marks the progress record `aborted` — deleting companions a re-enabled automation is actively maintaining would just churn recreations against the user's changed intent;
 4. **interleaves paging and deletion** rather than scanning to completion first: fetch one ownership-filtered page (`listGeneratedEventsPage`), delete its events through `deleteGeneratedEvent` — §15.3's marker rule and §16.5.1's conditional delete apply unchanged — checking `elapsedExceedsExecutionBudget` between pages and between deletions (§23.1). A materialize-everything-then-delete contract would put the entire multi-page scan ahead of the first budget check: a history large enough to spend the deadline on pagination alone would hard-kill the worker mid-scan, and — with no cursor to resume from — every retry would repeat the same full scan and die the same way, forever. The walk order within a pass: attempt every event on the fetched page that has not already failed this pass; if the page produced **any successful deletion**, re-fetch from the start (the set shrank, and the first page now holds fresh work); if it produced **none** — every event on it already failed — advance via `nextPageToken` instead (the **no-progress guard**: re-fetching an all-failing first page would spin forever). The scan is **complete only when this walk runs off the end of the listing** — a fetch yields no attemptable events *and* no `nextPageToken` — meaning every remaining managed event was attempted this pass and either deleted or recorded as a failure; an all-failing first page is *not* completion, it is the cue to advance to the pages behind it. Interleaving needs no persisted cursor: each deletion shrinks the result set, so re-fetching the first page after a kill or a re-enqueue naturally resumes where the deletions stopped, and cross-pass, failed events are simply retried. When the budget expires with work remaining, the worker folds the pass's counts into the progress record, re-enqueues itself, and exits;
 5. working passes are capped at `MAX_REMOVAL_PASSES` (recommended 20 — a generous multiple of any realistic history at ~thousands of deletions per pass). At the cap the record is marked failed with the counts so far; the action can be offered again;
-6. on **any terminal outcome other than `aborted`** — the scan completed (with or without failures) or the pass cap was reached; the contention cap follows step 2's final-attempt rule instead, since it is by definition the path holding no lock — **re-check `settings.enabled` one last time, still under the lock, immediately before touching stored state**, then **replace the settings document with the minimal disabled tombstone** `{ schemaVersion, enabled: false }`. Configured origins are personal data (home and office addresses), and REQ-PRIV-006 promises their removal — a promise that cannot be conditional on Calendar accepting every delete: a user whose cleanup ends `failed` and who proceeds to uninstall instead of retrying would otherwise leave their home address in User Properties indefinitely. Nothing about retrying needs the addresses — the scan is ownership-filtered and deletion needs only the events themselves — so the retry keeps the `CleanupProgress` record and loses nothing. The tombstone rather than full deletion is what keeps trigger repair gated on the disabled flag (§19.3) instead of resurrecting defaults. On the fully-successful path the worker additionally clears the remaining stored state — the high-water mark, the continuation counter, the diagnostic spend counter, the last-run record; a `failed` outcome retains those alongside `CleanupProgress` for the retry. Only `aborted` retains the settings document: the user re-enabled mid-flow, and the tombstone would clobber the very configuration they just restored.
+6. on **any terminal outcome other than `aborted`** — the scan completed (with or without failures) or the pass cap was reached; the contention cap follows step 2's final-attempt rule instead, since it is by definition the path holding no lock — **re-check `settings.enabled` one last time, still under the lock, immediately before touching stored state**, then **replace the settings document with the minimal disabled tombstone** `{ schemaVersion, enabled: false }`. Configured origins are personal data (home and office addresses), and REQ-PRIV-006 promises their removal — a promise that cannot be conditional on Calendar accepting every delete: a user whose cleanup ends `failed` and who proceeds to uninstall instead of retrying would otherwise leave their home address in User Properties indefinitely. Nothing about retrying needs the addresses — the scan is ownership-filtered and deletion needs only the events themselves — so the retry keeps the `CleanupProgress` record and loses nothing. The tombstone rather than full deletion is what keeps trigger repair gated on the disabled flag (§19.3) instead of resurrecting defaults. On the fully-successful path the worker additionally clears the remaining stored state — the high-water mark, the continuation counter, the diagnostic spend counter, the sweep watermark, the last-run record; a `failed` outcome retains those alongside `CleanupProgress` for the retry. Only `aborted` retains the settings document: the user re-enabled mid-flow, and the tombstone would clobber the very configuration they just restored.
 
 The step-6 re-check closes the re-enable race from the other side too: **the enable flow acquires the same user lock before persisting `enabled = true`** (and is rejected with a cleanup-in-progress notice while a pass holds it). Without that, a settings save landing between the worker's step-3 check and its step-6 tombstone would be silently clobbered — the user's just-entered origin addresses destroyed and automation switched back off moments after they enabled it. With both rules, a re-enable can only land between passes, and the next pass aborts at step 3.
 
@@ -2187,7 +2195,7 @@ function continuationPending_() {
 // architecture §14.2 pseudocode). Returns what happened so the engine can
 // record continuationCapReached on the run status -- a void decline would
 // leave diagnostics unable to say why work is waiting for the daily run.
-function enqueueContinuation_() {
+function enqueueContinuation() {
   if (continuationPending_()) {
     return { scheduled: true, capReached: false };          // a pass is already coming
   }
@@ -2217,7 +2225,7 @@ function runContinuationReconciliation(e) {
   // when the holding execution ends (hard 6-minute execution ceiling),
   // so contention is inherently transient.
   if (result.status === 'skipped') {
-    enqueueContinuation_();
+    enqueueContinuation();
   }
   return result;
 }
@@ -2229,7 +2237,7 @@ The **counter lifecycle** is what makes the cap enforceable:
 - **incremented by the engine, under the user lock, after the cheap gate checks and before the window read** (`reason === 'continuation'`, non-dry): the lock is what serializes the counter against the concurrent successful run that resets it — a handler-side increment races that reset, losing it or leaving a stale refund. Counting before substantive work preserves crash-safety: a continuation that dies mid-run still counted itself. The gate checks it sits behind cannot loop on the allowance either — each one either terminates the episode (a failed result schedules nothing) or is transient (a skip re-enqueues without counting);
 - a `skipped` run never touched the counter (the increment is behind the lock it failed to take), so there is no refund path — the handler simply re-enqueues;
 - reset to `0` by any **non-dry** run that completes with status `success`, whatever its reason — success means the deferred work drained, so the next `partial` episode starts a fresh allowance. Increment and reset are both under the lock, so they cannot interleave;
-- when the cap is reached, `enqueueContinuation_` returns `capReached: true` and the engine records it as `diagnostics.continuationCapReached` on the run result — the field's home in the §4.11 contract, which is where status persistence and the UI read it.
+- when the cap is reached, `enqueueContinuation` returns `capReached: true` and the engine records it as `diagnostics.continuationCapReached` on the run result — the field's home in the §4.11 contract, which is where status persistence and the UI read it.
 
 **Dry runs are exempt from all of this.** A diagnostic dry run that would end `partial` neither schedules a continuation nor resets the counter — a diagnostic must not mutate trigger state (see the engine pseudocode, Architecture §14.2).
 
@@ -2305,18 +2313,18 @@ const DIAGNOSTIC_ROUTE_CALLS_PER_HOUR = 20;
 // Hour-bucketed counter in User Properties: { "bucket": "2026-08-09T22", "used": 3 }.
 // Read and written under the user lock the run already holds, so the
 // read-modify-write is serialized without extra machinery.
-diagnosticBudgetRemaining_(now)
+diagnosticBudgetRemaining(now)
   -> Math.max(0, DIAGNOSTIC_ROUTE_CALLS_PER_HOUR - usedThisHour)
 
 // Engine, when building the run's budget:
 const routeBudget = {
   remaining: options.reason === 'event-diagnostic'
-    ? diagnosticBudgetRemaining_(now)
+    ? diagnosticBudgetRemaining(now)
     : MAX_ROUTE_CALLS_PER_RUN,
 };
 
 // After the run (diagnostic reason only): persist what was spent.
-recordDiagnosticRouteSpend_(initialRemaining - routeBudget.remaining, now);
+recordDiagnosticRouteSpend(initialRemaining - routeBudget.remaining, now);
 ```
 
 The spend is recorded even though diagnostics are dry runs — the broker calls happened regardless of whether Calendar was written, and the counter exists to bound exactly those calls. A fresh hour bucket resets the allowance; without the ceiling, reopening the card across a day of appointments issues up to 60 attempts per open with no cumulative bound.

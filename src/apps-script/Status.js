@@ -19,6 +19,10 @@ function loadRunStatus() {
  * run's RouteBudget when reason is event-diagnostic -- the ceiling must be
  * the budget the routing client decrements, or it is a constant with no
  * mechanism. Read/written under the user lock the run already holds.
+ *
+ * FAILS CLOSED: a Properties read error returns 0, never a fresh
+ * allowance -- the same outage that breaks spend writes must not mint
+ * unrecorded budget (Technical Design section 18.2).
  * Technical Design section 20.3.
  */
 function diagnosticBudgetRemaining(now) {
@@ -28,7 +32,9 @@ function diagnosticBudgetRemaining(now) {
 /**
  * Recorded from the engine's finally, not the success path: a diagnostic
  * that throws after its broker calls still spent them, and skipping the
- * record would hand every reopened card a fresh allowance.
+ * record would hand every reopened card a fresh allowance. A throw HERE
+ * is caught by the engine and logged (DIAGNOSTIC_SPEND_RECORD_FAILED) --
+ * it must not replace the run's result or strand the lock.
  * Technical Design section 20.3.
  */
 function recordDiagnosticRouteSpend(count, now) {

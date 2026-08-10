@@ -165,3 +165,17 @@ This matrix links requirement groups to architecture components, technical-desig
 | REQ-RECON-017 (state-keyed) | Sweep decides on parent state: out-of-window and ineligible live parents delete too | AC-RECOVERY-015 |
 | §17.5 (deferred) | `applyDiff` budget-aware between operations; remainder deferred, not failed | AC-RECOVERY-013 |
 | REQ-PRIV-006 (unconditional) | Settings tombstone on every terminal cleanup outcome except user abort | AC-CONFIG-004 |
+
+## Requirements added in the thirteenth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| §15.2.8 (bounded) | Sweep listing keyed on `updated` — strays are necessarily moved, so no unresumable full-history scan | AC-RECOVERY-015 |
+| §15.2.7 (budget-aware) | Restoration lookups check the cutoff between lookups; unresolved creates never applied | AC-RECOVERY-013 |
+| §7.2.1 (deadline-aware) | Window scan returns its prefix with `scanComplete: false` at the cutoff | AC-RECOVERY-013 |
+| §17.6 (buffer carrier) | `effectiveBufferMinutes` passed into diagnostic capture by the engine | — §20.3 card |
+| AC-CACHE-001 (aligned) | Cache-refresh patch carries the full triplet including `routeHash` | AC-CACHE-001, AC-CACHE-012 |
+| Architecture §14.2 (guarded finally) | Spend-record failures become warnings; lock release in inner finally | — pseudocode |
+| §10.2 (carried) | `DIRECTIVE_ORIGIN_UNCONFIGURED` registered and recorded by the engine | — §18.2 registry |
+| REQ-GEN-001 (excepted) | Zero-padding roles emit no event; two-event rule no longer contradicts §12.5 | AC-OOO-012 |
+| §2 (naming) | Cross-document names unsuffixed everywhere; `_` reserved for file-private helpers | — convention |

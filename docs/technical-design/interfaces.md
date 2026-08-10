@@ -18,7 +18,10 @@ validateSettings(settings) -> ValidationResult
 parseDirectives(description) -> ParsedDirectives
 
 // Calendar
-listWindowEvents(calendarId, observeStart, observeEnd)
+// Deadline-aware: checks shouldStop between pages and returns the
+// retrieved prefix with scanComplete false when it fires -- truncation
+// is a first-class state downstream (7.2.1)
+listWindowEvents(calendarId, observeStart, observeEnd, shouldStop)
   -> { events: RawCalendarEvent[], scanComplete: boolean }
 listWorkingLocationEvents(calendarId, start, end) -> RawCalendarEvent[]
 // Ownership-filtered (privateExtendedProperty=dtp=1), paginated to
@@ -40,10 +43,15 @@ getEventById(calendarId, eventId) -> RawCalendarEvent | null
 // deletion so retries resume without a persisted cursor (19.4)
 listGeneratedEventsPage(calendarId, pageToken)
   -> { events: ObservedGeneratedEvent[], nextPageToken: string | null }
-// Read-only wrapper over the paged scan (the 15.2.8 sweep): pages until
-// done or shouldStop() fires, reporting truncation via scanComplete --
-// window scans miss events that aged out of the rolling range
-listAllGeneratedEvents(calendarId, shouldStop)
+// Ownership-filtered, updatedMin-bounded listing for the 15.2.8 sweep: a
+// stray exists only because it was MOVED, and a move bumps `updated`, so
+// the server-side bound keeps the sweep small and resumable where a
+// read-only full-history scan would return the same truncated prefix
+// forever. EXCLUDES cancelled tombstones -- updatedMin listings force
+// deleted entries in, and a just-deleted companion would re-enter the
+// diff as a 404-bound delete. Pages until done or shouldStop() fires
+// (scanComplete reports truncation)
+listGeneratedEventsUpdatedSince(calendarId, updatedMin, shouldStop)
   -> { events: ObservedGeneratedEvent[], scanComplete: boolean }
 createGeneratedEvent(spec) -> RawCalendarEvent
 updateGeneratedEvent(observed, spec) -> RawCalendarEvent
@@ -156,32 +164,47 @@ buildAppError(code, event) -> AppErrorRecord
 // Engine post-pass on the diff: one unbounded parent lookup per pending
 // create; a same-key match converts the create to an update -- a dragged
 // companion is restored, not duplicated. Restoration supersedes the shrink
-// cleanup: a matched event is removed from diff.deletes AND cleanup.events
-// (15.2.7)
-resolveOutOfWindowCompanions(diff, cleanup, repository) -> void
-// Daily-run ownership sweep (15.2.8): unbounded scan (paged, stops early
-// when shouldStop fires), anchor-selected candidates (event id absent
-// from the window read, anchor inside the slacked planning range), one
-// getEventById per candidate parent, then a parent-STATE decision:
-// absent/cancelled, live-but-out-of-window, and in-window ineligible all
-// delete; planned keeps its candidates (restoration owns them) unless the
-// key is already satisfied in-window (stranded duplicate); failed
-// preserves -- restoration is create-driven and cannot reach a stray
-// whose parent no longer plans. Runs only on a COMPLETE window scan, and
-// takes the full observed list, never the key index: the id test must
-// see in-window duplicates the index collapsed away
+// cleanup: a matched event is removed from diff.deletes AND cleanup.events.
+// Checks shouldStop between lookups; when it fires the engine re-evaluates
+// the budget and skips application -- an unresolved create must never be
+// applied blindly (15.2.7)
+resolveOutOfWindowCompanions(diff, cleanup, repository, shouldStop) -> void
+// Daily-run ownership sweep (15.2.8): updatedMin-bounded listing (a
+// stray was necessarily moved, and moves bump `updated`; cancelled
+// tombstones excluded; stops early when shouldStop fires),
+// anchor-selected candidates (event id absent from the window read,
+// anchor inside the slacked planning range), one getEventById per
+// candidate parent, then a parent-STATE decision: absent/cancelled,
+// live-but-out-of-window, and in-window ineligible all delete; planned
+// keeps its candidates (restoration owns them) unless the key is already
+// satisfied in-window (stranded duplicate); failed preserves --
+// restoration is create-driven and cannot reach a stray whose parent no
+// longer plans. Runs only on a COMPLETE window scan; takes the full
+// observed list, never the key index (the id test must see in-window
+// duplicates the index collapsed away) and the run's injected `now`
+// (updatedMin, the anchor band, and the dtp.sweepCompletedAt watermark
+// all derive from it -- a wall-clock read would unpin them)
 sweepOutOfWindowCompanions(observedGenerated, planningOutcomes, window,
-                           repository, shouldStop)
+                           now, repository, shouldStop)
   -> ObservedGeneratedEvent[]
 // Hourly diagnostic allowance (20.3): budget the routing client actually
 // decrements when reason === 'event-diagnostic'; spend recorded even on
-// dry runs -- the broker calls happened
+// dry runs -- the broker calls happened. The read FAILS CLOSED (returns
+// 0 on a Properties error) so an outage that breaks spend writes cannot
+// simultaneously mint fresh allowances (18.2)
 diagnosticBudgetRemaining(now) -> number
 recordDiagnosticRouteSpend(count, now) -> void
+// Console/log-only diagnostic for failures that occur after the run's
+// result is built (e.g. the finally-block spend write) -- never throws
+logWarning(code, error) -> void
 // Assembles the per-event diagnostic payload (17.6) for eventIdFilter
 // runs; origin and outcome are null when eligibility already rejected;
-// routes copied from outcome.routes (17.4)
-captureEventDiagnostics(event, eligibility, directives, origin, outcome)
+// routes copied from outcome.routes (17.4). effectiveBufferMinutes is
+// passed in by the engine (directive override or settings default) --
+// it must be displayable even when planning failed before any spec
+// existed to infer it from
+captureEventDiagnostics(event, eligibility, directives, origin, outcome,
+                        effectiveBufferMinutes)
   -> EventDiagnostics
 // Fallback payload when the targeted read resolves no source event
 // (17.1): a synthesized ineligible EligibilityResult with reason

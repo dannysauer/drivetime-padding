@@ -33,7 +33,7 @@ function runReconciliation(options) {
  * Deferred is not failed: nothing was rejected. Section 23.1.
  * Technical Design section 17.5.
  */
-function applyDiff_(diff, runStartMs) {
+function applyDiff(diff, runStartMs) {
   throw new Error('Not implemented: Technical Design section 17.5');
 }
 
@@ -69,7 +69,7 @@ function calculateWindow(windowDays, now) {
  *
  * Technical Design section 7.2, REQ-ELIG-007, REQ-TIME-011.
  */
-function overlapsPlanningRange_(event, window) {
+function overlapsPlanningRange(event, window) {
   throw new Error('Not implemented: Technical Design section 7.2');
 }
 
@@ -86,7 +86,7 @@ function overlapsPlanningRange_(event, window) {
  *
  * Technical Design section 15.2.1, REQ-GEN-014a, REQ-GEN-014b.
  */
-function ownedFieldsMatch_(observed, desired) {
+function ownedFieldsMatch(observed, desired) {
   throw new Error('Not implemented: Technical Design section 15.2.1');
 }
 
@@ -95,7 +95,7 @@ function ownedFieldsMatch_(observed, desired) {
  * Plain ascending order would spend the execution budget on the past.
  * Technical Design section 23.2.
  */
-function orderForPlanning_(events, now) {
+function orderForPlanning(events, now) {
   throw new Error('Not implemented: Technical Design section 23.2');
 }
 
@@ -118,11 +118,11 @@ function compareDesiredAndObserved(desiredSpecs, observedEvents, planningOutcome
  * nothing to consult and every run calls the broker.
  * Technical Design section 12.1.1, REQ-PERF-015.
  */
-function indexByGeneratedKey_(observedEvents) {
+function indexByGeneratedKey(observedEvents) {
   throw new Error('Not implemented: Technical Design section 12.1.1');
 }
 
-function routeCacheFor_(observedByKey, parentEventId) {
+function routeCacheFor(observedByKey, parentEventId) {
   throw new Error('Not implemented: Technical Design section 12.1.1');
 }
 
@@ -140,10 +140,35 @@ function routeCacheFor_(observedByKey, parentEventId) {
  * never be satisfied, freezing the high-water mark.
  *
  * The comparator stays pure; it has no repository access.
+ *
+ * Checks shouldStop between lookups: one lookup per pending create
+ * multiplies past what a single up-front gate can bound. When it fires,
+ * the engine re-evaluates the budget and skips application -- a create
+ * whose lookup never ran must not be applied blindly.
  * Technical Design section 15.2.7.
  */
-function resolveOutOfWindowCompanions_(diff, cleanup, repository) {
+function resolveOutOfWindowCompanions(diff, cleanup, repository, shouldStop) {
   throw new Error('Not implemented: Technical Design section 15.2.7');
+}
+
+/**
+ * Daily orphan sweep (Technical Design section 15.2.8). Lists
+ * ownership-filtered events updated since the sweep watermark (a stray
+ * was necessarily moved, and moves bump `updated`; cancelled tombstones
+ * excluded), selects candidates by event id absent from the window read
+ * plus anchor inside the slacked planning range, then decides per parent
+ * STATE via one point read: absent/cancelled, live-but-out-of-window,
+ * and in-window ineligible parents delete; planned parents keep their
+ * candidates unless an in-window event already satisfies the key; failed
+ * parents preserve. Runs only on daily triggers with a COMPLETE window
+ * scan. Takes the injected `now`: updatedMin, the anchor band, and the
+ * dtp.sweepCompletedAt watermark all derive from it, and the watermark
+ * stretches the bounds over gaps of skipped or incomplete sweeps.
+ */
+function sweepOutOfWindowCompanions(
+    observedGenerated, planningOutcomes, window, now, repository,
+    shouldStop) {
+  throw new Error('Not implemented: Technical Design section 15.2.8');
 }
 
 /**
@@ -154,7 +179,7 @@ function resolveOutOfWindowCompanions_(diff, cleanup, repository) {
  * list, so the diagnostic card can show what is wrong (section 5.3).
  * Technical Design section 17.2, Architecture section 14.2.
  */
-function buildFailureResult_(errorOrValidation, options) {
+function buildFailureResult(errorOrValidation, options) {
   throw new Error('Not implemented: Technical Design section 17.2');
 }
 
@@ -186,6 +211,6 @@ function buildFailureResult_(errorOrValidation, options) {
  * ordering means the delete wins.
  * Technical Design section 7.6, REQ-CONFIG-006a.
  */
-function findStrandedCompanions_(window, settings, dryRun) {
+function findStrandedCompanions(window, settings, dryRun) {
   throw new Error('Not implemented: Technical Design section 7.6');
 }

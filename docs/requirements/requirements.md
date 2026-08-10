@@ -621,7 +621,7 @@ The broker shall not log raw origin and destination values by default.
 
 ### REQ-GEN-001: Exactly two generated events
 
-For a successfully planned MVP drivetime source event, the desired state shall contain one outbound and one return event.
+For a successfully planned MVP drivetime source event, the desired state shall contain one outbound and one return event — **except** that a role whose quantized route duration plus effective buffer is zero shall contain no event for that role (Technical Design §12.5, AC-OOO-012). Calendar rejects zero-length events, so mandating the pair unconditionally would force either a requirement violation or an insert that can never succeed.
 
 ### REQ-GEN-002: Predictable subjects
 
