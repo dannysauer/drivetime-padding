@@ -612,6 +612,7 @@ Recommended compact metadata:
   "parent": "source-instance-id",
   "ical": "source-ical-uid",
   "originalStart": "2026-07-24T14:00:00-05:00",
+  "anchor": "2026-07-24T14:00:00-05:00",
   "role": "outbound",
   "fingerprint": "sha256-value"
 }
@@ -1050,7 +1051,7 @@ function reconcile(options) {
     // no status is saved, no continuation is enqueued. Skipping leaves a
     // clean partial: the diff is recomputed next run, and reconciliation
     // is idempotent.
-    const outOfTime = elapsedExceedsExecutionBudget(runStart);
+    let outOfTime = elapsedExceedsExecutionBudget(runStart);
 
     // Takes the cleanup state too: a companion dragged into a vacated
     // range beyond a shrunken horizon is in BOTH lists -- queued for
@@ -1064,6 +1065,33 @@ function reconcile(options) {
     // not happen.
     if (options.dryRun || !outOfTime) {
       resolveOutOfWindowCompanions(diff, cleanup, repository);
+    }
+
+    // Daily-only ownership sweep for companions moved outside the
+    // observation range whose parent was then DELETED (technical design
+    // §15.2.8). Restoration above is create-driven, so it never fires for
+    // a parent that no longer plans; without this sweep such a stray is
+    // permanent. Candidates are anchor-selected (parent time inside the
+    // slacked planning range) so historical companions cost almost
+    // nothing, and each candidate parent gets one point read -- absent
+    // parent means its companions join the deletes, deduplicated by id
+    // like the overlong pass.
+    //
+    // Budget-aware on BOTH sides: gated on a fresh check (the restoration
+    // lookups above may have consumed what the earlier check saw), and
+    // outOfTime is re-evaluated afterward -- paging a full-history listing
+    // into applyDiff with the budget spent is the hard-kill-mid-apply the
+    // gate exists to prevent. A sweep skipped for time acts on days-old
+    // state anyway; it waits for tomorrow's daily run.
+    if (options.reason === "daily-trigger" &&
+        !elapsedExceedsExecutionBudget(runStart)) {
+      const orphaned = findDeletedParentOrphans(
+        observedByKey, window, repository);
+      const queuedIds = new Set(diff.deletes.map(event => event.id));
+      diff.deletes.push(
+        ...orphaned.filter(event => !queuedIds.has(event.id))
+      );
+      outOfTime = elapsedExceedsExecutionBudget(runStart);
     }
 
     let applied = null;
@@ -1104,7 +1132,11 @@ function reconcile(options) {
       } else if (result.status === "partial") {
         // {scheduled, capReached}: already-pending is fine (a pass is
         // coming anyway); capReached is the state diagnostics must show.
-        result.continuationCapReached = enqueueContinuation().capReached;
+        // On diagnostics, not the result root -- the §17.2 contract
+        // exposes the flag as diagnostics.continuationCapReached, and
+        // status persistence reads the documented shape.
+        result.diagnostics.continuationCapReached =
+          enqueueContinuation().capReached;
       }
       saveRunStatus(result);
     }

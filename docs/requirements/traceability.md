@@ -145,3 +145,13 @@ This matrix links requirement groups to architecture components, technical-desig
 | §7.6 (dry-run safe) | Dry runs never advance the high-water mark | AC-DRYRUN-001 |
 | §19.6 (serialized) | Continuation counter updated by the engine under the user lock | AC-CACHE-006 |
 | Architecture §14.2 (renamed) | `normalizeCalendarEvent` used consistently | — pseudocode |
+
+## Requirements added in the eleventh review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| §19.6 / Architecture §14.2 (aligned) | `continuationCapReached` recorded under `diagnostics`, matching §17.2 | — contract |
+| REQ-RECON-017 | Daily anchor-selected sweep deletes companions of deleted sources | AC-RECOVERY-015 |
+| §13.2 (extended) | `anchor` persisted on every companion; sweeps cost nothing for history | AC-RECOVERY-015 |
+| §19.5 (serialized) | Manual enqueue check-and-create under the user lock; handlers collapse duplicate triggers | — TD §19.5 |
+| §19.4 (asynchronous) | Remove-all card action bounded; cleanup runs as budget-bounded worker passes with persisted progress | AC-CONFIG-004 |

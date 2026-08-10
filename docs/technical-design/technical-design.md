@@ -294,6 +294,9 @@ interface ObservedGeneratedEvent {
     routeSecs: number | null;
     routeAt: string | null;
   };
+  /** Persisted 14.1 source anchor from metadata (13.2); null when missing
+      or unparseable, which excludes the event from the 15.2.8 sweep. */
+  anchor: string | null;
   rawEvent: object;
 }
 ```
@@ -1171,6 +1174,7 @@ Summary generation must be deterministic because it contributes to the fingerpri
   "parent": "source-instance-id",
   "ical": "source-ical-uid",
   "originalStart": "2026-07-24T14:00:00-05:00",
+  "anchor": "2026-07-24T14:00:00-05:00",
   "role": "outbound",
   "fingerprint": "hex-sha256",
   "routeHash": "hex-sha256",
@@ -1193,9 +1197,12 @@ Optional:
 
 - `ical`;
 - `originalStart`;
+- `anchor` — written unconditionally by the current schema, but its absence never invalidates the metadata or removes the event from management: an anchor-less event is merely excluded from the §15.2.8 sweep;
 - `routeHash`, `routeSecs`, `routeAt` — the route plan cache (§13.3). Absent entries simply cause a broker call.
 
 All values are strings; Calendar private extended properties are string-typed. `routeSecs` stores the **raw** unquantized duration.
+
+`anchor` persists the §14.1 source anchor — the one source boundary this companion depends on: `source.start` for outbound, `source.end` for return, exactly as it entered the fingerprint. It exists for the daily orphan sweep (§15.2.8): a companion moved outside the observation range whose parent was then deleted is discoverable only by an ownership scan, and the anchor is the only way that scan can tell such a stray (parent time inside the current planning range) from ordinary aged-out history without paying a parent lookup per historical event. An event with a missing or unparseable `anchor` is never treated as a sweep candidate — the conservative failure is a stray that persists, not history that gets probed.
 
 ### 13.3 Route plan cache
 
@@ -1543,6 +1550,24 @@ Two interactions need pinning:
 - **The lookup excludes cancelled tombstones.** `listCompanionsByParent` must filter `status: "cancelled"` — a manually deleted companion comes back with its `dtp` metadata intact (§7.3), and matching it here would convert the recreate into an update of a deleted resource, breaking restoration on every run. The same exclusion protects §15.2.6's delete path from 404s on tombstones.
 - **Restoration supersedes the shrink cleanup.** The matched event can already sit in the delete list: shrink the window, then drag a companion into the vacated range beyond the new horizon, and §7.6's cleanup queues its deletion while this pass wants to restore it. The engine removes the event from `diff.deletes` **and** from the cleanup's stranded list before converting the create to an update — its parent is planned and its desired position is inside the window, so it is not stranded, and leaving it in the cleanup list would either delete the freshly restored event or leave the high-water mark permanently unlowered when `deletedAll` can never be satisfied.
 
+#### 15.2.8 Companions orphaned outside the observation range
+
+§15.2.7's restoration is driven by a **pending create**, so it fires only while the parent still exists and plans. Delete the source in the gap between the drag and the next run and no create ever pends: the bounded scan sees neither resource, the absence logic has nothing to act on, and the companion sits outside every range the ordinary read covers — a permanent stray, in violation of REQ-RECON-009's cleanup promise.
+
+Discovery therefore cannot be driven by desired specs. The **daily maintenance run** (`reason === "daily-trigger"`, never dry) performs an ownership sweep:
+
+1. run the unbounded, ownership-filtered scan the remove-all action already requires (`listAllGeneratedEvents`, §19.4);
+2. a returned event is a **candidate** when it is absent from the window read's observed index *and* its `anchor` (§13.2) falls within `[planStart − (MAX_SOURCE_DURATION + SWEEP_DISCOVERY_SLACK_MINUTES), planEnd + MAX_SOURCE_DURATION)`. The duration term covers whichever source boundary the role anchors — the two differ by at most the cap, and an outbound anchor sits a full duration behind the source's end. `SWEEP_DISCOVERY_SLACK_MINUTES` (recommended 2880 — 48 hours, two daily cycles) covers the time between the stray's creation and its discovery: `planStart` advances continuously, so a sweep bounded only by the duration cap would out-run an outbound anchor before the next daily firing — and out-run even a return anchor if one daily run is missed. Events with a missing or unparseable anchor are skipped;
+3. one `getEventById` per unique candidate parent. Parent absent or a cancelled tombstone → the parent's candidates join `diff.deletes`, deduplicated by event id exactly as §15.2.6. Parent exists → leave its companions alone: the parent is a live source, and this run's ordinary planning (restoration included) is already responsible for it.
+
+The deletion is safe without `scanComplete`: the swept events were **read** (by the unbounded scan), and the parent's absence comes from a **point read** — `getEventById` returning nothing means the resource is gone, not that a page went unretrieved. §15.3's marker rule and §16.5.1's conditional delete apply unchanged.
+
+Steady-state cost is one paginated ownership listing per day plus a small fixed band of point reads: the discovery slack deliberately reaches behind the observation range, so companions of sources that ended roughly 40–80 hours ago are candidates each day until their anchors age out of the band — a handful of lookups per day for a typical calendar, each finding a live parent and skipping. Beyond that band, the §7.2 completeness proof applies: a companion whose anchor lies inside the range sits inside the observation range *unless it was moved out*, so the remaining lookups are proportional to anomalies, normally zero.
+
+The sweep is **budget-aware**: it runs only when `elapsedExceedsExecutionBudget` is still false when its turn comes (after the restoration pass), and the engine re-evaluates the budget after the sweep before applying the diff (§23.1). A sweep skipped for time simply waits for the next daily run — it acts on days-old state by construction, so a one-day deferral costs nothing, while an unbounded listing racing the execution ceiling into `applyDiff` risks the hard-kill-mid-apply failure the budget gate exists to prevent.
+
+Why daily only: a per-calendar-trigger sweep would pay the unbounded listing on every edit, and a stray outside the observation range is invisible in the user's near-term view — a one-day discovery bound matches the daily cycle that already backstops eventual consistency (REQ-TRIGGER-002). The residual case — source deleted and automation disabled before the next daily run ever fires — is accepted; the remove-all action's unbounded cleanup (§19.4) still reaches such events.
+
 ### 15.3 Safety rule
 
 Delete only events carrying valid private property `dtp === '1'`.
@@ -1576,6 +1601,7 @@ Representative structure:
       "dtp": "1",
       "schema": "1",
       "parent": "abc123",
+      "anchor": "2026-07-24T14:00:00-05:00",
       "role": "outbound",
       "fingerprint": "..."
     }
@@ -1605,6 +1631,7 @@ Representative structure:
       "dtp": "1",
       "schema": "1",
       "parent": "abc123",
+      "anchor": "2026-07-24T14:00:00-05:00",
       "role": "outbound",
       "fingerprint": "..."
     }
@@ -1998,28 +2025,47 @@ listAllGeneratedEvents(calendarId)
 // privateExtendedProperty: dtp=1; no timeMin/timeMax; nextPageToken to completion
 ```
 
-`removeAutomation` proceeds in a fixed order:
+The unbounded scan plus one conditional delete per historical companion **cannot live inside the card callback**. CardService actions have the same short execution budget that already forced manual synchronization to enqueue (§19.5), and this action's work grows with the user's entire history — an established user with hundreds of aged-out companions would hit the ceiling mid-cleanup, losing the confirmation card and leaving events and personal settings behind at exactly the moment the user is preparing to uninstall. The action therefore splits into a cheap synchronous half and an enqueued worker.
 
-1. **acquire the same user lock reconciliation uses** (§16 of the architecture), with a generous wait — removing triggers stops *future* runs, but an in-flight run already past its planning phase would otherwise create companions after the cleanup scan, leaving orphans behind a `CleanupResult` that reports complete success, with automation disabled so nothing ever removes them;
-2. **persist `settings.enabled = false`**, still under the lock. Trigger removal alone is temporary: the engine's own first check is `settings.enabled`, `ensureTriggers()` is explicitly required to recreate missing triggers, and a later manual synchronization or trigger repair against an enabled settings object would regenerate everything the user just asked to remove. The persisted flag is what makes "disable automation" mean disabled;
-3. **remove the add-on's triggers**, so no later run recreates events after cleanup;
-4. run the unbounded scan and delete every returned event through `deleteGeneratedEvent` — §15.3's marker rule and §16.5.1's conditional delete apply to these deletions like any other;
-5. clear stored add-on state: the high-water mark, the continuation counter, the diagnostic spend counter, the last-run record, and — when the cleanup completed without failures — **replace the settings document with a minimal disabled tombstone** `{ schemaVersion, enabled: false }`. Configured origins are personal data (home and office addresses), and REQ-PRIV-006 promises their removal; the tombstone rather than full deletion is what keeps trigger repair gated on the disabled flag (§19.3) instead of resurrecting defaults. A cleanup with failures retains settings so the retry has its configuration;
-6. release the lock and report a `CleanupResult`.
+**The card action** (`removeAutomation`, behind the confirmation) does only bounded work:
 
-If the lock cannot be acquired within the wait, the action reports that a synchronization is in progress and asks the user to retry — it must not proceed unserialized.
+1. **acquire the same user lock reconciliation uses** (§16 of the architecture), with a generous wait. If the lock cannot be acquired, report that a synchronization is in progress and ask the user to retry — the disable must not race a run;
+2. **persist `settings.enabled = false`**, under the lock. Trigger removal alone is temporary: the engine's own first check is `settings.enabled`, `ensureTriggers()` is explicitly required to recreate missing triggers, and a later manual synchronization or trigger repair against an enabled settings object would regenerate everything the user just asked to remove. The persisted flag is what makes "disable automation" mean disabled — and it is also what makes the enqueued cleanup safe to run outside this lock hold: any run starting after this point exits at the disabled gate and creates nothing;
+3. **remove the add-on's reconciliation triggers**;
+4. **initialize the persisted progress record** (below) and **enqueue the cleanup worker** — a one-off trigger, same mechanism as §19.5 — then release the lock and return "Removal started". The card does not pretend the deletions happened inside the callback.
+
+**The cleanup worker** (`runRemovalCleanup`, one-off trigger handler):
+
+1. deletes every pending trigger for its own handler (the §19.5 collapse rule);
+2. acquires the user lock with a generous wait; on failure increments the progress record's `contentionRetries`, re-enqueues itself, and exits. Contention retries do **not** count against the pass cap — no work was done — but are bounded separately by `MAX_REMOVAL_CONTENTION_RETRIES` (recommended 10), past which the record is marked `failed`. Without their own bound, a persistently contended lock would chain re-enqueues forever with the record showing `running`; counting them as passes would instead let zero-work retries exhaust the cap and report failure when nothing went wrong. Genuine long contention is already unlikely: `enabled` is false by the time the worker exists, so post-disable runs exit at the gate in seconds;
+3. re-checks `settings.enabled`: if the user re-enabled the add-on between passes, the cleanup **aborts** and marks the progress record `aborted` — deleting companions a re-enabled automation is actively maintaining would just churn recreations against the user's changed intent;
+4. runs the unbounded scan and deletes returned events through `deleteGeneratedEvent` — §15.3's marker rule and §16.5.1's conditional delete apply unchanged — checking `elapsedExceedsExecutionBudget` between deletions (§23.1). When the budget expires with work remaining, it folds the pass's counts into the progress record, re-enqueues itself, and exits;
+5. working passes are capped at `MAX_REMOVAL_PASSES` (recommended 20 — a generous multiple of any realistic history at ~thousands of deletions per pass). At the cap the record is marked failed with the counts so far; the action can be offered again;
+6. on a pass that completes the scan with **zero failures**: **re-check `settings.enabled` one last time, still under the lock, immediately before touching stored state** — then clear stored add-on state (the high-water mark, the continuation counter, the diagnostic spend counter, the last-run record) and **replace the settings document with a minimal disabled tombstone** `{ schemaVersion, enabled: false }`. Configured origins are personal data (home and office addresses), and REQ-PRIV-006 promises their removal; the tombstone rather than full deletion is what keeps trigger repair gated on the disabled flag (§19.3) instead of resurrecting defaults. A cleanup with failures retains settings so the retry has its configuration.
+
+The step-6 re-check closes the re-enable race from the other side too: **the enable flow acquires the same user lock before persisting `enabled = true`** (and is rejected with a cleanup-in-progress notice while a pass holds it). Without that, a settings save landing between the worker's step-3 check and its step-6 tombstone would be silently clobbered — the user's just-entered origin addresses destroyed and automation switched back off moments after they enabled it. With both rules, a re-enable can only land between passes, and the next pass aborts at step 3.
+
+**Progress is persisted, not held in memory** — it must survive the worker's own re-enqueues and be visible between passes:
 
 ```typescript
-interface CleanupResult {
+// User Properties, key dtp.removalProgress
+interface CleanupProgress {
+  state: "running" | "complete" | "failed" | "aborted";
+  passes: number;                // lock-holding passes only
+  contentionRetries: number;     // lock-contention re-enqueues (step 2)
   triggersRemoved: number;
-  eventsDeleted: number;
-  failedDeletes: number;
-  /** False when the scan was truncated; some events may remain. */
+  eventsDeleted: number;         // cumulative across passes
+  failedDeletes: number;         // cumulative across passes
+  /** False when the final scan was truncated; some events may remain. */
   scanComplete: boolean;
+  startedAt: string;
+  updatedAt: string;
 }
 ```
 
-A partial failure is **reported, not absorbed**: the confirmation card shows the counts, states that some events may remain when `failedDeletes > 0` or `scanComplete` is false, and offers the action again — it is idempotent, so re-running it retries only what remains. Automation stays disabled after step 1 regardless of cleanup outcome; a failed cleanup must never leave triggers running against a user who asked to stop.
+The home card is the status surface, and it derives liveness the same way manual pendingness is derived (§19.5) — from the trigger list, never from the stored state alone: a record saying `running` **with no pending `runRemovalCleanup` trigger is treated as failed**, shown with its counts, and the action is offered again. The worker can die without ceremony — an uncaught throw after deleting its own trigger, a platform kill mid-deletion, or the card action's own enqueue failing against the trigger quota (which the card action must also catch, marking the record `failed` immediately) — and a stored `running` that nothing can update must not lock the user out of retrying forever. Otherwise: `running` with a pending trigger shows cleanup-in-progress with the cumulative count; `complete` shows the final counts; `failed` or `aborted` shows the counts, states that some events may remain when `failedDeletes > 0` or `scanComplete` is false, and offers the action again — the whole flow is idempotent, so re-running it retries only what remains. A partial failure is **reported, not absorbed**. Automation stays disabled from the card action's step 2 regardless of cleanup outcome; a failed cleanup must never leave triggers running against a user who asked to stop.
+
+Like §19.5 and §19.6, the worker depends on one-off trigger creation and is **subject to Prototype Spike 1**. The fallback if the spike fails is the §19.5 pattern's inverse: bounded inline passes from the card, each deleting until near the callback budget and reporting remaining work with a "continue removal" action — worse, and to be called out in the spike report rather than silently adopted.
 
 ### 19.5 Manual synchronization entry point
 
@@ -2050,18 +2096,38 @@ function enqueueManualRun_() {
   // Do not stack: if a manual run trigger is already pending, this is a
   // no-op -- same rule as continuations (23.4). Reconciliation is
   // idempotent, so one pending run covers any number of clicks.
-  if (manualRunPending_()) return;
-  ScriptApp.newTrigger('runManualReconciliation')
-    .timeBased()
-    .after(MANUAL_RUN_DELAY_MS)      // recommended 1000; minimum granularity applies
-    .create();
+  //
+  // The check-and-create is SERIALIZED under the user lock: two rapid
+  // clicks (double-click, two tabs) can otherwise both observe pending as
+  // false before either creates its trigger. The lock is held for
+  // milliseconds here, so the short wait resolves click-vs-click races.
+  // When the wait fails, a reconciliation is holding the lock for its
+  // whole run -- fall through and create unserialized rather than drop
+  // the click (the card already said "started", and a run in progress may
+  // have read the window before the user's change). The bounded residue
+  // -- two clicks during an active run both slipping past the check --
+  // is collapsed by the handler, which deletes EVERY pending manual
+  // trigger on entry, not just its own.
+  const lock = LockService.getUserLock();
+  const locked = lock.tryLock(MANUAL_ENQUEUE_LOCK_MS);   // recommended 2000
+  try {
+    if (manualRunPending_()) return;
+    ScriptApp.newTrigger('runManualReconciliation')
+      .timeBased()
+      .after(MANUAL_RUN_DELAY_MS)    // recommended 1000; minimum granularity applies
+      .create();
+  } finally {
+    if (locked) lock.releaseLock();
+  }
 }
 
-// One-off trigger handler. Deletes its own trigger FIRST -- that single
-// act is also what clears pendingness -- then runs the same engine as
+// One-off trigger handler. Deletes EVERY pending manual trigger FIRST --
+// its own plus any duplicate that slipped past the enqueue check while a
+// run held the lock -- which both clears pendingness and collapses a
+// stacked pair into this one execution. Then runs the same engine as
 // every other entry point (REQ-RECON-011).
 function runManualReconciliation(e) {
-  deleteTriggerById_(e && e.triggerUid);
+  deleteTriggersByHandler_('runManualReconciliation');
   const result = runReconciliation({ reason: 'manual' });
 
   // Lock contention did no work, but the user was already told
@@ -2113,11 +2179,13 @@ function enqueueContinuation_() {
   return { scheduled: true, capReached: false };
 }
 
-// One-off trigger handler. Deletes its own trigger, then runs the shared
-// engine (REQ-RECON-011). The counter increment happens INSIDE the engine,
+// One-off trigger handler. Deletes every pending trigger for this handler
+// (its own, plus any duplicate the unserialized skip-path re-enqueue let
+// slip -- same collapse rule as §19.5), then runs the shared engine
+// (REQ-RECON-011). The counter increment happens INSIDE the engine,
 // under the user lock -- see the lifecycle rules below.
 function runContinuationReconciliation(e) {
-  deleteTriggerById_(e && e.triggerUid);
+  deleteTriggersByHandler_('runContinuationReconciliation');
   const result = runReconciliation({ reason: 'continuation' });
 
   // Lock contention did no work and never reached the counter (the
@@ -2138,7 +2206,7 @@ The **counter lifecycle** is what makes the cap enforceable:
 - **incremented by the engine, under the user lock, after the cheap gate checks and before the window read** (`reason === 'continuation'`, non-dry): the lock is what serializes the counter against the concurrent successful run that resets it — a handler-side increment races that reset, losing it or leaving a stale refund. Counting before substantive work preserves crash-safety: a continuation that dies mid-run still counted itself. The gate checks it sits behind cannot loop on the allowance either — each one either terminates the episode (a failed result schedules nothing) or is transient (a skip re-enqueues without counting);
 - a `skipped` run never touched the counter (the increment is behind the lock it failed to take), so there is no refund path — the handler simply re-enqueues;
 - reset to `0` by any **non-dry** run that completes with status `success`, whatever its reason — success means the deferred work drained, so the next `partial` episode starts a fresh allowance. Increment and reset are both under the lock, so they cannot interleave;
-- when the cap is reached, `enqueueContinuation_` returns `capReached: true` and the engine records `continuationCapReached` on the run status.
+- when the cap is reached, `enqueueContinuation_` returns `capReached: true` and the engine records it as `diagnostics.continuationCapReached` on the run result — the field's home in the §4.11 contract, which is where status persistence and the UI read it.
 
 **Dry runs are exempt from all of this.** A diagnostic dry run that would end `partial` neither schedules a continuation nor resets the counter — a diagnostic must not mutate trigger state (see the engine pseudocode, Architecture §14.2).
 

@@ -687,13 +687,14 @@ The ceiling bounds wire traffic. Counting logical calls instead would double the
 **Given** managed events exist both inside the observation range and far outside it (aged out, or beyond a shrunken horizon)  
 **And** the user confirms "Remove all generated events and disable automation"  
 **When** the action runs  
-**Then** `settings.enabled` is persisted as `false` before the triggers are removed  
-**And** every managed event is deleted, including those no window-bounded scan would read  
+**Then** the card action returns within the callback budget, having persisted `settings.enabled` as `false`, removed the triggers, and enqueued the cleanup worker  
+**And** the worker deletes every managed event in budget-bounded passes, including events no window-bounded scan would read, re-enqueueing itself until the scan completes  
+**And** cumulative progress is persisted and shown by the home card while cleanup is running  
 **And** on full success the stored settings are replaced with a minimal disabled tombstone, removing configured origin addresses  
-**And** the result reports deleted and failed counts, with a retry offered when any deletion failed  
+**And** the final record reports deleted and failed counts, with a retry offered when any deletion failed  
 **And** a later manual synchronization or trigger repair does not regenerate events or triggers.
 
-"All" must mean all: the ordinary scans are bounded by the rolling window, and a cleanup built on them silently misses history and stranded events.
+"All" must mean all: the ordinary scans are bounded by the rolling window, and a cleanup built on them silently misses history and stranded events. And the deletions cannot live in the card callback — its execution budget is fixed while the user's history is not, and a timeout mid-cleanup would leave events and personal settings behind at exactly the moment the user is preparing to uninstall.
 
 ## AC-RECOVERY-012: Companion dragged outside the window is restored
 
@@ -745,3 +746,15 @@ Calendar rejects zero-length events; without this rule every reconciliation woul
 **And** no full window listing is performed for the card open.
 
 A window-scan-based diagnostic would return silence for exactly the events users most wonder about.
+
+## AC-RECOVERY-015: Companion stranded by a deleted source is swept
+
+**Given** a managed companion dragged outside the observation range  
+**And** its source event deleted before any reconciliation runs  
+**When** the next daily maintenance run executes  
+**Then** the ownership sweep finds the companion via its persisted `anchor`  
+**And** a point read confirms the parent no longer exists  
+**And** the companion is deleted  
+**And** historical companions whose anchors lie outside the slacked planning range trigger no parent lookups.
+
+Restoration (AC-RECOVERY-012) is driven by a pending create, which requires a live parent; a deleted parent leaves nothing pending and both resources invisible to the bounded scan. Only a scan independent of desired state can find the stray, and the anchor is what keeps that scan from probing every historical event daily.

@@ -40,9 +40,28 @@ const DIAGNOSTIC_ROUTE_CALLS_PER_HOUR = 20;
 // Manual sync enqueues a one-off trigger rather than running inline in the
 // card callback. Technical Design section 19.5.
 const MANUAL_RUN_DELAY_MS = 1000;
+// Serializes the pending-check-and-create against concurrent clicks. Held
+// for milliseconds; a failed wait means a reconciliation run holds the
+// lock, and the enqueue falls through unserialized (the handler collapses
+// any resulting duplicates). Technical Design section 19.5.
+const MANUAL_ENQUEUE_LOCK_MS = 2000;
 
 // Partial runs schedule their own continuation. Technical Design 19.6/23.4.
 const CONTINUATION_DELAY_MS = 5 * 60000;
+
+// Remove-all cleanup runs as budget-bounded worker passes, never inside the
+// card callback. Lock-contention retries are bounded separately from
+// working passes -- counting them together would let zero-work retries
+// exhaust the cap; counting neither would re-enqueue forever. Technical
+// Design section 19.4.
+const MAX_REMOVAL_PASSES = 20;
+const MAX_REMOVAL_CONTENTION_RETRIES = 10;
+
+// How far behind the slacked planning range the daily orphan sweep reaches
+// for anchors: two daily cycles, so an outbound anchor is not out-run by
+// planStart's advance before the next firing, even with one missed run.
+// Technical Design section 15.2.8.
+const SWEEP_DISCOVERY_SLACK_MINUTES = 2880;
 
 // Storage keys.
 const SETTINGS_KEY = 'dtp.settings';
@@ -60,6 +79,9 @@ const CONTINUATION_COUNT_KEY = 'dtp.continuationCount';
 // under the user lock; feeds the RouteBudget when reason is
 // event-diagnostic. Technical Design section 20.3.
 const DIAGNOSTIC_SPEND_KEY = 'dtp.diagnosticRouteSpend';
+// Remove-all cleanup progress: survives the worker's re-enqueues and feeds
+// the home card's status surface. Technical Design section 19.4.
+const REMOVAL_PROGRESS_KEY = 'dtp.removalProgress';
 const CURRENT_SETTINGS_SCHEMA = 1;
 
 // Generated-event metadata. ADR 0009 -- this property is the deletion-safety

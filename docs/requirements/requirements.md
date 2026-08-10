@@ -896,6 +896,12 @@ Before creating a generated event for a desired key with no observed match, reco
 
 A complete window scan cannot see a companion the user dragged beyond the observation range. A blind create manufactures a permanent duplicate and abandons the moved event, violating the manual-move restoration guarantee (REQ-GEN-014).
 
+### REQ-RECON-017: Companions of deleted sources are swept from outside the window
+
+The daily maintenance run shall discover managed events outside the observation range whose persisted source anchor lies within the current planning range — slacked by the source duration cap plus a discovery margin covering the interval between daily firings — and whose parent event a point read shows to be absent or cancelled, and shall delete them.
+
+REQ-RECON-016's restoration is driven by a pending create, which requires a live, planning parent. Deleting the source after dragging a companion out of range leaves nothing pending and both resources invisible to the bounded scan — without a discovery pass independent of desired state, the stray persists forever, in violation of REQ-RECON-009. The anchor selection is what bounds the sweep's cost: historical companions whose parents simply aged out are excluded without any per-event lookup.
+
 ---
 
 ## 18. Trigger Requirements

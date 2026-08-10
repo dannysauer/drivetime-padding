@@ -141,6 +141,13 @@ recordRunWarning(code, error) -> void
 // cleanup: a matched event is removed from diff.deletes AND cleanup.events
 // (15.2.7)
 resolveOutOfWindowCompanions(diff, cleanup, repository) -> void
+// Daily-run ownership sweep (15.2.8): unbounded scan, anchor-selected
+// candidates (absent from the observed index, anchor inside the slacked
+// planning range), one getEventById per candidate parent; returns the
+// companions of absent/cancelled parents for deletion -- restoration is
+// create-driven and cannot reach a stray whose parent was deleted
+findDeletedParentOrphans(observedByKey, window, repository)
+  -> ObservedGeneratedEvent[]
 // Hourly diagnostic allowance (20.3): budget the routing client actually
 // decrements when reason === 'event-diagnostic'; spend recorded even on
 // dry runs -- the broker calls happened
@@ -159,9 +166,20 @@ buildUnresolvedEventDiagnostics(eventId, reason) -> EventDiagnostics
 
 // Triggers
 ensureTriggers() -> TriggerHealth
-removeAutomation() -> CleanupResult
+// Card action: bounded work only -- under the user lock it persists
+// enabled=false, removes triggers, and enqueues the cleanup worker; the
+// unbounded scan-and-delete lives in the worker (19.4)
+removeAutomation() -> ActionResponse
+// Budget-bounded cleanup passes: deletes until the execution budget nears,
+// persists cumulative counts in CleanupProgress (dtp.removalProgress),
+// re-enqueues until the scan completes (capped at MAX_REMOVAL_PASSES);
+// tombstone written only by a pass finishing with zero failures (19.4)
+runRemovalCleanup(e) -> CleanupProgress
 // Manual sync enqueues -- card callbacks cannot fit a full reconcile
-// (technical design 19.5; one-off trigger, subject to Spike 1)
+// (technical design 19.5; one-off trigger, subject to Spike 1). The
+// pending-check-and-create is serialized under the user lock; handlers
+// delete every pending trigger for their handler on entry, collapsing
+// duplicates that slip through while a run holds the lock
 onSynchronizeNow(e) -> ActionResponse
 runManualReconciliation(e) -> ReconciliationResult
 // Partial-run continuation worker (19.6). The counter is incremented by
@@ -169,7 +187,8 @@ runManualReconciliation(e) -> ReconciliationResult
 // reset a concurrent successful run performs); skipped runs never reach
 // the counter, so no refund path exists -- the handler just re-enqueues.
 // Reset by any successful non-dry run; cap enforced at enqueue time; the
-// enqueue return value is how continuationCapReached reaches run status.
+// enqueue return value is how diagnostics.continuationCapReached (4.11)
+// reaches the run result.
 enqueueContinuation() -> { scheduled: boolean, capReached: boolean }
 incrementContinuationCount() / resetContinuationCount()
 runContinuationReconciliation(e) -> ReconciliationResult
