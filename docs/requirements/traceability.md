@@ -104,3 +104,16 @@ This matrix links requirement groups to architecture components, technical-desig
 | Working-location plumbing | `listWorkingLocationEvents` called and passed to origin resolution | AC-ORIGIN-001, AC-ORIGIN-002 |
 | `workingLocation.fallbackToDefault` removed | Setting had no behavioral consumer; fallback is fixed behavior | AC-ORIGIN-003 |
 | Remove-all cleanup contract | Unbounded ownership scan, ordered teardown, reported partial failure | AC-CONFIG-004 |
+
+## Requirements added in the eighth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| REQ-RECON-016 | Companions moved outside the window restored, not duplicated | AC-RECOVERY-012 |
+| §23.1 (hardened) | Execution cutoff marks skipped sources `failed`, preserving companions | AC-RECOVERY-013 |
+| §15.2 (reordered) | Metadata patch evaluated before `unchanged`, so same-bucket refreshes persist | AC-CACHE-001 |
+| §7.3 (extended) | Cancelled generated tombstones excluded from observation | AC-RECOVERY-001 |
+| Architecture §14.2 (boundary) | Run-wide throws become failed results in the stored record | AC-RECOVERY-014 |
+| REQ-PERF-011 (enforced) | Diagnostic budget feeds the RouteBudget via an hourly counter | AC-CACHE-004 |
+| §19.4 (extended) | Remove-all persists `enabled = false` before removing triggers | AC-CONFIG-004 |
+| Architecture §14.2 (widened) | Working-location fetch covers evaluated sources' full spans | AC-ORIGIN-001, AC-ORIGIN-002 |

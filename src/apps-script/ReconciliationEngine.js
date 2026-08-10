@@ -121,6 +121,38 @@ function routeCacheFor_(observedByKey, parentEventId) {
 }
 
 /**
+ * Engine post-pass on the diff: one unbounded parent lookup per pending
+ * create. A managed companion the user dragged beyond the observation
+ * range is invisible to a complete scan; creating blindly would strand it
+ * as a permanent duplicate. A same parent|role match converts the create
+ * into an update -- restoration, the documented manual-move recovery.
+ *
+ * Restoration supersedes the shrink cleanup: a companion dragged into a
+ * vacated range sits in cleanup.events AND matches a pending create. The
+ * matched event is removed from diff.deletes and cleanup.events, or
+ * applyDiff deletes the freshly restored event -- and deletedAll could
+ * never be satisfied, freezing the high-water mark.
+ *
+ * The comparator stays pure; it has no repository access.
+ * Technical Design section 15.2.7.
+ */
+function resolveOutOfWindowCompanions_(diff, cleanup, repository) {
+  throw new Error('Not implemented: Technical Design section 15.2.7');
+}
+
+/**
+ * Normalizes a run-wide failure (window read, unexpected throw) into a
+ * failed ReconciliationResult so it reaches the stored record instead of
+ * leaving the home card showing a stale success. Settings validation
+ * failures are built from the validation result and carry its full error
+ * list, so the diagnostic card can show what is wrong (section 5.3).
+ * Technical Design section 17.2, Architecture section 14.2.
+ */
+function buildFailureResult_(errorOrValidation, options) {
+  throw new Error('Not implemented: Technical Design section 17.2');
+}
+
+/**
  * Companions stranded beyond a shrunken horizon.
  *
  * observeEnd is derived from the CURRENT windowDays, so reducing that setting

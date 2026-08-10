@@ -22,9 +22,10 @@ listWorkingLocationEvents(calendarId, start, end) -> RawCalendarEvent[]
 // Ownership-filtered (privateExtendedProperty=dtp=1); used for the
 // window-shrink cleanup pass in technical design 7.6
 listGeneratedEventsBetween(calendarId, start, end) -> ObservedGeneratedEvent[]
-// Ownership + parent filtered, no time bounds; locates companions of an
-// overlong (SOURCE_TOO_LONG) source that fell outside the observation
-// range (technical design 15.2.6)
+// Ownership + parent filtered, no time bounds, EXCLUDES cancelled
+// tombstones (a deleted companion keeps its dtp metadata and must read as
+// absent). Used by the overlong-source cleanup (15.2.6) and the
+// out-of-window restoration pass (15.2.7)
 listCompanionsByParent(calendarId, parentEventId) -> ObservedGeneratedEvent[]
 // Unbounded ownership scan for "remove all generated events" -- window
 // scans miss events that aged out of the rolling range (19.4)
@@ -101,6 +102,20 @@ runReconciliation(options) -> ReconciliationResult
 // the proposed diff (technical design 17.5, REQ-ERROR-006)
 applyDiff(diff) -> ApplyResult
 buildRunResult(diff, applied, options) -> ReconciliationResult   // applied null on dry run
+// Top-level error boundary: a run-wide throw (settings, window read)
+// becomes a failed result and reaches the stored record (arch 14.2)
+buildFailureResult(error, options) -> ReconciliationResult
+// Engine post-pass on the diff: one unbounded parent lookup per pending
+// create; a same-key match converts the create to an update -- a dragged
+// companion is restored, not duplicated. Restoration supersedes the shrink
+// cleanup: a matched event is removed from diff.deletes AND cleanup.events
+// (15.2.7)
+resolveOutOfWindowCompanions(diff, cleanup, repository) -> void
+// Hourly diagnostic allowance (20.3): budget the routing client actually
+// decrements when reason === 'event-diagnostic'; spend recorded even on
+// dry runs -- the broker calls happened
+diagnosticBudgetRemaining(now) -> number
+recordDiagnosticRouteSpend(count, now) -> void
 
 // Triggers
 ensureTriggers() -> TriggerHealth

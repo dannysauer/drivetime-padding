@@ -890,6 +890,12 @@ When an ineligible source event's observed duration exceeds `MAX_SOURCE_DURATION
 
 The observation range's completeness guarantee assumes sources respect the duration cap. A source edited past the cap after planning keeps itself readable while its companions fall behind `observeStart` permanently; only a targeted lookup can reach them. The trigger is the duration, not the classification: a multi-day all-day conversion strands companions identically but is classified `ALL_DAY_EVENT` before the duration test runs. The gate is "either role missing" rather than "no companions observed" so a half-stranded pair does not wait an extra run for cleanup.
 
+### REQ-RECON-016: Companions moved outside the window are restored, not duplicated
+
+Before creating a generated event for a desired key with no observed match, reconciliation shall look up managed companions for that parent without time bounds; a managed event matching the absent key shall be updated to the desired specification instead of a new event being created.
+
+A complete window scan cannot see a companion the user dragged beyond the observation range. A blind create manufactures a permanent duplicate and abandons the moved event, violating the manual-move restoration guarantee (REQ-GEN-014).
+
 ---
 
 ## 18. Trigger Requirements

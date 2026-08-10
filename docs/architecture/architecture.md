@@ -698,8 +698,29 @@ function reconcile(options) {
     return { status: "skipped", reason: "lock-contention" };
   }
 
+  // Hoisted above the try so the finally can record diagnostic broker
+  // spend even when the run throws -- otherwise a diagnostic that fails
+  // AFTER its broker calls bypasses the hourly counter, and reopening the
+  // card becomes exactly the unbounded spend §20.3's ceiling exists to
+  // prevent.
+  const isDiagnostic = options.reason === "event-diagnostic";
+  let routeBudget = null;
+  let initialBudget = 0;
+  let now = null;
+
   try {
-    const settings = loadAndValidateSettings();
+    // Validation failure is an explicit failed result, not a throw: it
+    // must reach the stored record with INVALID_SETTINGS, and the failure
+    // carries the validation errors so the diagnostic card can show the
+    // user what is wrong (technical design §5.3) instead of a bare error.
+    const { settings, validation } = loadSettings();
+    if (!validation.valid) {
+      const failure = buildFailureResult(validation, options);
+      if (!options.dryRun) {
+        saveRunStatus(failure);
+      }
+      return failure;
+    }
     if (!settings.enabled) {
       return { status: "disabled" };
     }
@@ -707,7 +728,7 @@ function reconcile(options) {
     // One clock for the whole run. Triggers pass no `now`, so default it
     // here; every later consumer (window, cache-age checks, provider
     // context) reuses this value rather than reading the clock again.
-    const now = options.now || new Date();
+    now = options.now || new Date();
 
     // Two ranges: plan* selects sources, observe* selects generated
     // events to read. The second is strictly wider (§21.2).
@@ -722,8 +743,15 @@ function reconcile(options) {
     // contract (key, parentEventId, fingerprint, observedFields, routeCache)
     // before anything consumes them. The comparator and the cache lookup
     // both depend on that shape; raw resources would match nothing.
+    //
+    // Cancelled generated tombstones are excluded: showDeleted returns a
+    // manually deleted companion with its dtp metadata intact, and treating
+    // it as an existing companion would suppress the recreate the deletion
+    // calls for -- deleted means absent (technical design §7.3). Source
+    // tombstones still flow through eligibility.
     const observedGenerated = allEvents
       .filter(isGeneratedEvent)
+      .filter(event => event.status !== "cancelled")
       .map(normalizeObservedGeneratedEvent);
     const sourceEvents = allEvents.filter(event => !isGeneratedEvent(event));
 
@@ -748,18 +776,28 @@ function reconcile(options) {
     const strandedOverlong = [];
 
     // Working-location events feed origin resolution. Fetched once per run,
-    // over the planning range -- resolveOrigin needs them, and a flow that
-    // never fetches them silently reduces every origin to the default
-    // (technical design §7.5, §10.3).
+    // over the OBSERVATION range, not the planning range -- an evaluated
+    // source can extend past planEnd (intersection eligibility), and a
+    // working-location event overlapping only that overhang would be
+    // excluded by a planEnd-bounded query, silently degrading its origin
+    // to the default. The observation range covers every evaluated
+    // source's full span by construction (technical design §7.2, §10.3).
     const workingLocations = settings.workingLocation.enabled
-      ? repository.listWorkingLocationEvents("primary", window.planStart, window.planEnd)
+      ? repository.listWorkingLocationEvents("primary", window.observeStart, window.observeEnd)
       : [];
 
     // One shared HTTP-attempt budget for the whole run, decremented by the
     // routing client for every request on the wire, retries included
     // (technical design §11.2). Created here because only the engine spans
     // the run; the planning layer cannot see retries.
-    const routeBudget = { remaining: MAX_ROUTE_CALLS_PER_RUN };
+    //
+    // Diagnostics draw from the hourly allowance instead -- reopening the
+    // event card must not grant a fresh 60 attempts per open (technical
+    // design §20.3, DIAGNOSTIC_ROUTE_CALLS_PER_HOUR).
+    initialBudget = isDiagnostic
+      ? diagnosticBudgetRemaining(now)
+      : MAX_ROUTE_CALLS_PER_RUN;
+    routeBudget = { remaining: initialBudget };
 
     // Upcoming events first, then in-progress and lookback events. The
     // listing arrives in API response order; without reordering, past
@@ -842,6 +880,23 @@ function reconcile(options) {
       ...strandedOverlong.filter(event => !queuedDeleteIds.has(event.id))
     );
 
+    // A companion the user dragged beyond the observation range is
+    // invisible to a complete scan; creating blindly would leave the moved
+    // event stranded as a permanent duplicate. Each pending create's
+    // parent gets one unbounded ownership lookup; a match with the same
+    // parent|role key converts the create into an update -- restoration,
+    // the documented recovery for a manual move (technical design §15.2.7).
+    //
+    // Takes the cleanup state too: a companion dragged into a vacated
+    // range beyond a shrunken horizon is in BOTH lists -- queued for
+    // deletion by the shrink cleanup and wanted back by this pass.
+    // Restoration wins: the event is removed from diff.deletes AND from
+    // cleanup.events (it is not stranded; its desired position is inside
+    // the window), or applyDiff would delete the freshly restored event --
+    // and deletedAll(cleanup.events) could never be satisfied, freezing
+    // the high-water mark forever.
+    resolveOutOfWindowCompanions(diff, cleanup, repository);
+
     let applied = null;
     if (!options.dryRun) {
       applied = applyDiff(diff);
@@ -881,7 +936,25 @@ function reconcile(options) {
       saveRunStatus(result);
     }
     return result;
+  } catch (error) {
+    // Top-level failures become results, not silent throws. The window
+    // read or anything else run-wide can fail; without this boundary the
+    // trigger returns nothing structured and the home card keeps
+    // reporting a stale prior success (technical design §18.2:
+    // CALENDAR_READ_FAILED, UNEXPECTED_ERROR).
+    const failure = buildFailureResult(error, options);
+    if (!options.dryRun) {
+      saveRunStatus(failure);
+    }
+    return failure;
   } finally {
+    // In the finally, not the success path: a diagnostic that throws
+    // AFTER its broker calls still spent them, and skipping the record
+    // would hand every reopened card a fresh allowance (technical design
+    // §20.3). Recorded under the lock this run still holds.
+    if (isDiagnostic && routeBudget) {
+      recordDiagnosticRouteSpend(initialBudget - routeBudget.remaining, now);
+    }
     lock.releaseLock();
   }
 }

@@ -56,6 +56,10 @@ const OBSERVE_HIGH_WATER_KEY = 'dtp.observeHighWater';
 // on entry, reset to 0 by any successful run, enforced at enqueue time.
 // Unlike trigger pendingness this cannot be derived -- it must survive runs.
 const CONTINUATION_COUNT_KEY = 'dtp.continuationCount';
+// Hour-bucketed diagnostic broker spend: { bucket, used }. Read and written
+// under the user lock; feeds the RouteBudget when reason is
+// event-diagnostic. Technical Design section 20.3.
+const DIAGNOSTIC_SPEND_KEY = 'dtp.diagnosticRouteSpend';
 const CURRENT_SETTINGS_SCHEMA = 1;
 
 // Generated-event metadata. ADR 0009 -- this property is the deletion-safety

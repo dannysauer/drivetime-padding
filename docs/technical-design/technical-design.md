@@ -413,7 +413,7 @@ Every boolean is checked with `typeof value === 'boolean'`. Every string is chec
 
 Unknown top-level keys are preserved but ignored, so a downgrade after a future migration does not destroy data.
 
-A validation failure blocks write-mode reconciliation and surfaces in the UI. Dry-run diagnostics still run, so a user can see what is wrong.
+A validation failure blocks write-mode reconciliation and surfaces in the UI. A dry-run diagnostic against invalid settings returns a `failed` result **carrying the full validation error list** (§17.2), and the diagnostic card renders those errors — the user sees exactly what is wrong, even though planning cannot proceed on unvalidated settings.
 
 ### 5.4 Migration contract
 
@@ -610,6 +610,8 @@ Pagination must be supported using `nextPageToken`.
 ### 7.3 Why show deleted events
 
 Cancelled recurring instances may appear with status `cancelled`. Including them improves cleanup diagnostics. The desired-state algorithm still removes generated events because cancelled source events are ineligible.
+
+`showDeleted` applies to **generated** events too, and there the tombstones must be treated oppositely: a manually deleted companion comes back with its `dtp` metadata intact and status `cancelled`. Normalizing it into `observedGenerated` would present a deleted event as an existing companion — the comparator would classify the desired key as present, suppress the recreate the deletion calls for (breaking §17.4's restoration promise), or try to update a deleted resource; and since tombstones may omit `start`/`end`, `normalizeObservedGeneratedEvent` could not even build `observedFields`. Cancelled generated resources are therefore **excluded before normalization** — deleted means absent, and absence is what makes reconciliation recreate. Source tombstones continue through eligibility unchanged (§9.2 step 3).
 
 ### 7.4 Generated event detection
 
@@ -1312,15 +1314,18 @@ Convert signed byte values to two-digit hexadecimal.
 
 For every desired key:
 
-- no observed event: **create** — only when the scan was complete (§15.2.4);
-- one observed event, fingerprint matches **and** owned fields match: **unchanged**;
+- no observed event: **out-of-window lookup, then create** — the engine checks for a managed companion the scan cannot see before creating (§15.2.7), and creates only when the scan was complete (§15.2.4);
 - one observed event, desired `eventType` differs from observed: **replace** — delete and recreate (see §15.2.5);
+- one observed event, fingerprint matches **and** owned fields match, **and** the route cache needs persisting: **metadata patch** (see §15.2.2);
+- one observed event, fingerprint matches **and** owned fields match, cache fine: **unchanged**;
 - one observed event, fingerprint matches but owned fields differ: **update** (see §15.2.1);
-- one observed event, cache metadata is stale but everything else matches: **metadata patch** (see §15.2.2);
 - one observed event, fingerprint differs or is missing: **update**;
 - multiple observed events: select canonical, apply the above, delete duplicates.
 
-The `eventType` test comes before the update branches because it overrides them: when the type differs, an update is not merely suboptimal, it is impossible (§15.2.5).
+Two orderings in that list are load-bearing, not stylistic:
+
+- The `eventType` test comes before every other branch because it overrides them: when the type differs, an update is not merely suboptimal, it is impossible (§15.2.5).
+- The **metadata-patch test comes before `unchanged`**. A refreshed route whose quantized duration lands in the same bucket changes no owned field and no fingerprint — so an `unchanged`-first ordering classifies exactly the events that need the cache triplet written as needing nothing, the refreshed `routeHash`/`routeSecs`/`routeAt` are never persisted, and every subsequent trigger repeats the broker call. Cache persistence must be evaluated before `unchanged` is ever returned.
 
 For every observed key absent from desired, decide by the parent's planning outcome (§15.2.3):
 
@@ -1438,6 +1443,27 @@ The returned events join `diff.deletes`, **deduplicated by event id against dele
 They were actually read — by the targeted query rather than the window scan — so this is presence-based deletion and does not depend on `scanComplete`; §15.3's marker rule and §16.5.1's conditional delete apply unchanged. If the lookup itself fails, the run records the error and retries next run, like any other read failure.
 
 Cost is bounded and rare: one extra `Events.list` per overlong source per run, only while such a source sits in the observation range with a companion unaccounted for. Cancelled tombstones are excluded — they may carry no timestamps (§9.2), so their duration is untestable; a source made overlong and then cancelled inside the stranding gap is a residual edge this design accepts rather than paying a per-tombstone list call on every run.
+
+#### 15.2.7 Companions moved outside the observation range
+
+A user can drag a managed companion **out of** the observation range entirely — a travel block pushed months ahead, or into the deep past. A complete scan still cannot see it, so the desired key comes up absent, and a blind create manufactures a replacement while the moved managed event sits stranded at its new time: a permanent duplicate, and a broken promise — the documented recovery for a manual move (§15.2.1, AC-RECOVERY-002) is restoration, not duplication. Duplicate convergence (§13.5) cannot help, because one of the two copies is outside every range the ordinary read covers.
+
+Before creating an absent desired role, the **engine** therefore runs the same unbounded parent lookup as §15.2.6:
+
+```javascript
+repository.listCompanionsByParent('primary', spec.parentEventId)
+```
+
+Any returned managed event whose `parent|role` key matches the absent desired key is **updated** to the desired specification — the standard restoration path, applied to an event found by targeted read instead of window scan. Only when the lookup finds nothing does the create proceed.
+
+The comparator stays pure: it has no repository access, so it emits the create and the engine post-processes the diff, converting creates to updates where the lookup finds a match — the same engine-side pattern as the overlong and window-shrink cleanups. One lookup covers both roles of a parent. (It is never shared with a §15.2.6 lookup: that pass fires only for ineligible parents, while a pending create requires a planned one — the two conditions are mutually exclusive per parent.)
+
+Cost: one `Events.list` per parent with an absent desired role. For a genuinely new source the lookup returns nothing and the create proceeds — that is the common case, and it prices each new eligible event at one extra list call at creation time, once. Calendar list quota is not the scarce resource; broker calls are, and this path spends none.
+
+Two interactions need pinning:
+
+- **The lookup excludes cancelled tombstones.** `listCompanionsByParent` must filter `status: "cancelled"` — a manually deleted companion comes back with its `dtp` metadata intact (§7.3), and matching it here would convert the recreate into an update of a deleted resource, breaking restoration on every run. The same exclusion protects §15.2.6's delete path from 404s on tombstones.
+- **Restoration supersedes the shrink cleanup.** The matched event can already sit in the delete list: shrink the window, then drag a companion into the vacated range beyond the new horizon, and §7.6's cleanup queues its deletion while this pass wants to restore it. The engine removes the event from `diff.deletes` **and** from the cleanup's stranded list before converting the create to an update — its parent is planned and its desired position is inside the window, so it is not stranded, and leaving it in the cleanup list would either delete the freshly restored event or leave the high-water mark permanently unlowered when `deletedAll` can never be satisfied.
 
 ### 15.3 Safety rule
 
@@ -1639,6 +1665,8 @@ interface ReconciliationResult {
 }
 ```
 
+A run that fails before producing a diff still returns this shape. Settings validation failure is handled **explicitly**: it returns a `failed` result carrying the validation errors, so the diagnostic card can show the user what is wrong (§5.3) rather than a bare `INVALID_SETTINGS`. Everything else run-wide — the window read, an unexpected throw — is caught by the engine's top-level error boundary (Architecture §14.2) and normalized into `status: "failed"` with an empty diff and the error record in `errors` (`CALENDAR_READ_FAILED`, `UNEXPECTED_ERROR`, §18.2). Either failure is persisted as the last-run record by write-mode runs only; dry runs return it without persisting, like every other dry-run result (§17.5). A `try`/`finally` with no `catch` would return nothing structured and leave the home card reporting a stale prior success over a run that never happened.
+
 ### 17.3 Routing failure policy
 
 A route failure for one source event should not necessarily abort all other events.
@@ -1803,6 +1831,7 @@ Two caveats, both requiring prototype confirmation:
 
 `ensureTriggers()` must:
 
+- **create nothing when `settings.enabled` is false** — after the remove-all action persists the disabled state (§19.4), repair invoked from the homepage or a settings save must not resurrect the triggers the user just removed; it reports the disabled state instead. Re-enabling runs `ensureTriggers()` as part of the enable flow;
 - identify all project triggers for known handlers;
 - delete duplicates;
 - create missing triggers;
@@ -1830,10 +1859,11 @@ listAllGeneratedEvents(calendarId)
 `removeAutomation` proceeds in a fixed order:
 
 1. **acquire the same user lock reconciliation uses** (§16 of the architecture), with a generous wait — removing triggers stops *future* runs, but an in-flight run already past its planning phase would otherwise create companions after the cleanup scan, leaving orphans behind a `CleanupResult` that reports complete success, with automation disabled so nothing ever removes them;
-2. **remove the add-on's triggers**, so no later run recreates events after cleanup;
-3. run the unbounded scan and delete every returned event through `deleteGeneratedEvent` — §15.3's marker rule and §16.5.1's conditional delete apply to these deletions like any other;
-4. clear reconciliation state: the high-water mark and the continuation counter;
-5. release the lock and report a `CleanupResult`.
+2. **persist `settings.enabled = false`**, still under the lock. Trigger removal alone is temporary: the engine's own first check is `settings.enabled`, `ensureTriggers()` is explicitly required to recreate missing triggers, and a later manual synchronization or trigger repair against an enabled settings object would regenerate everything the user just asked to remove. The persisted flag is what makes "disable automation" mean disabled;
+3. **remove the add-on's triggers**, so no later run recreates events after cleanup;
+4. run the unbounded scan and delete every returned event through `deleteGeneratedEvent` — §15.3's marker rule and §16.5.1's conditional delete apply to these deletions like any other;
+5. clear reconciliation state: the high-water mark and the continuation counter;
+6. release the lock and report a `CleanupResult`.
 
 If the lock cannot be acquired within the wait, the action reports that a synchronization is in progress and asks the user to retry — it must not proceed unserialized.
 
@@ -2026,6 +2056,28 @@ const DIAGNOSTIC_ROUTE_CALLS_PER_HOUR = 20;
 - diagnostic broker calls are counted per user per hour against the ceiling;
 - on exceeding it, the card renders eligibility, directives, and resolved origin — everything that needs no route — and reports that timing is temporarily unavailable.
 
+**Enforcement is through the same `RouteBudget` the run already carries** (§11.2, §12.1) — the ceiling must be the budget the routing client decrements, or it is a constant with no mechanism. When `reason === 'event-diagnostic'`, the engine initializes the budget from the hourly allowance instead of `MAX_ROUTE_CALLS_PER_RUN`:
+
+```javascript
+// Hour-bucketed counter in User Properties: { "bucket": "2026-08-09T22", "used": 3 }.
+// Read and written under the user lock the run already holds, so the
+// read-modify-write is serialized without extra machinery.
+diagnosticBudgetRemaining_(now)
+  -> Math.max(0, DIAGNOSTIC_ROUTE_CALLS_PER_HOUR - usedThisHour)
+
+// Engine, when building the run's budget:
+const routeBudget = {
+  remaining: options.reason === 'event-diagnostic'
+    ? diagnosticBudgetRemaining_(now)
+    : MAX_ROUTE_CALLS_PER_RUN,
+};
+
+// After the run (diagnostic reason only): persist what was spent.
+recordDiagnosticRouteSpend_(initialRemaining - routeBudget.remaining, now);
+```
+
+The spend is recorded even though diagnostics are dry runs — the broker calls happened regardless of whether Calendar was written, and the counter exists to bound exactly those calls. A fresh hour bucket resets the allowance; without the ceiling, reopening the card across a day of appointments issues up to 60 attempts per open with no cumulative bound.
+
 #### Where diagnostic routes are cached
 
 The generated-event cache (§13.3) cannot serve this path. Diagnostics are most useful on an event that has *no* companions yet, and diagnostics run as a dry run — so there is no metadata to write into, and creating an event to hold the cache would violate the no-write contract.
@@ -2189,10 +2241,12 @@ Track elapsed runtime inside the reconciliation loop.
 
 If nearing a conservative execution threshold:
 
-- stop planning new source events;
+- stop planning new source events — **but first mark every unprocessed source** with a planning outcome of `failed` (`EXECUTION_BUDGET_EXCEEDED`), so the comparator preserves their existing companions;
 - apply already-computed safe diffs if sufficient time remains;
 - record partial status;
 - allow daily or subsequent trigger execution to continue.
+
+Marking the skipped sources is the load-bearing step, not bookkeeping. The observation scan has usually **completed** by the time planning runs out of budget, and §15.2.3's complete-scan rule treats a companion whose parent is absent from `planningOutcomes` as a genuine orphan. Breaking out of the loop with a bare `break` would therefore hand deletion authority over every unplanned source's companions to the very degradation path that exists to protect them — the run would delete travel blocks *because* it ran out of time. `failed` is the outcome that carries no deletion authority (§17.4), which is exactly the semantics of "not evaluated."
 
 ### 23.2 Ordering
 

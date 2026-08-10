@@ -683,8 +683,39 @@ The ceiling bounds wire traffic. Counting logical calls instead would double the
 **Given** managed events exist both inside the observation range and far outside it (aged out, or beyond a shrunken horizon)  
 **And** the user confirms "Remove all generated events and disable automation"  
 **When** the action runs  
-**Then** the add-on's triggers are removed first  
+**Then** `settings.enabled` is persisted as `false` before the triggers are removed  
 **And** every managed event is deleted, including those no window-bounded scan would read  
-**And** the result reports deleted and failed counts, with a retry offered when any deletion failed.
+**And** the result reports deleted and failed counts, with a retry offered when any deletion failed  
+**And** a later manual synchronization or trigger repair does not regenerate events or triggers.
 
 "All" must mean all: the ordinary scans are bounded by the rolling window, and a cleanup built on them silently misses history and stranded events.
+
+## AC-RECOVERY-012: Companion dragged outside the window is restored
+
+**Given** a source event with a managed return block  
+**And** the user drags that return block months into the future, beyond `observeEnd`  
+**When** reconciliation runs with a complete scan  
+**Then** no new return block is created  
+**And** the moved managed event is located by ownership and parent metadata without time bounds  
+**And** it is updated back to the desired time.
+
+Duplicate convergence cannot help here: one copy is outside every range the ordinary read covers. The create path must look before it leaps.
+
+## AC-RECOVERY-013: Execution cutoff does not orphan unplanned sources
+
+**Given** a run whose observation scan completed  
+**And** the execution-time threshold is reached partway through planning  
+**When** the run stops planning and applies its diff  
+**Then** every unprocessed source carries a `failed` planning outcome (`EXECUTION_BUDGET_EXCEEDED`)  
+**And** none of their existing companions are deleted as orphans  
+**And** the run reports `partial`.
+
+Absence from `planningOutcomes` plus a complete scan means orphan. Sources skipped for time must be marked, or the degradation path deletes travel blocks because the run was slow.
+
+## AC-RECOVERY-014: A run-wide failure is recorded, not swallowed
+
+**Given** persisted settings that fail validation  
+**When** a trigger fires reconciliation  
+**Then** the run returns a structured result with status `failed` and an `INVALID_SETTINGS` error  
+**And** the stored last-run record reflects that failure  
+**And** the home card does not continue to display the previous run's success.
