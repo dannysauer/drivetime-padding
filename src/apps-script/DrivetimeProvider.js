@@ -34,8 +34,10 @@ function resolveOrigin(event, directives, settings, workingLocations) {
 /**
  * Rounds up to a 5-minute bucket. Technical Design section 12.3.
  *
- * This is what makes the daily cache refresh safe: traffic noise lands in the
- * same bucket, so the fingerprint is unchanged and no Calendar write occurs.
+ * This is what makes the daily cache refresh safe: traffic noise lands in
+ * the same bucket, so the fingerprint is unchanged and nothing
+ * user-visible changes -- the refreshed cache triplet still lands via a
+ * metadata-only patch (section 15.2.2), a write the user never sees.
  *
  * Zero stays zero (coincident endpoints). The provider must then emit NO
  * spec for a role whose quantized duration plus buffer is zero -- Calendar

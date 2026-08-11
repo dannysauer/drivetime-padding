@@ -12,7 +12,10 @@
  * Consults the cache before the network. Cache policy lives here rather than
  * in the provider so there is exactly one place that decides staleness.
  *
- * Returns RouteResult with source set to 'durable' | 'ephemeral' | 'broker'.
+ * Returns RouteResult with source set to 'durable' | 'ephemeral' | 'broker'
+ * AND calculatedAt: when the BROKER produced the duration, never when a
+ * cache was read -- routeAt is written from it, so omitting it invalidates
+ * every persisted entry and stamping read time overshoots the 24h bound.
  * Anything other than 'durable' needs persisting: an ephemeral hit (section
  * 20.3) avoids the broker call but the companion's durable entry is still
  * stale -- a boolean fromCache would conflate the tiers and strand the

@@ -348,6 +348,9 @@ interface ReconciliationDiagnostics {
   routeAttemptsUsed: number;
   /** Set when a partial run could not schedule its continuation (19.6). */
   continuationCapReached?: boolean;
+  /** Daily runs only: whether the 15.2.8 sweep ran to completion. False
+      distinguishes "gave up under the budget" from "found nothing". */
+  sweepComplete?: boolean;
   /** Non-fatal degradations, e.g. WORKING_LOCATION_UNAVAILABLE (18.2). */
   warnings: Array<{ code: string; message: string }>;
 }
@@ -924,13 +927,9 @@ cachedRouteIsUsable(requestContext.cacheEntry, expectedHash, requestContext.now)
 
 Cache policy lives here rather than in the provider, so there is exactly one place that decides whether an entry is stale. `RouteResult` therefore reports its own provenance:
 
-```typescript
-interface RouteResult {
-  durationSeconds: number;      // raw, unquantized
-  distanceMeters: number | null;
-  source: "durable" | "ephemeral" | "broker";
-}
-```
+The return shape is the canonical `RouteResult` **defined once in §4.7** — `durationSeconds` (raw, unquantized), `distanceMeters`, `source`, and `calculatedAt` — not restated here as a second competing definition: this interface has already drifted once by being copied.
+
+`calculatedAt` is part of that contract, not an optional nicety: an ephemeral hit must carry the broker's *original* calculation time into the durable `routeAt`, and a client that omitted the field (making the persisted entry invalid on every later read) or stamped the cache-read time (letting a duration outlive `ROUTE_CACHE_MAX_AGE_HOURS`) would defeat the freshness bound from opposite directions.
 
 `source` is what lets the engine decide between a metadata patch and no write at all (§15.2.2), and what the tests in §24.3 assert against when checking that an unchanged run makes zero broker calls. The rule is: **anything other than `"durable"` needs persisting.** A boolean `fromCache` would conflate the two cache tiers — a diagnostic-warmed ephemeral hit (§20.3) avoids the broker call, but the companion's durable entry is still stale, and folding that hit into "cached, no write" would leave the stale entry in place and cost another broker call after ephemeral eviction. The durable check runs first, so an ephemeral or broker result is by construction one whose durable entry failed validation.
 
@@ -1096,7 +1095,7 @@ function quantizeDuration(seconds) {
 }
 ```
 
-The quantized value is what feeds event times **and** the fingerprint. This is what makes the daily cache refresh (§23.3) safe: traffic noise of a few seconds or minutes lands in the same bucket, produces an identical fingerprint, and causes no Calendar write.
+The quantized value is what feeds event times **and** the fingerprint. This is what makes the daily cache refresh (§23.3) safe: traffic noise of a few seconds or minutes lands in the same bucket, produces an identical fingerprint, and causes no user-visible update — the refreshed cache triplet still lands via a metadata-only patch (§15.2.2), which is invisible to the user but is a Calendar write.
 
 Quantization is a pure function of the duration, so it requires no comparison against stored state and cannot drift. Rounding up rather than to nearest errs toward allowing more travel time.
 
@@ -1366,7 +1365,7 @@ If duplicate observed events share the same key, retain one canonical event and 
 }
 ```
 
-`routeDurationSeconds` is the **quantized** duration (§12.3), never the raw broker value. This is what allows the daily cache refresh to run without rewriting events: a duration that moves from 1420s to 1447s quantizes to 1500s both times, so the fingerprint is unchanged and no write occurs.
+`routeDurationSeconds` is the **quantized** duration (§12.3), never the raw broker value. This is what allows the daily cache refresh to run without rewriting events: a duration that moves from 1420s to 1447s quantizes to 1500s both times, so the fingerprint is unchanged and no user-visible update occurs — the refreshed cache triplet still lands via the metadata-only patch (§15.2.2, AC-CACHE-001).
 
 #### Fingerprints are role-specific
 
@@ -1577,9 +1576,9 @@ Two interactions need pinning:
 
 Discovery therefore cannot be driven by desired specs. The **daily maintenance run** (`reason === "daily-trigger"`, never dry) performs an ownership sweep:
 
-1. list ownership-filtered events **updated since the sweep watermark**: `listGeneratedEventsUpdatedSince(calendarId, updatedMin, shouldStop)`, with `updatedMin` the *earlier* of `now − SWEEP_UPDATED_LOOKBACK_MINUTES` (recommended 4320 — 72 hours, the anchor discovery slack plus one daily cycle) and the persisted **last-completed-sweep timestamp** (`dtp.sweepCompletedAt`, written under the lock by every non-dry sweep whose listing and window scan were both complete; absent on a fresh install, where `now − SWEEP_UPDATED_LOOKBACK_MINUTES` applies — a new install has no older strays). `now` is the run's injected clock, threaded into the sweep — reading the wall clock here would unpin the lookback boundary from the anchor band derived from the same `now`. Every stray this section hunts was *manually moved* — that is what put it outside the observation range — and a move bumps the event's `updated` timestamp, so `updatedMin` filters server-side to exactly the recently-touched events among which strays can exist. **Cancelled tombstones are excluded** before candidate selection: an `updatedMin` listing force-includes deleted entries, and a companion the engine itself just deleted has a bumped `updated`, an intact anchor, and a cancelled parent — it would otherwise re-enter the diff as a 404-bound delete for days after every routine cleanup. A full-history scan is not just expensive, it is **unresumable**: a read-only pass deletes nothing and persists no cursor, so a budget-truncated unbounded listing would return the same prefix every day while a stray on a later page aged out of the anchor band unexamined, permanently. The watermark closes the mirror-image gap: skipped or truncated sweeps (missed daily triggers, incomplete window scans) leave `dtp.sweepCompletedAt` behind, so the next completed sweep reaches back over the whole gap instead of only 72 hours;
+1. list ownership-filtered events **updated since the sweep watermark**: `listGeneratedEventsUpdatedSince(calendarId, updatedMin, shouldStop)`, with `updatedMin` the *earlier* of `now − SWEEP_UPDATED_LOOKBACK_MINUTES` (recommended 4320 — 72 hours, the anchor discovery slack plus one daily cycle) and the persisted **last-completed-sweep timestamp** (`dtp.sweepCompletedAt`, written by the **engine, after `applyDiff` confirms every swept delete succeeded** — `applied.deletedAll(sweep.events)`, the same application-gated rule as the shrink high-water mark in §7.6 — and only when the window scan, listing, and parent point reads all completed on a non-dry run. Advancing on a merely-*computed* diff would be fatal: a deferred or skipped application leaves the stray on the calendar while the advanced watermark shrinks the next sweep's bounds past its `updated` timestamp and anchor, stranding permanently the very event this sweep just found. Absent on a fresh install, where `now − SWEEP_UPDATED_LOOKBACK_MINUTES` applies — a new install has no older strays). `now` is the run's injected clock, threaded into the sweep — reading the wall clock here would unpin the lookback boundary from the anchor band derived from the same `now`. Every stray this section hunts was *manually moved* — that is what put it outside the observation range — and a move bumps the event's `updated` timestamp, so `updatedMin` filters server-side to exactly the recently-touched events among which strays can exist. **Cancelled tombstones are excluded** before candidate selection: an `updatedMin` listing force-includes deleted entries, and a companion the engine itself just deleted has a bumped `updated`, an intact anchor, and a cancelled parent — it would otherwise re-enter the diff as a 404-bound delete for days after every routine cleanup. A full-history scan is not just expensive, it is **unresumable**: a read-only pass deletes nothing and persists no cursor, so a budget-truncated unbounded listing would return the same prefix every day while a stray on a later page aged out of the anchor band unexamined, permanently. The watermark closes the mirror-image gap: skipped or truncated sweeps (missed daily triggers, incomplete window scans) leave `dtp.sweepCompletedAt` behind, so the next completed sweep reaches back over the whole gap instead of only 72 hours;
 2. a returned event is a **candidate** when no event with its **id** appears in the window read (identity, not `parent|role` key — a key test would hide exactly the out-of-window *duplicate* whose key an in-window copy satisfies) *and* its `anchor` (§13.2) falls within `[planStart − (MAX_SOURCE_DURATION + SWEEP_DISCOVERY_SLACK_MINUTES), planEnd + MAX_SOURCE_DURATION)`. The duration term covers whichever source boundary the role anchors — the two differ by at most the cap, and an outbound anchor sits a full duration behind the source's end. `SWEEP_DISCOVERY_SLACK_MINUTES` (recommended 2880 — 48 hours, two daily cycles) covers the time between the stray's creation and its discovery: `planStart` advances continuously, so a sweep bounded only by the duration cap would out-run an outbound anchor before the next daily firing. When the sweep watermark shows a longer gap (skipped or incomplete sweeps), the effective slack widens to `max(SWEEP_DISCOVERY_SLACK_MINUTES, now − sweepCompletedAt)` — the anchor band and the `updatedMin` bound stretch over the same gap together, or a past-anchored stray from early in the gap would be listed but no longer selected. Events with a missing or unparseable anchor are skipped;
-3. one `getEventById` per unique candidate parent, then a decision on the **parent's state**, not bare existence:
+3. one `getEventById` per unique candidate parent — **checking `shouldStop` between point reads**: a bulk move or API rewrite can bump `updated` on many companions at once, yielding a parent list long enough that an unguarded read loop consumes the remaining runtime after both paged listings behaved. When the guard fires, the sweep acts only on candidates whose parents were already read and drops the rest. The sweep returns `{ events, sweepComplete }` — `sweepComplete` false whenever the listing was truncated *or* the read loop was cut short — and the engine records it as `diagnostics.sweepComplete` (§4.11), so fixtures and operators can tell "found nothing" from "gave up". Each read then feeds a decision on the **parent's state**, not bare existence:
    - parent **absent or a cancelled tombstone** → the parent's candidates join `diff.deletes`, deduplicated by event id exactly as §15.2.6;
    - parent **live but not evaluated this run** (it sits outside the planning range — moved beyond the horizon or into the deep past together with its companion) → the candidates are **deleted too**. An out-of-window source's desired state is no companions (`OUTSIDE_WINDOW` carries deletion authority, §15.2), ordinary planning cannot see the source to say so, and once the anchor ages past the discovery slack the sweep never looks again — "parent exists, leave it" would make this stray exactly as permanent as the deleted-parent one. The companions regenerate when the source re-enters the window;
    - parent **evaluated this run** (it was in the window read, so `planningOutcomes` has it): `ineligible` → delete the candidates — ineligibility carries deletion authority and the comparator could not reach these out-of-range events; `planned` → delete a candidate only when its `parent|role` key is already satisfied by an in-window observed event (the candidate is then a stranded duplicate §13.5 can never reach) and otherwise leave it — §15.2.7's restoration is updating that very event this run; `failed` → preserve, like every companion of a failed parent (§17.3).
@@ -1588,7 +1587,7 @@ The **absent-parent** rule is safe without `scanComplete`: the swept events were
 
 Steady-state cost is one small `updatedMin`-bounded listing per day — recently-patched in-window companions (excluded by the id test at no further cost) plus any strays — and a small band of point reads: the discovery slack deliberately reaches behind the observation range, so recently-updated companions of sources that ended roughly 40–80 hours ago can be candidates until their anchors age out of the band, a handful of lookups each finding a live parent and skipping. Beyond that, the §7.2 completeness proof applies: a companion whose anchor lies inside the range sits inside the observation range *unless it was moved out*, so the remaining lookups are proportional to anomalies, normally zero.
 
-The sweep is **budget-aware**: it runs only when `elapsedExceedsExecutionBudget` is still false when its turn comes (after the restoration pass), its listing stops paging early when the budget nears (the `shouldStop` guard, truncation reported via `scanComplete`), and the engine re-evaluates the budget after the sweep before applying the diff (§23.1). A truncated listing is safe to act on: candidate selection only *finds* strays, and each deletion decision rests on its own point read — truncation merely means some strays wait for tomorrow's sweep. A sweep skipped or cut short costs nothing, while an unbounded listing racing the execution ceiling into `applyDiff` risks the hard-kill-mid-apply failure the budget gate exists to prevent.
+The sweep is **budget-aware at every unbounded point**: it runs only when `elapsedExceedsExecutionBudget` is still false when its turn comes (after the restoration pass), its listing stops paging early when the budget nears, its parent point-read loop checks the same `shouldStop` guard **between reads**, and the engine re-evaluates the budget after the sweep before applying the diff (§23.1). A sweep cut short at any of those points is *incomplete* (`sweepComplete: false`) — the watermark stays put, so the next completed sweep's bounds stretch back over the unprocessed candidates. And even a complete sweep advances the watermark **only after its deletes actually applied**: application can be skipped (out of time) or defer the deletes, and continuations cannot re-run the sweep (it is daily-gated), so an application-blind advance would strand the found strays exactly as permanently as never finding them. A truncated listing is safe to act on: candidate selection only *finds* strays, and each deletion decision rests on its own point read — truncation merely means some strays wait for tomorrow's sweep. A sweep skipped or cut short costs nothing, while an unbounded listing racing the execution ceiling into `applyDiff` risks the hard-kill-mid-apply failure the budget gate exists to prevent.
 
 Why daily only: a per-calendar-trigger sweep would pay the unbounded listing on every edit, and a stray outside the observation range is invisible in the user's near-term view — a one-day discovery bound matches the daily cycle that already backstops eventual consistency (REQ-TRIGGER-002). The residual case — source deleted and automation disabled before the next daily run ever fires — is accepted; the remove-all action's unbounded cleanup (§19.4) still reaches such events.
 
@@ -1983,11 +1982,14 @@ Warnings (non-fatal; surface in `ReconciliationDiagnostics.warnings`, §4.11):
 WORKING_LOCATION_UNAVAILABLE
 DIRECTIVE_ORIGIN_UNCONFIGURED
 DIAGNOSTIC_SPEND_RECORD_FAILED
+STATUS_PERSIST_FAILED
 ```
 
 `DIRECTIVE_ORIGIN_UNCONFIGURED`: a directive named a `home` or `office` origin that is not configured, and resolution fell back to the default (§10.2). Recorded by the **engine** after `resolveOrigin` — the resolver stays a pure lookup — whenever `directives.origin` is set but the resolved origin's `name` differs from the requested one (never for an honored `origin=default`). Without a registered code the fallback §10.2 requires would have no carrier, and the event card could not explain that the user's explicit selection was ignored.
 
 `DIAGNOSTIC_SPEND_RECORD_FAILED`: the hourly diagnostic-spend write threw inside the engine's `finally`. The failure is caught and **logged** with this code rather than rethrown — an accounting error must not replace the run's already-built structured result or strand the user lock (Architecture §14.2). It cannot retroactively join that run's `warnings`: the result was assembled and persisted before the `finally` ran. The ceiling is protected from the other side instead — `diagnosticBudgetRemaining` **fails closed**, returning `0` when its own Properties read throws, so an outage that breaks spend *writes* (the same service) cannot simultaneously mint fresh allowances; at worst one run's spend goes unrecorded against a working counter.
+
+`STATUS_PERSIST_FAILED`: `saveRunStatus` threw. **Both** persistence sites are guarded — the success path's save and the error boundary's own save — and in both the code is appended to the *returned* result's `warnings` (the result is still in hand at those sites, unlike the finally-block spend record) as well as logged. Guarding the success path is what keeps the record truthful: an unguarded success-path save throwing into the boundary would rebuild a run Calendar fully accepted as a `failed` result, and — should Properties recover for the boundary's retry — persist an affirmatively **false** failure record with zero applied counts, violating REQ-ERROR-006 in storage. Guarding the boundary's save is what keeps the boundary's guarantee: retrying an unavailable write unguarded would throw past it, leaving trigger callers with no structured result at all. A persistence outage therefore degrades to "truthful result returned, stored record stale until the next successful persist, warning attached" — never to a lie about what Calendar did.
 
 `ROUTE_TOO_LONG` and `ROUTE_BUDGET_EXCEEDED` are both **planning failures**, not ineligibility. Per §17.3 they preserve existing generated events rather than deleting them.
 
@@ -2373,17 +2375,7 @@ Storing only the duration loses `routeAt`, and both ways of recovering it are wr
 
 The second is the worse failure, because it silently weakens the freshness bound rather than merely wasting a call.
 
-So the entry carries `{ secs, at }`, and `RouteResult` carries `calculatedAt` through to the engine:
-
-```typescript
-interface RouteResult {
-  durationSeconds: number;
-  distanceMeters: number | null;
-  source: "durable" | "ephemeral" | "broker";
-  /** When the broker actually produced this duration, not when it was read. */
-  calculatedAt: string;
-}
-```
+So the entry carries `{ secs, at }`, and `RouteResult` (§4.7, the single canonical definition) carries `calculatedAt` through to the engine.
 
 `calculatedAt` is what gets written to `routeAt` in the durable cache. A duration is exactly as old as the moment the broker computed it, regardless of how many caches it passed through on the way.
 

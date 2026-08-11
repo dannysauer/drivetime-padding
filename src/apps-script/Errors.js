@@ -37,4 +37,10 @@ const ERROR_CODES = {
   // Hourly diagnostic-spend write threw in the engine finally; recorded,
   // never rethrown -- accounting must not cost the run its result.
   DIAGNOSTIC_SPEND_RECORD_FAILED: 'DIAGNOSTIC_SPEND_RECORD_FAILED',
+  // saveRunStatus threw. Both persistence sites (success path and error
+  // boundary) are guarded; the code joins the RETURNED result's warnings
+  // and is logged, never rethrown. Guarding the success path keeps a
+  // Calendar-accepted run from being stored as a false failure; guarding
+  // the boundary keeps its return-a-result guarantee.
+  STATUS_PERSIST_FAILED: 'STATUS_PERSIST_FAILED',
 };

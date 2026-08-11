@@ -187,3 +187,13 @@ This matrix links requirement groups to architecture components, technical-desig
 | §7.6 (deadline-aware) | Shrink scan takes the `shouldStop` guard; truncation retains the mark | AC-CONFIG-002 |
 | §17.1 / §20.3 (bound) | Scoped runs must carry `reason: "event-diagnostic"`; budgeting cannot be bypassed | AC-CACHE-004 |
 | §20.3 (calendar check) | Non-primary card opens render `UNSUPPORTED_CALENDAR` before the engine runs | — §20.3 card |
+
+## Requirements added in the fifteenth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| §15.2.8 (guarded reads) | `shouldStop` checked between sweep parent point reads; cut-short sweeps never write the watermark | AC-RECOVERY-015 |
+| §11.1 (aligned) | `calculatedAt` in the canonical `RouteResult` contract, matching §4.7/§20.3 | AC-CACHE-010 |
+| Architecture §14.2 (guarded boundary) | Error-boundary status persistence guarded; `STATUS_PERSIST_FAILED` logged, result still returned | AC-RECOVERY-014 |
+| §21.4 / §12.3 (clarified) | Same-bucket refresh is no *user-visible* update; the metadata patch still writes the triplet | AC-CACHE-001 |
+| Architecture §5.4/§14.2 (global call) | `getGeneratedEventSpecs` called unqualified — no `DrivetimeProvider` object exists | — pseudocode |

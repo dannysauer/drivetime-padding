@@ -177,7 +177,9 @@ resolveOutOfWindowCompanions(diff, cleanup, repository, shouldStop) -> void
 // tombstones excluded; stops early when shouldStop fires),
 // anchor-selected candidates (event id absent from the window read,
 // anchor inside the slacked planning range), one getEventById per
-// candidate parent, then a parent-STATE decision: absent/cancelled,
+// candidate parent -- shouldStop checked BETWEEN reads too, and a sweep
+// cut short anywhere never writes the watermark -- then a parent-STATE
+// decision: absent/cancelled,
 // live-but-out-of-window, and in-window ineligible all delete; planned
 // keeps its candidates (restoration owns them) unless the key is already
 // satisfied in-window (stranded duplicate); failed preserves --
@@ -186,10 +188,15 @@ resolveOutOfWindowCompanions(diff, cleanup, repository, shouldStop) -> void
 // observed list, never the key index (the id test must see in-window
 // duplicates the index collapsed away) and the run's injected `now`
 // (updatedMin, the anchor band, and the dtp.sweepCompletedAt watermark
-// all derive from it -- a wall-clock read would unpin them)
+// all derive from it -- a wall-clock read would unpin them).
+// sweepComplete false = listing truncated or read loop cut short; the
+// engine records it as diagnostics.sweepComplete and writes the
+// watermark only after applyDiff confirms deletedAll(events) -- the
+// same application-gated rule as the shrink high-water mark
 sweepOutOfWindowCompanions(observedGenerated, planningOutcomes, window,
                            now, repository, shouldStop)
-  -> ObservedGeneratedEvent[]
+  -> { events: ObservedGeneratedEvent[], sweepComplete: boolean }
+loadSweepWatermark() / saveSweepWatermark(now)                    // 15.2.8
 // Hourly diagnostic allowance (20.3): budget the routing client actually
 // decrements when reason === 'event-diagnostic'; spend recorded even on
 // dry runs -- the broker calls happened. The read FAILS CLOSED (returns

@@ -279,8 +279,10 @@ The `ReconciliationEngine` orchestrates the full synchronization lifecycle:
 The engine is provider-aware only through a narrow call:
 
 ```javascript
-DrivetimeProvider.getGeneratedEventSpecs(context)
+getGeneratedEventSpecs(context)   // DrivetimeProvider.js
 ```
+
+(Apps Script files share one global namespace — there is no `DrivetimeProvider` object to qualify the call with; the file name is an organizational boundary only, per the §2 conventions of the Technical Design.)
 
 ### 5.5 Drivetime provider
 
@@ -1039,7 +1041,10 @@ function reconcile(options) {
         routeCacheFor(observedByKey, event.id)
       );
 
-      const outcome = DrivetimeProvider.getGeneratedEventSpecs(context);
+      // Global, not namespaced: Apps Script files share one namespace
+      // and the skeleton declares the bare function -- a qualified call
+      // would ReferenceError on the first eligible event.
+      const outcome = getGeneratedEventSpecs(context);
       planningOutcomes.set(event.id, outcome);
 
       if (options.eventIdFilter) {
@@ -1176,15 +1181,19 @@ function reconcile(options) {
     // derive from the same `now`, and the sweep watermark
     // (dtp.sweepCompletedAt) stretches both over any gap of skipped or
     // incomplete sweeps.
+    let sweep = null;
     if (options.reason === "daily-trigger" && scanComplete &&
         !elapsedExceedsExecutionBudget(runStart)) {
-      const swept = sweepOutOfWindowCompanions(
+      sweep = sweepOutOfWindowCompanions(
         observedGenerated, planningOutcomes, window, now, repository,
         () => elapsedExceedsExecutionBudget(runStart));
       const queuedIds = new Set(diff.deletes.map(event => event.id));
       diff.deletes.push(
-        ...swept.filter(event => !queuedIds.has(event.id))
+        ...sweep.events.filter(event => !queuedIds.has(event.id))
       );
+      // "Gave up under the budget" must be distinguishable from "found
+      // nothing" (technical design §15.2.8, §4.11).
+      diff.diagnostics.sweepComplete = sweep.sweepComplete;
       outOfTime = elapsedExceedsExecutionBudget(runStart);
     }
 
@@ -1204,6 +1213,16 @@ function reconcile(options) {
       // cleanup leaves the mark high so the next run retries.
       if (cleanup.shrunk && cleanup.scanComplete && applied.deletedAll(cleanup.events)) {
         saveHighWater(window.observeEnd);
+      }
+
+      // The sweep watermark is APPLICATION-gated, same rule as the mark
+      // above (technical design §15.2.8): a complete sweep whose deletes
+      // were deferred or never applied must not advance it -- the
+      // continuation cannot re-run the daily-gated sweep, and an advanced
+      // watermark shrinks the next sweep's bounds past the very strays
+      // this one found, stranding them permanently.
+      if (sweep && sweep.sweepComplete && applied.deletedAll(sweep.events)) {
+        saveSweepWatermark(now);
       }
     }
 
@@ -1237,7 +1256,22 @@ function reconcile(options) {
         result.diagnostics.continuationCapReached =
           enqueueContinuation().capReached;
       }
-      saveRunStatus(result);
+      // Guarded HERE, not just in the boundary: if this save threw into
+      // the catch, a run Calendar fully accepted would be rebuilt as a
+      // failed result and -- should Properties recover for the retry --
+      // persisted as an affirmatively FALSE failure record with zero
+      // applied counts (REQ-ERROR-006 violated in storage). A persistence
+      // outage must degrade to "truthful result returned, stored record
+      // stale, warning attached", never to a lie about what Calendar did.
+      try {
+        saveRunStatus(result);
+      } catch (persistError) {
+        result.diagnostics.warnings.push({
+          code: "STATUS_PERSIST_FAILED",
+          message: "last-run record not persisted"
+        });
+        logWarning("STATUS_PERSIST_FAILED", persistError);
+      }
     }
     return result;
   } catch (error) {
@@ -1248,7 +1282,22 @@ function reconcile(options) {
     // CALENDAR_READ_FAILED, UNEXPECTED_ERROR).
     const failure = buildFailureResult(error, options);
     if (!options.dryRun) {
-      saveRunStatus(failure);
+      // Guarded: with the success-path save guarded above, a throw
+      // landing here is a genuine run failure -- but Properties may be
+      // down too, and retrying the write unguarded would throw PAST this
+      // boundary: callers would get no result at all, the one thing the
+      // boundary guarantees. The failure joins the RETURNED result's
+      // warnings (the result is still in hand here, unlike the
+      // finally-block spend record) and is logged.
+      try {
+        saveRunStatus(failure);
+      } catch (persistError) {
+        failure.diagnostics.warnings.push({
+          code: "STATUS_PERSIST_FAILED",
+          message: "last-run record not persisted"
+        });
+        logWarning("STATUS_PERSIST_FAILED", persistError);
+      }
     }
     return failure;
   } finally {
@@ -1697,7 +1746,7 @@ Route durations vary slightly between calls even when nothing meaningful has cha
 
 Route durations are therefore rounded **up** to a 5-minute granularity before they are used for event times or fingerprints. Rounding is a pure function of duration, so it needs no comparison against previous state, and it errs toward allowing more travel time.
 
-A refreshed duration that lands in the same 5-minute bucket produces an identical fingerprint and no write.
+A refreshed duration that lands in the same 5-minute bucket produces an identical fingerprint and **no user-visible update** — the event's times, title, and type are untouched. It is not a no-*write* outcome: the refreshed route cache triplet (`routeHash`, `routeSecs`, `routeAt`) still lands via a metadata-only patch (Technical Design §15.2.2, AC-CACHE-001), or `routeAt` stays stale and every later run pays the broker again.
 
 ### 21.5 Execution budget
 

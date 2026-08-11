@@ -161,9 +161,16 @@ function resolveOutOfWindowCompanions(diff, cleanup, repository, shouldStop) {
  * and in-window ineligible parents delete; planned parents keep their
  * candidates unless an in-window event already satisfies the key; failed
  * parents preserve. Runs only on daily triggers with a COMPLETE window
- * scan. Takes the injected `now`: updatedMin, the anchor band, and the
- * dtp.sweepCompletedAt watermark all derive from it, and the watermark
- * stretches the bounds over gaps of skipped or incomplete sweeps.
+ * scan; shouldStop is checked between pages AND between parent point
+ * reads (a bulk move can yield many candidates). Returns { events,
+ * sweepComplete }; the ENGINE records sweepComplete in diagnostics and
+ * writes the dtp.sweepCompletedAt watermark only after applyDiff
+ * confirms deletedAll(events) -- application-gated like the shrink
+ * high-water mark, because continuations cannot re-run the daily-gated
+ * sweep and an application-blind advance would strand the found strays.
+ * Takes the injected `now`: updatedMin, the anchor band, and the
+ * watermark all derive from it, and the watermark stretches the bounds
+ * over gaps of skipped or incomplete sweeps.
  */
 function sweepOutOfWindowCompanions(
     observedGenerated, planningOutcomes, window, now, repository,
