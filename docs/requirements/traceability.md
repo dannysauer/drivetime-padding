@@ -179,3 +179,11 @@ This matrix links requirement groups to architecture components, technical-desig
 | §10.2 (carried) | `DIRECTIVE_ORIGIN_UNCONFIGURED` registered and recorded by the engine | — §18.2 registry |
 | REQ-GEN-001 (excepted) | Zero-padding roles emit no event; two-event rule no longer contradicts §12.5 | AC-OOO-012 |
 | §2 (naming) | Cross-document names unsuffixed everywhere; `_` reserved for file-private helpers | — convention |
+
+## Requirements added in the fourteenth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| §7.6 (deadline-aware) | Shrink scan takes the `shouldStop` guard; truncation retains the mark | AC-CONFIG-002 |
+| §17.1 / §20.3 (bound) | Scoped runs must carry `reason: "event-diagnostic"`; budgeting cannot be bypassed | AC-CACHE-004 |
+| §20.3 (calendar check) | Non-primary card opens render `UNSUPPORTED_CALENDAR` before the engine runs | — §20.3 card |

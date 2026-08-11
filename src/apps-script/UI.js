@@ -11,7 +11,24 @@ function buildHomeCard() {
   throw new Error('Not implemented: Architecture section 5.2');
 }
 
-function buildEventCard() {
+/**
+ * Current-event diagnostic card. Checks e.calendar.calendarId BEFORE
+ * invoking the engine: the eventOpen trigger fires for secondary and
+ * shared calendars too, and an unchecked pass-through would look the id
+ * up in primary and report EVENT_NOT_FOUND for an event the user is
+ * looking at. Compare against the RESOLVED primary-calendar id (the
+ * user's email, e.g. CalendarApp.getDefaultCalendar().getId()) -- the
+ * literal 'primary' alias never appears in trigger payloads, and a
+ * literal comparison would classify the user's own calendar as foreign
+ * and break every card open. Foreign calendars render
+ * UNSUPPORTED_CALENDAR (via buildUnresolvedEventDiagnostics) directly,
+ * with no engine run and no budget spend. Otherwise invokes a dry run
+ * with eventIdFilter AND reason 'event-diagnostic' (the engine rejects
+ * either half without the other -- budgeting keys on the reason) and
+ * renders result.eventDiagnostics.
+ * Technical Design sections 17.1, 17.6, 20.3.
+ */
+function buildEventCard(e) {
   throw new Error('Not implemented: Technical Design section 20.3');
 }
 

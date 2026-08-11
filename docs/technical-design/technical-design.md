@@ -200,9 +200,10 @@ INVALID_TITLE_PATTERN
 OUTSIDE_WINDOW
 EVENT_NOT_FOUND
 PARENT_NOT_FOUND
+UNSUPPORTED_CALENDAR
 ```
 
-`EVENT_NOT_FOUND` and `PARENT_NOT_FOUND` are synthesized only by diagnostic runs when the targeted read resolves nothing (§17.1); the eligibility evaluator itself never produces them — an event it is handed necessarily exists.
+`EVENT_NOT_FOUND` and `PARENT_NOT_FOUND` are synthesized only by diagnostic runs when the targeted read resolves nothing (§17.1); the eligibility evaluator itself never produces them — an event it is handed necessarily exists. `UNSUPPORTED_CALENDAR` is synthesized only by the **card flow** via `buildUnresolvedEventDiagnostics`, before the engine is ever invoked, when the event was opened from a calendar whose id differs from the resolved primary-calendar id (§20.3 — never a comparison against the literal `"primary"` alias, which trigger payloads do not contain). The engine's contract stays primary-only.
 
 ### 4.6 ResolvedOrigin
 
@@ -683,7 +684,7 @@ Widening the general read is the wrong fix — it would cost a large listing on 
 ```javascript
 const OBSERVE_HIGH_WATER_KEY = 'dtp.observeHighWater';
 
-function findStrandedCompanions(window, settings, dryRun) {
+function findStrandedCompanions(window, settings, dryRun, shouldStop) {
   const highWater = loadHighWater();            // ISO string or null
   if (!highWater || Date.parse(highWater) <= window.observeEnd.getTime()) {
     // ADVANCING the mark is a persistence too, and dry runs persist
@@ -708,14 +709,21 @@ function findStrandedCompanions(window, settings, dryRun) {
   // repaired. Stranded means wholly beyond the horizon: start at or after
   // observeEnd. Anything spanning the boundary is visible to the ordinary
   // read, which alone decides its fate.
-  // Paginated to completion, and completeness is reported. This scan has
-  // the same truncation hazard as the main window read: delete one page,
-  // satisfy deletedAll, lower the mark -- and every later page is
-  // permanently outside all future scans.
+  // Paginated until done or the deadline guard fires, and completeness is
+  // reported. This scan has the same truncation hazard as the main window
+  // read (delete one page, satisfy deletedAll, lower the mark -- and
+  // every later page is permanently outside all future scans) AND the
+  // same runtime hazard: a large horizon reduction can leave enough
+  // events in the vacated range that paginating to completion spends the
+  // remaining execution budget inside this one call, hard-killing the
+  // run before status or continuation. Early return with scanComplete
+  // false is already safe -- the mark is retained and the next run
+  // retries.
   const scan = repository.listGeneratedEventsBetween(
     'primary',
     window.observeEnd,
-    new Date(Date.parse(highWater))
+    new Date(Date.parse(highWater)),
+    shouldStop
   );
   const stranded = scan.events.filter(function (event) {
     return Date.parse(event.observedFields.start) >= window.observeEnd.getTime();
@@ -732,7 +740,9 @@ function findStrandedCompanions(window, settings, dryRun) {
 The return shape is the point. This function is a *finder*; the deletions happen later, inside `applyDiff`, and only their success justifies lowering the mark. Merging the events into the delete list and discarding the `shrunk` flag would leave no execution path that ever lowers the mark, so every subsequent run would repeat the full filtered scan of the vacated range — correct results, quietly unbounded cost. The engine therefore keeps the cleanup state alongside the diff:
 
 ```javascript
-const cleanup = findStrandedCompanions(window, settings, options.dryRun);
+const cleanup = findStrandedCompanions(
+  window, settings, options.dryRun,
+  () => elapsedExceedsExecutionBudget(runStart));
 diff.deletes.push(...cleanup.events);
 
 if (!options.dryRun) {
@@ -1775,7 +1785,7 @@ interface ReconciliationOptions {
 - when the targeted read resolves **no source event** — the id no longer exists, or a companion's `parent` reference points at a purged event — the result still carries a diagnostic payload: `eventDiagnostics` holds a synthesized ineligible `EligibilityResult` with reason `EVENT_NOT_FOUND` (or `PARENT_NOT_FOUND` when a companion redirect failed) and null/empty remaining fields. Silence is the failure mode the targeted read exists to eliminate, and an orphaned companion is exactly the event a user most needs explained. The dry-run diff may simultaneously propose deleting such a companion; that is honest reporting — with its parent gone it *is* an orphan — and the card presents the reason alongside it;
 - planning and comparison therefore naturally cover only that parent — nothing else was read, so nothing else can be misreported as an orphan;
 - the cleanup passes (window-shrink, overlong) are skipped — the card cannot act on or display them, and the shrink scan costs real Calendar quota on the hot card-open path;
-- the engine **rejects the option on non-dry runs**: a write-mode run scoped to one event would carry deletion authority over a comparison that deliberately cannot see everything else. The rejection is a returned failed result, not silent acceptance;
+- the engine **rejects the option unless the run is both dry and carries `reason: "event-diagnostic"` — and rejects that reason on any run that is not a scoped dry run**. The invariant is bidirectional: a scoped run without the diagnostic reason would draw the ordinary per-run route budget on every card open with none of the spend recorded, bypassing the §20.3 hourly ceiling (which keys on the reason); the reason without the scope would point a full — even write-mode — reconcile at the shared 20-attempt hourly allowance and drain it for every genuine card open that hour; and a write-mode run scoped to one event would carry deletion authority over a comparison that deliberately cannot see everything else. The rejection is a returned failed result, not silent acceptance;
 - the result carries the per-event diagnostic payload (§17.6) the card renders.
 
 Full trigger reconciliation never sets it.
@@ -2283,7 +2293,11 @@ Dry runs never write this record (§17.5). Only runs that actually applied a dif
 
 ### 20.3 Event diagnostic mode
 
-The current-event card invokes a dry-run reconcile scoped by `eventIdFilter` (§17.1) and renders `ReconciliationResult.eventDiagnostics` (§17.6) — the defined carrier for the per-event fields below, which are otherwise planning-loop locals the card could not reach without reimplementing planning. It should display:
+The current-event card invokes a dry-run reconcile scoped by `eventIdFilter` **with `reason: "event-diagnostic"`** — the engine rejects either half without the other, in both directions (§17.1): budgeting keys on the reason, so a scoped run without it would draw the ordinary per-run budget on every card open unrecorded, while the reason on an unscoped run would drain the shared hourly allowance with a full reconcile — and renders `ReconciliationResult.eventDiagnostics` (§17.6), the defined carrier for the per-event fields below, which are otherwise planning-loop locals the card could not reach without reimplementing planning.
+
+The card flow also checks **which calendar the event was opened from, before invoking the engine**: the `eventOpen` trigger fires for events on secondary and shared calendars too, while the MVP manages only the primary calendar (REQ-INSTALL-004). An unchecked pass-through would look the opened id up in the primary calendar and report `EVENT_NOT_FOUND` for an event the user is looking at. The comparison is against the **resolved primary-calendar id** — the user's own calendar id (their email address), obtained once, e.g. via `CalendarApp.getDefaultCalendar().getId()` — **never the literal string `"primary"`**: that alias is request-side sugar the trigger payload does not contain, so a literal comparison would classify the user's own primary calendar as foreign and break every card open. When `e.calendar.calendarId` differs from the resolved id, the card renders an explicit **unsupported-calendar** explanation directly — the payload synthesized by `buildUnresolvedEventDiagnostics(eventId, "UNSUPPORTED_CALENDAR")`, the same card-side synthesizer as the not-found reasons — with no engine run, no budget spend, and no misleading not-found diagnosis.
+
+It should display:
 
 - eligibility result;
 - directive interpretation;

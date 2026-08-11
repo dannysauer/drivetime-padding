@@ -250,13 +250,13 @@ The UI does not contain business logic. Manual synchronization calls the same en
 
 ```javascript
 listWindowEvents(calendarId, observeStart, observeEnd, shouldStop)
-listGeneratedEventsBetween(calendarId, start, end)
+listGeneratedEventsBetween(calendarId, start, end, shouldStop)
 createGeneratedEvent(spec)
 updateGeneratedEvent(observed, spec)
 deleteGeneratedEvent(observed)
 ```
 
-(The write operations take the observed event, not a bare id, so ownership can be re-verified at write time; the window read is deadline-aware. The Technical Design interface reference is the authoritative listing.)
+(The write operations take the observed event, not a bare id, so ownership can be re-verified at write time; both paged reads are deadline-aware, reporting truncation via `scanComplete`. The Technical Design interface reference is the authoritative listing.)
 
 The reconciliation engine should not directly call `Calendar.Events.insert`, `patch`, or `delete`.
 
@@ -756,11 +756,23 @@ function reconcile(options) {
       return failure;
     }
 
-    // §17.1: a scoped run carries deletion authority over a comparison
-    // that deliberately cannot see everything else. Dry runs only.
-    if (options.eventIdFilter && !options.dryRun) {
+    // §17.1: eventIdFilter and reason "event-diagnostic" are one package,
+    // enforced in BOTH directions, plus dryRun. A scoped run without the
+    // reason would draw the ordinary 60-attempt budget on every card open
+    // with none of the spend recorded, bypassing the §20.3 hourly
+    // ceiling; the reason without the scope (or without dryRun) would
+    // point a full -- even write-mode -- reconcile at the shared
+    // 20-attempt hourly allowance and drain it for every genuine card
+    // open that hour. And a scoped run carries deletion authority over a
+    // comparison that deliberately cannot see everything else, so it is
+    // dry-run only. One canonical invocation, enforced rather than
+    // assumed.
+    if (Boolean(options.eventIdFilter) !== isDiagnostic ||
+        (options.eventIdFilter && !options.dryRun)) {
       return buildFailureResult(
-        new Error("eventIdFilter requires dryRun"), options);
+        new Error(
+          "eventIdFilter, reason 'event-diagnostic', and dryRun go together"),
+        options);
     }
 
     // Counted HERE, under the lock -- not in the trigger handler. A
@@ -1075,7 +1087,8 @@ function reconcile(options) {
     // results (technical design §17.1).
     const cleanup = options.eventIdFilter
       ? { shrunk: false, events: [], scanComplete: true }
-      : findStrandedCompanions(window, settings, options.dryRun);
+      : findStrandedCompanions(window, settings, options.dryRun,
+          () => elapsedExceedsExecutionBudget(runStart));
     diff.deletes.push(...cleanup.events);
 
     // Deduplicate by event id before merging. An overlong source with one

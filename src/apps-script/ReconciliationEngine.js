@@ -211,6 +211,6 @@ function buildFailureResult(errorOrValidation, options) {
  * ordering means the delete wins.
  * Technical Design section 7.6, REQ-CONFIG-006a.
  */
-function findStrandedCompanions(window, settings, dryRun) {
+function findStrandedCompanions(window, settings, dryRun, shouldStop) {
   throw new Error('Not implemented: Technical Design section 7.6');
 }

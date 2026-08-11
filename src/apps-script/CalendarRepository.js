@@ -25,8 +25,8 @@ function listWorkingLocationEvents(calendarId, start, end) {
 }
 
 /**
- * Ownership-filtered listing (privateExtendedProperty=dtp=1), paginated to
- * completion, returning { events, scanComplete }.
+ * Ownership-filtered listing (privateExtendedProperty=dtp=1), paginated
+ * until done or shouldStop() fires, returning { events, scanComplete }.
  *
  * Used by the window-shrink cleanup pass: when windowDays is reduced, the
  * observation range contracts and companions beyond the new horizon are never
@@ -36,9 +36,13 @@ function listWorkingLocationEvents(calendarId, start, end) {
  * scanComplete matters here just like the main window read: a truncated
  * scan could delete its one retrieved page, satisfy deletedAll, and lower
  * the high-water mark with later pages stranded outside every future scan.
+ * Deadline-aware for the same reason as listWindowEvents: a large horizon
+ * reduction can leave enough events in the vacated range to spend the
+ * whole runtime inside this one call; early return with scanComplete
+ * false retains the mark and the next run retries.
  * Technical Design section 7.6.
  */
-function listGeneratedEventsBetween(calendarId, start, end) {
+function listGeneratedEventsBetween(calendarId, start, end, shouldStop) {
   throw new Error('Not implemented: Technical Design section 7.6');
 }
 

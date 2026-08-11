@@ -24,10 +24,11 @@ parseDirectives(description) -> ParsedDirectives
 listWindowEvents(calendarId, observeStart, observeEnd, shouldStop)
   -> { events: RawCalendarEvent[], scanComplete: boolean }
 listWorkingLocationEvents(calendarId, start, end) -> RawCalendarEvent[]
-// Ownership-filtered (privateExtendedProperty=dtp=1), paginated to
-// completion with completeness reported -- a truncated shrink scan must
-// not lower the high-water mark (technical design 7.6)
-listGeneratedEventsBetween(calendarId, start, end)
+// Ownership-filtered (privateExtendedProperty=dtp=1), paginated until
+// done or shouldStop fires, completeness reported -- a truncated shrink
+// scan must not lower the high-water mark, and a large vacated range
+// must not spend the deadline inside one call (technical design 7.6)
+listGeneratedEventsBetween(calendarId, start, end, shouldStop)
   -> { events: ObservedGeneratedEvent[], scanComplete: boolean }
 // Ownership + parent filtered, no time bounds, EXCLUDES cancelled
 // tombstones (a deleted companion keeps its dtp metadata and must read as
@@ -106,8 +107,10 @@ overlapsPlanningRange(event, window) -> boolean   // intersection, not start-con
 // Stranded = start at or after the new horizon; a companion SPANNING the
 // boundary is visible to the ordinary read, which alone decides its fate
 // dryRun suppresses even the mark-ADVANCE on the common path -- a preview
-// must not change whether a later run classifies as a shrink
-findStrandedCompanions(window, settings, dryRun)
+// must not change whether a later run classifies as a shrink. shouldStop
+// bounds the vacated-range scan like every other paged read; early return
+// reports scanComplete false and retains the mark
+findStrandedCompanions(window, settings, dryRun, shouldStop)
   -> { shrunk, events, scanComplete }                                  // 7.6
 // engine lowers the high-water mark only after applyDiff confirms every
 // stranded delete succeeded AND the cleanup scan was complete, never on
@@ -206,10 +209,13 @@ logWarning(code, error) -> void
 captureEventDiagnostics(event, eligibility, directives, origin, outcome,
                         effectiveBufferMinutes)
   -> EventDiagnostics
-// Fallback payload when the targeted read resolves no source event
-// (17.1): a synthesized ineligible EligibilityResult with reason
-// EVENT_NOT_FOUND or PARENT_NOT_FOUND -- the card must never render
-// silence for exactly the orphaned events users most wonder about
+// Fallback payload when the diagnostic flow cannot evaluate the opened
+// event: a synthesized ineligible EligibilityResult with reason
+// EVENT_NOT_FOUND or PARENT_NOT_FOUND (engine-side, targeted read
+// resolved nothing, 17.1) or UNSUPPORTED_CALENDAR (card-side, opened
+// calendar differs from the resolved primary id, BEFORE any engine run,
+// 20.3) -- the card must never render silence for exactly the events
+// users most wonder about
 buildUnresolvedEventDiagnostics(eventId, reason) -> EventDiagnostics
 
 // Triggers
