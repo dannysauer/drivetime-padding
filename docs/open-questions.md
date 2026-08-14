@@ -51,6 +51,7 @@ Questions:
 | # | Question | Blocks |
 |---|---|---|
 | 1 | Exact request shape to create an OOO event, and which `outOfOfficeProperties` values are accepted | TD §16.2 |
+| 1a | Whether `outOfOfficeProperties` can be patched on an existing OOO event — verified by **reading the value back** after the patch, not by request success alone: a patch Calendar accepts (200) but silently ignores would leave the owned-field mismatch permanently un-healable (patch rejected *or* ignored → realign by replacement) | TD §16.5, §15.2.1, §15.2.5 |
 | 2 | Whether `autoDeclineMode: declineNone` reliably prevents generated blocks from declining meetings | TD §16.2, REQ-ELIG-011 |
 | 3 | Whether explicit reminder suppression behaves consistently on OOO events | TD §16.3 |
 | 4 | Whether `showDeleted` + `singleEvents` is sufficient to detect all cancelled recurring instances | TD §7.3, AC-REC-003 |

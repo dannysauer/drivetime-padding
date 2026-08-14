@@ -57,10 +57,12 @@ const CONTINUATION_DELAY_MS = 5 * 60000;
 const MAX_REMOVAL_PASSES = 20;
 const MAX_REMOVAL_CONTENTION_RETRIES = 10;
 
-// How far behind the slacked planning range the daily orphan sweep reaches
-// for anchors: two daily cycles, so an outbound anchor is not out-run by
-// planStart's advance before the next firing, even with one missed run.
-// Technical Design section 15.2.8.
+// How far the daily orphan sweep's anchor band reaches behind planStart
+// (together with MAX_SOURCE_DURATION; the band's upper bound is now +
+// MAX_WINDOW_DAYS + the duration cap -- the maximal horizon, so a window
+// shrink cannot hide a stray): two daily cycles, so an outbound anchor is
+// not out-run by planStart's advance before the next firing, even with
+// one missed run. Technical Design section 15.2.8.
 const SWEEP_DISCOVERY_SLACK_MINUTES = 2880;
 // updatedMin bound for the sweep's listing: a stray was necessarily MOVED,
 // and a move bumps `updated`, so the sweep only lists recently-touched
@@ -77,8 +79,10 @@ const LAST_RUN_KEY = 'dtp.lastRun';
 // brick the button after one crashed run. Technical Design section 19.5.
 // Furthest observeEnd ever used. Drives cleanup when windowDays shrinks.
 const OBSERVE_HIGH_WATER_KEY = 'dtp.observeHighWater';
-// Consecutive-continuation counter. Incremented by the continuation handler
-// on entry, reset to 0 by any successful run, enforced at enqueue time.
+// Consecutive-continuation counter. Incremented by the ENGINE, under the
+// user lock, before substantive work (a handler-side increment races the
+// reset a concurrent successful run performs -- Technical Design 19.6);
+// reset to 0 by any successful non-dry run, enforced at enqueue time.
 // Unlike trigger pendingness this cannot be derived -- it must survive runs.
 const CONTINUATION_COUNT_KEY = 'dtp.continuationCount';
 // Hour-bucketed diagnostic broker spend: { bucket, used }. Read and written

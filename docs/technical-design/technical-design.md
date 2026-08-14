@@ -254,6 +254,9 @@ interface GeneratedEventSpec {
   transparency: "opaque" | "transparent" | null;
   /** Always suppressed for the MVP. Owned, compared, and restored. */
   reminders: RemindersSetting;
+  /** Non-null exactly when eventType is "outOfOffice"; the constant 16.2
+      body for the MVP. Owned, compared, and restored (15.2.1). */
+  outOfOfficeProperties: OutOfOfficeProperties | null;
   privateProperties: Record<string, string>;
   fingerprint: string;
 }
@@ -262,9 +265,15 @@ interface RemindersSetting {
   useDefault: boolean;
   overrides: Array<{ method: string; minutes: number }>;
 }
+
+interface OutOfOfficeProperties {
+  autoDeclineMode: string;
+}
 ```
 
 `reminders` is constant across every generated event (`{ useDefault: false, overrides: [] }`), so it is not a fingerprint input — it cannot vary with planning inputs. It is still owned state, because the *user* can change it. That distinction is why the fingerprint alone cannot decide whether a write is needed (§15.2.1).
+
+`outOfOfficeProperties` follows the same rule. It is fully determined by `eventType` — the constant §16.2 body (`{ autoDeclineMode: "declineNone" }`) when the generated event is OOO, `null` otherwise — so it adds nothing to the fingerprint beyond what `eventType` already contributes. But the user can flip auto-decline on a generated block, and a block that silently starts declining meetings breaks the §16.2 promise, so it is owned state and must be compared and restored.
 
 `key` is internal and deterministic:
 
@@ -290,6 +299,8 @@ interface ObservedGeneratedEvent {
     transparency: "opaque" | "transparent" | null;
     /** Owned because 16.3 suppresses them; users can re-enable. */
     reminders: RemindersSetting;
+    /** Owned alongside eventType; null on ordinary events (16.2). */
+    outOfOfficeProperties: OutOfOfficeProperties | null;
   };
   routeCache: {
     routeHash: string | null;
@@ -458,13 +469,54 @@ A validation failure blocks write-mode reconciliation and surfaces in the UI. A 
 
 ```javascript
 function migrateSettings_(settings) {
+  // Validate BEFORE indexing SETTINGS_MIGRATIONS: persisted properties
+  // can hold anything a corrupted write left behind (schemaVersion -1,
+  // null, "2"), and indexing the table with such a value invokes
+  // undefined -- loadSettings would throw instead of returning the
+  // structural validation errors 5.3 promises for exactly this state.
+  const version = settings ? settings.schemaVersion : null;
+  if (!Number.isInteger(version) ||
+      version < 1 || version > CURRENT_SETTINGS_SCHEMA) {
+    return { unsupportedSchema: true, version: version };
+  }
   let migrated = deepClone_(settings);
-  while (migrated.schemaVersion < CURRENT_SETTINGS_SCHEMA) {
-    migrated = SETTINGS_MIGRATIONS[migrated.schemaVersion](migrated);
+  let from = version;
+  try {
+    while (migrated.schemaVersion < CURRENT_SETTINGS_SCHEMA) {
+      from = migrated.schemaVersion;
+      migrated = SETTINGS_MIGRATIONS[from](migrated);
+      // Each step must advance EXACTLY one version. Returning the input
+      // version (or a non-integer) would loop here until the execution
+      // ceiling hard-kills the trigger; skipping ahead would silently
+      // bypass a chain step the completeness check above verified
+      // exists, leaving fields untransformed for the deep-merge to
+      // paper over with defaults.
+      if (migrated.schemaVersion !== from + 1) {
+        return { unsupportedSchema: true, version: from };
+      }
+    }
+  } catch (err) {
+    // Migrations run BEFORE validation -- 5.3 validates the migrated
+    // result -- so they receive unvalidated input. A migration written
+    // against the complete old schema can throw on a structurally
+    // partial document at a valid old version (a truncated write, a
+    // hand-edited store); a MISSING chain entry (a deploy that forgot a
+    // migration) lands here too, since calling the undefined table slot
+    // throws. Both are 5.3's to report as INVALID_SETTINGS, not a
+    // TypeError inside a trigger. `from` is the step that failed, not
+    // the stored version -- the card names the version the chain could
+    // not get past.
+    return { unsupportedSchema: true, version: from };
   }
   return migrated;
 }
 ```
+
+`migrateSettings_` is never called for an **absent** document. `loadSettings` reads the stored document first; when User Properties holds no `dtp.settings` at all, the §5.2 defaults apply directly — a fresh install loads defaults, it is not a validation failure and no `INVALID_SETTINGS` results. The `settings ? … : null` branch above is defense against an explicitly stored `null` or non-object document (corruption), not the fresh-install path.
+
+An `unsupportedSchema` result flows into `loadSettings`' returned `validation` as a structural error (`INVALID_SETTINGS`, field `schemaVersion`) — never a throw. The diagnostic card then shows the corrupt version value, and the settings card offers the reset-to-defaults path (REQ-CONFIG-018).
+
+The three guards close different holes, and all are needed. The version guard handles values that cannot start the chain at all (`-1`, `null`, `"2"`). The in-loop step assertion handles a buggy migration that does not advance exactly one version: returning the input version never throws, so the catch cannot see it — it loops until the execution ceiling hard-kills the trigger — while skipping ahead would exit the loop looking migrated with a chain step silently bypassed and its transformations missing. The catch handles everything that *does* throw: a valid old version on a structurally partial document (the migration dereferences fields the document never had) and a missing intermediate chain entry (calling the undefined table slot throws — a deploy bug, not data corruption, but equally unable to reach the current schema). All three funnel to the same structural `INVALID_SETTINGS`, because all three are the same user-facing fact: the persisted state cannot be brought to the current schema — and the reported version names the step the chain could not get past, so a bug report locates the failure precisely.
 
 Migrations must be deterministic, sequential, and covered by unit tests.
 
@@ -722,7 +774,7 @@ function findStrandedCompanions(window, settings, dryRun, shouldStop) {
   // run before status or continuation. Early return with scanComplete
   // false is already safe -- the mark is retained and the next run
   // retries.
-  const scan = repository.listGeneratedEventsBetween(
+  const scan = listGeneratedEventsBetween(
     'primary',
     window.observeEnd,
     new Date(Date.parse(highWater)),
@@ -1418,7 +1470,7 @@ Convert signed byte values to two-digit hexadecimal.
 For every desired key:
 
 - no observed event: **out-of-window lookup, then create** — the engine checks for a managed companion the scan cannot see before creating (§15.2.7), and creates only when the scan was complete (§15.2.4);
-- one observed event, desired `eventType` differs from observed: **replace** — delete and recreate (see §15.2.5);
+- one observed event, desired `eventType` differs from observed: **replace** — delete and recreate (see §15.2.5). The same branch fires for an `outOfOfficeProperties` difference **if** the open patchability question resolves against patching the field (§16.5, `docs/open-questions.md`): a difference whose only write path is replacement must classify as replace here, or the update branch below issues a patch Calendar rejects identically on every run — the permanent failure loop §15.2.5 exists to prevent;
 - one observed event, fingerprint matches **and** owned fields match, **and** the route cache needs persisting: **metadata patch** (see §15.2.2);
 - one observed event, fingerprint matches **and** owned fields match, cache fine: **unchanged**;
 - one observed event, fingerprint matches but owned fields differ: **update** (see §15.2.1);
@@ -1456,9 +1508,10 @@ summary
 eventType
 transparency
 reminders
+outOfOfficeProperties
 ```
 
-Every compared field must have a write path that can realign it, or the comparison is theater: a field the add-on **writes** but does not **compare** is one the user can change permanently, and a field it **compares** but cannot **write** is a difference it detects and then cannot fix. For all fields except `eventType` that write path is §16.5's patch, and the patch list and this comparison set must stay identical. `eventType` is compared here but realigned by **replacement** (§15.2.5), because Calendar will not patch it.
+Every compared field must have a write path that can realign it, or the comparison is theater: a field the add-on **writes** but does not **compare** is one the user can change permanently, and a field it **compares** but cannot **write** is a difference it detects and then cannot fix. For all fields except `eventType` that write path is §16.5's patch, and the **user-visible** entries of the patch list and this comparison set must stay identical — §16.5 also patches private extended properties (the route-cache triplet, §16.6), but those are the add-on's own metadata, not user-editable owned state, so they are repaired by the metadata-patch path (§15.2.2) rather than compared here. `eventType` is compared here but realigned by **replacement** (§15.2.5), because Calendar will not patch it. `outOfOfficeProperties` **is** in §16.5's patch list and repaired in place — with one caveat: whether Calendar accepts the field in a patch body is unverified (`docs/open-questions.md`), and if it does not, realignment falls back to the same replacement path as `eventType`. Either way the difference has a write path.
 
 `reminders` is the case that proves it. §16.3 suppresses reminders on generated events so travel blocks do not fire alerts, and §16.5 lists reminders as owned — but an earlier revision omitted them from this comparison. A user who switched reminders on for a travel block would have kept them forever: the fingerprint is unaffected (reminder state is not a planning input), and the owned-field check did not look, so the event was classified `unchanged` on every subsequent run.
 
@@ -1520,7 +1573,7 @@ The Calendar API declares `eventType` **immutable after creation**. A companion 
 
 The desired type can legitimately change while the parent key stays the same: a source event qualifies as a real OOO event one run (companions are `outOfOffice`, §12.6) and by title pattern the next — the user toggled `includeOutOfOffice` off, or converted the source event's type. The comparator then matches the old companion by `parent + role` and, if the type difference were folded into `update`, would emit a patch Calendar rejects. The patch fails identically on every subsequent reconciliation, the run reports an error each time, and the companion sits permanently in the wrong state — a persistent failure loop, not a transient one.
 
-An `eventType` difference is therefore a **replace**: delete the observed event, create from the desired spec. Both operations already exist in the diff vocabulary; `replaces` records them as one intent so run reporting counts a replacement rather than an unrelated delete plus create, and so application can order the delete before the create (Architecture §14.5), leaving at worst a brief gap rather than a brief duplicate.
+An `eventType` difference is therefore a **replace**: delete the observed event, create from the desired spec. And if the Spike resolves that `outOfOfficeProperties` cannot be patched either (§16.5), an `outOfOfficeProperties` difference joins this branch under the same rule — the classification must route every difference to a write path that can actually realign it, and for an unpatchable field that path is replacement. This is a classification-time decision keyed on the Spike's answer, not a runtime retry: an update that waits for Calendar to reject its patch would repeat the rejected write on every run. Both operations already exist in the diff vocabulary; `replaces` records them as one intent so run reporting counts a replacement rather than an unrelated delete plus create, and so application can order the delete before the create (Architecture §14.5), leaving at worst a brief gap rather than a brief duplicate.
 
 Replacement authority is deletion authority: the observed event is removed, so the parent's planning outcome must be `planned` (it is, by construction — a desired spec exists). The safety rule §15.3 applies to the delete half unchanged.
 
@@ -1535,7 +1588,7 @@ The trigger condition is the **duration**, not the ineligibility reason. A timed
 > For each ineligible source whose observed duration exceeds `MAX_SOURCE_DURATION_MINUTES`, when **either** companion role is missing from the observed index, perform a targeted, ownership-filtered lookup outside the window bounds.
 
 ```javascript
-repository.listCompanionsByParent('primary', event.id)
+listCompanionsByParent('primary', event.id)
 // privateExtendedProperty: dtp=1 AND parent=<event.id>; no time bounds
 ```
 
@@ -1554,7 +1607,7 @@ A user can drag a managed companion **out of** the observation range entirely �
 Before creating an absent desired role, the **engine** therefore runs the same unbounded parent lookup as §15.2.6:
 
 ```javascript
-repository.listCompanionsByParent('primary', spec.parentEventId)
+listCompanionsByParent('primary', spec.parentEventId)
 ```
 
 Any returned managed event whose `parent|role` key matches the absent desired key is **updated** to the desired specification — the standard restoration path, applied to an event found by targeted read instead of window scan. Only when the lookup finds nothing does the create proceed.
@@ -1577,7 +1630,7 @@ Two interactions need pinning:
 Discovery therefore cannot be driven by desired specs. The **daily maintenance run** (`reason === "daily-trigger"`, never dry) performs an ownership sweep:
 
 1. list ownership-filtered events **updated since the sweep watermark**: `listGeneratedEventsUpdatedSince(calendarId, updatedMin, shouldStop)`, with `updatedMin` the *earlier* of `now − SWEEP_UPDATED_LOOKBACK_MINUTES` (recommended 4320 — 72 hours, the anchor discovery slack plus one daily cycle) and the persisted **last-completed-sweep timestamp** (`dtp.sweepCompletedAt`, written by the **engine, after `applyDiff` confirms every swept delete succeeded** — `applied.deletedAll(sweep.events)`, the same application-gated rule as the shrink high-water mark in §7.6 — and only when the window scan, listing, and parent point reads all completed on a non-dry run. Advancing on a merely-*computed* diff would be fatal: a deferred or skipped application leaves the stray on the calendar while the advanced watermark shrinks the next sweep's bounds past its `updated` timestamp and anchor, stranding permanently the very event this sweep just found. Absent on a fresh install, where `now − SWEEP_UPDATED_LOOKBACK_MINUTES` applies — a new install has no older strays). `now` is the run's injected clock, threaded into the sweep — reading the wall clock here would unpin the lookback boundary from the anchor band derived from the same `now`. Every stray this section hunts was *manually moved* — that is what put it outside the observation range — and a move bumps the event's `updated` timestamp, so `updatedMin` filters server-side to exactly the recently-touched events among which strays can exist. **Cancelled tombstones are excluded** before candidate selection: an `updatedMin` listing force-includes deleted entries, and a companion the engine itself just deleted has a bumped `updated`, an intact anchor, and a cancelled parent — it would otherwise re-enter the diff as a 404-bound delete for days after every routine cleanup. A full-history scan is not just expensive, it is **unresumable**: a read-only pass deletes nothing and persists no cursor, so a budget-truncated unbounded listing would return the same prefix every day while a stray on a later page aged out of the anchor band unexamined, permanently. The watermark closes the mirror-image gap: skipped or truncated sweeps (missed daily triggers, incomplete window scans) leave `dtp.sweepCompletedAt` behind, so the next completed sweep reaches back over the whole gap instead of only 72 hours;
-2. a returned event is a **candidate** when no event with its **id** appears in the window read (identity, not `parent|role` key — a key test would hide exactly the out-of-window *duplicate* whose key an in-window copy satisfies) *and* its `anchor` (§13.2) falls within `[planStart − (MAX_SOURCE_DURATION + SWEEP_DISCOVERY_SLACK_MINUTES), planEnd + MAX_SOURCE_DURATION)`. The duration term covers whichever source boundary the role anchors — the two differ by at most the cap, and an outbound anchor sits a full duration behind the source's end. `SWEEP_DISCOVERY_SLACK_MINUTES` (recommended 2880 — 48 hours, two daily cycles) covers the time between the stray's creation and its discovery: `planStart` advances continuously, so a sweep bounded only by the duration cap would out-run an outbound anchor before the next daily firing. When the sweep watermark shows a longer gap (skipped or incomplete sweeps), the effective slack widens to `max(SWEEP_DISCOVERY_SLACK_MINUTES, now − sweepCompletedAt)` — the anchor band and the `updatedMin` bound stretch over the same gap together, or a past-anchored stray from early in the gap would be listed but no longer selected. Events with a missing or unparseable anchor are skipped;
+2. a returned event is a **candidate** when no event with its **id** appears in the window read (identity, not `parent|role` key — a key test would hide exactly the out-of-window *duplicate* whose key an in-window copy satisfies) *and* its `anchor` (§13.2) falls within `[planStart − (MAX_SOURCE_DURATION + SWEEP_DISCOVERY_SLACK_MINUTES), now + MAX_WINDOW_DAYS·1d + MAX_SOURCE_DURATION)`. The **upper bound is the maximal configurable horizon, not the current `planEnd`**: `planEnd = now + windowDays` (§7.2), so no legitimately-created companion can carry an anchor beyond `MAX_WINDOW_DAYS` past its creation-time `now` plus the duration cap (a return companion of a maximal source starting at the horizon's edge anchors at `source.end ≤ planEnd + MAX_SOURCE_DURATION`), and the wide bound admits nothing spurious. The bound is anchored at `now`, not `planStart`: `planStart` sits `RECONCILIATION_LOOKBACK_MINUTES` *behind* `now`, and a `planStart`-anchored bound would fall short by exactly that offset, rejecting a legitimate far-edge stray on the same-day sweep — while a `planEnd`-based bound would silently exclude the shrink case, where a companion of a source inside an old 180-day window is dragged beyond the old high-water mark (its update trigger missed), the window then shrinks to 7 days, the §7.6 shrink scan ends *before* the moved event, and a 7-day anchor band would reject the source's anchor forever. The lower duration term covers whichever source boundary the role anchors — the two differ by at most the cap, and an outbound anchor sits a full duration behind the source's end. `SWEEP_DISCOVERY_SLACK_MINUTES` (recommended 2880 — 48 hours, two daily cycles) covers the time between the stray's creation and its discovery: `planStart` advances continuously, so a sweep bounded only by the duration cap would out-run an outbound anchor before the next daily firing. When the sweep watermark shows a longer gap (skipped or incomplete sweeps), the effective slack widens to `max(SWEEP_DISCOVERY_SLACK_MINUTES, now − sweepCompletedAt)` — the anchor band and the `updatedMin` bound stretch over the same gap together, or a past-anchored stray from early in the gap would be listed but no longer selected. Events with a missing or unparseable anchor are skipped;
 3. one `getEventById` per unique candidate parent — **checking `shouldStop` between point reads**: a bulk move or API rewrite can bump `updated` on many companions at once, yielding a parent list long enough that an unguarded read loop consumes the remaining runtime after both paged listings behaved. When the guard fires, the sweep acts only on candidates whose parents were already read and drops the rest. The sweep returns `{ events, sweepComplete }` — `sweepComplete` false whenever the listing was truncated *or* the read loop was cut short — and the engine records it as `diagnostics.sweepComplete` (§4.11), so fixtures and operators can tell "found nothing" from "gave up". Each read then feeds a decision on the **parent's state**, not bare existence:
    - parent **absent or a cancelled tombstone** → the parent's candidates join `diff.deletes`, deduplicated by event id exactly as §15.2.6;
    - parent **live but not evaluated this run** (it sits outside the planning range — moved beyond the horizon or into the deep past together with its companion) → the candidates are **deleted too**. An out-of-window source's desired state is no companions (`OUTSIDE_WINDOW` carries deletion authority, §15.2), ordinary planning cannot see the source to say so, and once the anchor ages past the discovery slack the sweep never looks again — "parent exists, leave it" would make this stray exactly as permanent as the deleted-parent one. The companions regenerate when the source re-enters the window;
@@ -1664,6 +1717,8 @@ Representative structure:
 
 The exact accepted `outOfOfficeProperties` values must be verified against current Calendar API behavior before finalizing code. Generated OOO blocks should avoid auto-declining unrelated meetings unless explicitly desired.
 
+That promise is **maintained**, not merely set at creation. `outOfOfficeProperties` is owned state carried through the desired spec and the observed fields (§4.8, §4.9) and sits in the §15.2.1 comparison set, so a user who flips auto-decline on a generated block has the change reverted on the next reconciliation — exactly as re-enabled reminders are reverted (§16.3). The value is constant per event type — every generated OOO block carries the body shown above — so it is not a fingerprint input, and the owned-field comparison is the only thing that catches the change.
+
 ### 16.3 Reminder behavior
 
 Generated events should explicitly disable reminders unless product testing indicates users expect them:
@@ -1694,9 +1749,12 @@ Patch only fields owned by Drivetime Padding:
 - end;
 - transparency;
 - reminders;
+- `outOfOfficeProperties` (on OOO events);
 - private extended properties.
 
-`eventType` is **not** in the patch body: Calendar declares it immutable after creation, so a patch carrying a different type is rejected. The type is still owned and still compared (§15.2.1) — a difference is realigned by replacement (§15.2.5), never by patch. Type-specific properties (`outOfOfficeProperties`) travel with the create that a replacement performs.
+`eventType` is **not** in the patch body: Calendar declares it immutable after creation, so a patch carrying a different type is rejected. The type is still owned and still compared (§15.2.1) — a difference is realigned by replacement (§15.2.5), never by patch.
+
+`outOfOfficeProperties` is in the patch body so a user-flipped auto-decline mode is repaired in place — but whether Calendar accepts the field in a patch on an existing OOO event is unverified (`docs/open-questions.md`). If it rejects the patch, realignment falls back to replacement (§15.2.5), the same path that already handles `eventType`; type-specific properties travel with the create a replacement performs, so the fallback loses nothing.
 
 Do not overwrite unrelated fields if a later version adds them.
 
@@ -1734,7 +1792,7 @@ Refreshing a route cache entry writes the **complete cache triplet** and nothing
 }
 ```
 
-Start, end, summary, event type, and transparency are omitted from the patch body, so the event does not move and the user sees nothing.
+Every owned field — start, end, summary, event type, transparency, reminders, `outOfOfficeProperties` — is omitted from the patch body, so the event does not move and the user sees nothing.
 
 `routeHash` is in the patch for a reason that is easy to miss: expiry is not the only way an entry becomes unusable. §13.3 also rejects an entry whose hash is missing, corrupted, or mismatched. If the repair wrote only `routeSecs` and `routeAt`, the bad hash would survive the refresh, the entry would fail the hash check again on the very next run, and the broker would be called every time — a freshly stamped cache that never validates. Writing the triplet atomically means one repair heals every miss cause.
 
@@ -2073,20 +2131,20 @@ The unbounded scan plus one conditional delete per historical companion **cannot
 **The card action** (`removeAutomation`, behind the confirmation) does only bounded work:
 
 1. **acquire the same user lock reconciliation uses** (§16 of the architecture), with a generous wait. If the lock cannot be acquired, report that a synchronization is in progress and ask the user to retry — the disable must not race a run;
-2. **persist `settings.enabled = false`**, under the lock. Trigger removal alone is temporary: the engine's own first check is `settings.enabled`, `ensureTriggers()` is explicitly required to recreate missing triggers, and a later manual synchronization or trigger repair against an enabled settings object would regenerate everything the user just asked to remove. The persisted flag is what makes "disable automation" mean disabled — and it is also what makes the enqueued cleanup safe to run outside this lock hold: any run starting after this point exits at the disabled gate and creates nothing;
+2. **replace the settings document with the disabled tombstone** — the §5.2 defaults with `enabled: false` — under the lock, not merely flip the flag. The tombstone is **schema-complete by construction**, so what later runs read is exactly what was written. A minimal `{ schemaVersion, enabled: false }` fragment would in fact *load* — §5's deep-merge fills missing fields from defaults before validation runs — but the disabled state the user just confirmed should not depend on read-time healing: the fragment's effective content would be computed against whatever defaults the *reading* version ships, and the engine validates structurally before it checks the disabled gate (Architecture §14.2), so the disabled report would rest on the merge always reconstructing a validatable document. Writing the complete defaults makes the stored document self-contained. They carry empty origin values, so replacing the document still destroys the configured addresses. Trigger removal alone is temporary: the engine's own first check is `settings.enabled`, `ensureTriggers()` is explicitly required to recreate missing triggers, and a later manual synchronization or trigger repair against an enabled settings object would regenerate everything the user just asked to remove; the persisted disabled state is what makes "disable automation" mean disabled, and what makes the enqueued cleanup safe to run outside this lock hold (any run starting after this point exits at the disabled gate). Writing the **tombstone** here rather than after cleanup is the REQ-PRIV-006 move: configured origins are personal data (home and office addresses), the user has just confirmed removal, and destroying them must not be conditional on Calendar accepting every later delete or on the worker ever winning the lock again — a user whose cleanup ends `failed` and who proceeds to uninstall must not leave their home address in User Properties indefinitely. Nothing downstream needs the addresses: the cleanup scan is ownership-filtered and deletion needs only the events themselves. The tombstone rather than full deletion is what keeps trigger repair gated on the disabled flag (§19.3): a deleted document reads back as fresh defaults with `enabled: true` (§5.2), resurrecting exactly the automation the user just removed. (A user who re-enables mid-cleanup re-enters their origins — the acceptable cost of having confirmed a destructive action;)
 3. **remove the add-on's reconciliation triggers**;
 4. **initialize the persisted progress record** (below) and **enqueue the cleanup worker** — a one-off trigger, same mechanism as §19.5 — then release the lock and return "Removal started". The card does not pretend the deletions happened inside the callback.
 
 **The cleanup worker** (`runRemovalCleanup`, one-off trigger handler):
 
 1. deletes every pending trigger for its own handler (the §19.5 collapse rule);
-2. acquires the user lock with a generous wait; on failure increments the progress record's `contentionRetries`, re-enqueues itself, and exits. Contention retries do **not** count against the pass cap — no work was done — but are bounded separately by `MAX_REMOVAL_CONTENTION_RETRIES` (recommended 10). At that cap the worker makes **one final short lock attempt solely to write the settings tombstone** before marking the record `failed`; if even that fails, it marks the record `failed` *without touching settings* — an unlocked settings write would reopen the enable-flow clobber race step 6 exists to close — and the REQ-PRIV-006 removal completes on the next retry of the action, whose card half starts by acquiring the lock. Without their own bound, a persistently contended lock would chain re-enqueues forever with the record showing `running`; counting them as passes would instead let zero-work retries exhaust the cap and report failure when nothing went wrong. Genuine long contention is already unlikely: `enabled` is false by the time the worker exists, so post-disable runs exit at the gate in seconds;
+2. acquires the user lock with a generous wait; on failure increments the progress record's `contentionRetries`, re-enqueues itself, and exits. Contention retries do **not** count against the pass cap — no work was done — but are bounded separately by `MAX_REMOVAL_CONTENTION_RETRIES` (recommended 10), past which the record is marked `failed`. The contention-cap terminal path needs no settings handling at all: the tombstone was written by the card action, under its lock, before the worker ever existed — REQ-PRIV-006 is already satisfied however the cleanup ends. Without their own bound, a persistently contended lock would chain re-enqueues forever with the record showing `running`; counting them as passes would instead let zero-work retries exhaust the cap and report failure when nothing went wrong. Genuine long contention is already unlikely: the tombstone is persisted by the time the worker exists, so post-disable runs exit at the gate in seconds;
 3. re-checks `settings.enabled`: if the user re-enabled the add-on between passes, the cleanup **aborts** and marks the progress record `aborted` — deleting companions a re-enabled automation is actively maintaining would just churn recreations against the user's changed intent;
 4. **interleaves paging and deletion** rather than scanning to completion first: fetch one ownership-filtered page (`listGeneratedEventsPage`), delete its events through `deleteGeneratedEvent` — §15.3's marker rule and §16.5.1's conditional delete apply unchanged — checking `elapsedExceedsExecutionBudget` between pages and between deletions (§23.1). A materialize-everything-then-delete contract would put the entire multi-page scan ahead of the first budget check: a history large enough to spend the deadline on pagination alone would hard-kill the worker mid-scan, and — with no cursor to resume from — every retry would repeat the same full scan and die the same way, forever. The walk order within a pass: attempt every event on the fetched page that has not already failed this pass; if the page produced **any successful deletion**, re-fetch from the start (the set shrank, and the first page now holds fresh work); if it produced **none** — every event on it already failed — advance via `nextPageToken` instead (the **no-progress guard**: re-fetching an all-failing first page would spin forever). The scan is **complete only when this walk runs off the end of the listing** — a fetch yields no attemptable events *and* no `nextPageToken` — meaning every remaining managed event was attempted this pass and either deleted or recorded as a failure; an all-failing first page is *not* completion, it is the cue to advance to the pages behind it. Interleaving needs no persisted cursor: each deletion shrinks the result set, so re-fetching the first page after a kill or a re-enqueue naturally resumes where the deletions stopped, and cross-pass, failed events are simply retried. When the budget expires with work remaining, the worker folds the pass's counts into the progress record, re-enqueues itself, and exits;
 5. working passes are capped at `MAX_REMOVAL_PASSES` (recommended 20 — a generous multiple of any realistic history at ~thousands of deletions per pass). At the cap the record is marked failed with the counts so far; the action can be offered again;
-6. on **any terminal outcome other than `aborted`** — the scan completed (with or without failures) or the pass cap was reached; the contention cap follows step 2's final-attempt rule instead, since it is by definition the path holding no lock — **re-check `settings.enabled` one last time, still under the lock, immediately before touching stored state**, then **replace the settings document with the minimal disabled tombstone** `{ schemaVersion, enabled: false }`. Configured origins are personal data (home and office addresses), and REQ-PRIV-006 promises their removal — a promise that cannot be conditional on Calendar accepting every delete: a user whose cleanup ends `failed` and who proceeds to uninstall instead of retrying would otherwise leave their home address in User Properties indefinitely. Nothing about retrying needs the addresses — the scan is ownership-filtered and deletion needs only the events themselves — so the retry keeps the `CleanupProgress` record and loses nothing. The tombstone rather than full deletion is what keeps trigger repair gated on the disabled flag (§19.3) instead of resurrecting defaults. On the fully-successful path the worker additionally clears the remaining stored state — the high-water mark, the continuation counter, the diagnostic spend counter, the sweep watermark, the last-run record; a `failed` outcome retains those alongside `CleanupProgress` for the retry. Only `aborted` retains the settings document: the user re-enabled mid-flow, and the tombstone would clobber the very configuration they just restored.
+6. on the **fully-successful** terminal outcome (scan complete, zero failures), clear the remaining stored state — the high-water mark, the continuation counter, the diagnostic spend counter, the sweep watermark, the last-run record. A `failed` outcome retains those alongside `CleanupProgress` for the retry. **The worker never writes the settings document** — the tombstone was the card action's step 2, so no terminal path (including the contention cap) has settings work left to do, no path can clobber a mid-flow re-enable's freshly-entered configuration, and the old unlocked-tombstone race is gone by construction.
 
-The step-6 re-check closes the re-enable race from the other side too: **the enable flow acquires the same user lock before persisting `enabled = true`** (and is rejected with a cleanup-in-progress notice while a pass holds it). Without that, a settings save landing between the worker's step-3 check and its step-6 tombstone would be silently clobbered — the user's just-entered origin addresses destroyed and automation switched back off moments after they enabled it. With both rules, a re-enable can only land between passes, and the next pass aborts at step 3.
+**The enable flow acquires the same user lock before persisting `enabled = true`** (and is rejected with a cleanup-in-progress notice while a pass holds it), so a re-enable can only land between passes, where the next pass's step-3 check sees it and aborts.
 
 **Progress is persisted, not held in memory** — it must survive the worker's own re-enqueues and be visible between passes:
 
@@ -2211,7 +2269,9 @@ function enqueueContinuation() {
   if (continuationPending_()) {
     return { scheduled: true, capReached: false };          // a pass is already coming
   }
-  const count = Number(userProperties.getProperty(CONTINUATION_COUNT_KEY)) || 0;
+  const count = Number(
+    PropertiesService.getUserProperties().getProperty(CONTINUATION_COUNT_KEY)
+  ) || 0;
   if (count >= MAX_CONSECUTIVE_CONTINUATIONS) {
     return { scheduled: false, capReached: true };          // daily run takes over
   }

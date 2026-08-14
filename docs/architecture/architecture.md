@@ -256,7 +256,7 @@ updateGeneratedEvent(observed, spec)
 deleteGeneratedEvent(observed)
 ```
 
-(The write operations take the observed event, not a bare id, so ownership can be re-verified at write time; both paged reads are deadline-aware, reporting truncation via `scanComplete`. The Technical Design interface reference is the authoritative listing.)
+(The write operations take the observed event, not a bare id, so ownership can be re-verified at write time; both paged reads are deadline-aware, reporting truncation via `scanComplete`. The Technical Design interface reference is the authoritative listing. Like every module in the shared Apps Script namespace, these are **bare global functions** — there is no `repository` object to qualify calls with, and the pseudocode below calls them unqualified.)
 
 The reconciliation engine should not directly call `Calendar.Events.insert`, `patch`, or `delete`.
 
@@ -745,9 +745,10 @@ function reconcile(options) {
     }
 
     // Disabled is checked BEFORE write-readiness. The remove-all tombstone
-    // is {schemaVersion, enabled: false} with no origins -- a disabled
-    // install must report "disabled", not manufacture a MISSING_DEFAULT_
-    // ORIGIN failure record moments after cleanup cleared the last one.
+    // is the 5.2 defaults with enabled: false -- self-contained and
+    // schema-complete, with empty origins -- and a disabled install must
+    // report "disabled", not manufacture a MISSING_DEFAULT_ORIGIN failure
+    // record moments after cleanup cleared the last one.
     if (!settings.enabled) {
       return buildStatusOnlyResult("disabled", null, options);
     }
@@ -808,7 +809,7 @@ function reconcile(options) {
     let diagnosticRedirected = false;
     if (options.eventIdFilter) {
       let targetId = options.eventIdFilter;
-      let target = repository.getEventById("primary", targetId);
+      let target = getEventById("primary", targetId);
 
       // Opening a COMPANION redirects to its parent: a companion has no
       // desired state of its own, and diagnosing it directly would leave
@@ -818,10 +819,10 @@ function reconcile(options) {
       if (target && isGeneratedEvent(target)) {
         diagnosticRedirected = true;
         targetId = target.extendedProperties.private.parent;
-        target = repository.getEventById("primary", targetId);
+        target = getEventById("primary", targetId);
       }
 
-      const companions = repository.listCompanionsByParent("primary", targetId);
+      const companions = listCompanionsByParent("primary", targetId);
       allEvents = (target ? [target] : [])
         .concat(companions.map(companion => companion.rawEvent));
       scanComplete = true;
@@ -832,7 +833,7 @@ function reconcile(options) {
       // entire runtime inside this one call, before any engine-side
       // check runs (technical design §7.2.1). Truncation is a
       // first-class state downstream (§15.2.4, §15.2.8, §7.6).
-      ({ events: allEvents, scanComplete } = repository.listWindowEvents(
+      ({ events: allEvents, scanComplete } = listWindowEvents(
         "primary",
         window.observeStart,
         window.observeEnd,
@@ -903,7 +904,7 @@ function reconcile(options) {
     let workingLocations = [];
     if (settings.workingLocation.enabled && !options.eventIdFilter) {
       workingLocations = fetchWorkingLocationsSafely(
-        repository, window.observeStart, window.observeEnd);
+        window.observeStart, window.observeEnd);
     }
 
     // One shared HTTP-attempt budget for the whole run, decremented by the
@@ -974,7 +975,7 @@ function reconcile(options) {
             sourceExceedsDurationCap(event) &&
             !bothRolesObserved(observedByKey, event.id)) {
           strandedOverlong.push(
-            ...repository.listCompanionsByParent("primary", event.id)
+            ...listCompanionsByParent("primary", event.id)
           );
         }
         continue;
@@ -987,7 +988,7 @@ function reconcile(options) {
         // wrapper and degrade the origin to default with a spurious
         // WORKING_LOCATION_UNAVAILABLE warning.
         workingLocations = fetchWorkingLocationsSafely(
-          repository, new Date(event.start), new Date(event.end));
+          new Date(event.start), new Date(event.end));
       }
 
       const origin = resolveOrigin(event, directives, settings, workingLocations);
@@ -1141,7 +1142,7 @@ function reconcile(options) {
       // would follow a truncated restoration is skipped -- unresolved
       // creates must never be applied blindly (technical design
       // §15.2.7).
-      resolveOutOfWindowCompanions(diff, cleanup, repository,
+      resolveOutOfWindowCompanions(diff, cleanup,
         () => elapsedExceedsExecutionBudget(runStart));
       outOfTime = elapsedExceedsExecutionBudget(runStart);
     }
@@ -1153,9 +1154,12 @@ function reconcile(options) {
     // The listing is updatedMin-bounded -- a stray was necessarily MOVED,
     // and moves bump `updated`, so a full-history scan (which a read-only
     // pass could never resume through) is not needed. Candidates are
-    // anchor-selected (parent time inside the slacked planning range,
-    // event id absent from the window read) so history costs almost
-    // nothing; each candidate parent gets one point read and
+    // anchor-selected (parent time inside the maximal anchor band --
+    // from planStart minus the discovery slack and the duration cap,
+    // out to now (not planStart, which sits a lookback behind) plus the
+    // largest configurable horizon and the duration cap, so a window
+    // shrink cannot hide a stray -- and event id absent from the window
+    // read) so history costs almost nothing; each candidate parent gets one point read and
     // a STATE decision: absent/cancelled parent, live-but-out-of-window
     // parent, and in-window INELIGIBLE parent all mean delete; a PLANNED
     // parent keeps its candidates (restoration owns them) unless the key
@@ -1185,7 +1189,7 @@ function reconcile(options) {
     if (options.reason === "daily-trigger" && scanComplete &&
         !elapsedExceedsExecutionBudget(runStart)) {
       sweep = sweepOutOfWindowCompanions(
-        observedGenerated, planningOutcomes, window, now, repository,
+        observedGenerated, planningOutcomes, window, now,
         () => elapsedExceedsExecutionBudget(runStart));
       const queuedIds = new Set(diff.deletes.map(event => event.id));
       diff.deletes.push(

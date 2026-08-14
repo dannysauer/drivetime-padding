@@ -558,6 +558,15 @@ Without the observation range extending past `planEnd`, `timeMax` would exclude 
 **When** settings are loaded  
 **Then** validation fails before any route hashing is attempted, rather than throwing inside a trigger.
 
+**Given** instead a stored document whose `schemaVersion` is `-1`, `null`, or the string `"2"`; or a valid old version whose migration chain is missing an intermediate entry; or a migration that throws on a structurally partial old document or returns without advancing the version  
+**When** settings are loaded  
+**Then** every one of those states is reported as a structural `INVALID_SETTINGS` error on `schemaVersion` naming the version the chain could not get past — never a throw inside a trigger and never an unterminated migration loop —  
+**And** the settings card offers the reset-to-defaults path.
+
+**Given** instead no stored settings document at all  
+**When** settings are loaded  
+**Then** the defaults apply directly — a fresh install is not a validation failure.
+
 ## AC-INSTALL-003: Trigger verification
 
 **Given** a fresh Marketplace installation  
@@ -687,10 +696,10 @@ The ceiling bounds wire traffic. Counting logical calls instead would double the
 **Given** managed events exist both inside the observation range and far outside it (aged out, or beyond a shrunken horizon)  
 **And** the user confirms "Remove all generated events and disable automation"  
 **When** the action runs  
-**Then** the card action returns within the callback budget, having persisted `settings.enabled` as `false`, removed the triggers, and enqueued the cleanup worker  
-**And** the worker deletes every managed event in budget-bounded passes, including events no window-bounded scan would read, re-enqueueing itself until the scan completes  
+**Then** the card action returns within the callback budget, having **replaced the stored settings with the disabled tombstone** — the schema-complete defaults with `enabled: false`, removing configured origin addresses, under the lock, before any deletion work begins — removed the triggers, and enqueued the cleanup worker  
+**And** the worker deletes every managed event in budget-bounded passes, including events no window-bounded scan would read, re-enqueueing itself until the scan completes — never writing the settings document itself  
 **And** cumulative progress is persisted and shown by the home card while cleanup is running  
-**And** on every terminal outcome except a user-initiated abort — success and failure alike — the stored settings are replaced with a minimal disabled tombstone, removing configured origin addresses  
+**And** the origin addresses are therefore gone on **every** cleanup outcome — success, failure, or a worker that never wins the lock again  
 **And** the final record reports deleted and failed counts, with a retry offered when any deletion failed  
 **And** a later manual synchronization or trigger repair does not regenerate events or triggers.
 
@@ -755,10 +764,27 @@ A window-scan-based diagnostic would return silence for exactly the events users
 **Then** the ownership sweep finds the companion via its persisted `anchor`  
 **And** a point read confirms the parent no longer exists  
 **And** the companion is deleted  
-**And** historical companions whose anchors lie outside the slacked planning range trigger no parent lookups.
+**And** historical companions whose anchors lie outside the sweep's anchor band trigger no parent lookups.
 
 **Given** instead the source still exists but was moved outside the planning range together with its companion  
 **When** the next daily maintenance run executes  
 **Then** the point read finds the live parent, sees it was not evaluated this run, and the companion is deleted — an out-of-window source's desired state is no companions, and they regenerate when it re-enters the window.
 
+**Given** instead a companion dragged outside the observation range while the window was configured long, its parent's anchor far in the future  
+**And** the user then shrinks `windowDays` so that anchor lies beyond the new planning range  
+**When** the next daily maintenance run executes  
+**Then** the anchor band still spans out to the largest configurable horizon, so the companion is found and the parent-state rule applies — a window shrink does not hide the stray.
+
 Restoration (AC-RECOVERY-012) is driven by a pending create, which requires a live parent planning inside the window; a deleted or out-of-window parent leaves nothing pending and the stray invisible to the bounded scan. Only a scan independent of desired state can find it, and the anchor is what keeps that scan from probing every historical event daily.
+
+## AC-RECOVERY-016: Auto-decline switched on a generated OOO block
+
+**Given** a generated out-of-office travel block created with `autoDeclineMode: "declineNone"`  
+**And** the user changes the block's auto-decline mode so it declines incoming meetings  
+**And** the source event is otherwise unchanged, so the fingerprint still matches  
+**When** reconciliation runs  
+**Then** the owned-field comparison detects the auto-decline difference  
+**And** the auto-decline mode is restored to `declineNone` — by patch where Calendar accepts `outOfOfficeProperties` in a patch body, by replacement otherwise  
+**And** the block declines no unrelated meetings afterwards.
+
+Auto-decline mode is not a planning input, so the fingerprint cannot detect this. Like reminders (AC-RECOVERY-008), it is caught only because `outOfOfficeProperties` is in the owned-field set.

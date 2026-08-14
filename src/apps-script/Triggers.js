@@ -17,12 +17,17 @@ function ensureTriggers() {
 
 /**
  * Card action behind "Remove all generated events and disable automation".
- * Does only bounded work: under the user lock it persists enabled=false,
- * removes the reconciliation triggers, initializes the progress record,
- * and enqueues runRemovalCleanup. The unbounded scan-and-delete must NOT
- * run here -- card callbacks share the short execution budget that forced
- * manual sync to enqueue, and this action's work grows with the user's
- * entire history. Technical Design section 19.4.
+ * Does only bounded work: under the user lock it replaces the settings
+ * document with the disabled tombstone -- the section 5.2 defaults with
+ * enabled false, schema-complete so later loads read exactly what was
+ * written rather than a fragment healed by deep-merge at read time --
+ * destroying origin addresses NOW,
+ * unconditionally on later cleanup outcomes (REQ-PRIV-006), removes the
+ * reconciliation triggers, initializes the progress record, and enqueues
+ * runRemovalCleanup. The unbounded scan-and-delete must NOT run here --
+ * card callbacks share the short execution budget that forced manual sync
+ * to enqueue, and this action's work grows with the user's entire
+ * history. Technical Design section 19.4.
  */
 function removeAutomation() {
   throw new Error('Not implemented: Technical Design section 19.4');
@@ -36,11 +41,11 @@ function removeAutomation() {
  * pages of scanned events until the execution budget nears -- paging and
  * deletion interleave, so a retry resumes with no persisted cursor --
  * folding counts into dtp.removalProgress and re-enqueueing until the
- * scan completes (capped at MAX_REMOVAL_PASSES). Every terminal outcome
- * except a user abort re-checks enabled one last time and writes the
- * settings tombstone: origin addresses are personal data and their
- * removal cannot be conditional on Calendar accepting every delete
- * (REQ-PRIV-006). Technical Design 19.4.
+ * scan completes (capped at MAX_REMOVAL_PASSES). NEVER writes the
+ * settings document: the card action wrote the disabled tombstone under
+ * its lock before this worker existed, so REQ-PRIV-006 holds on every
+ * outcome, including a worker that never wins the lock again.
+ * Technical Design 19.4.
  */
 function runRemovalCleanup(e) {
   throw new Error('Not implemented: Technical Design section 19.4');

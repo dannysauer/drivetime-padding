@@ -79,12 +79,17 @@ function overlapsPlanningRange(event, window) {
  * metadata when a user drags or renames an event, so the stored fingerprint
  * survives the tampering it would need to detect.
  *
- * Compares start, end, summary, eventType, transparency, AND reminders.
- * That set must stay identical to the patch list in section 16.5: a field
- * written but not compared is one the user can change permanently, because
- * nothing else in the pipeline looks at it.
+ * Compares start, end, summary, eventType, transparency, reminders, AND
+ * outOfOfficeProperties. That set must stay identical to the USER-VISIBLE
+ * entries of the section 16.5 patch list plus the replacement-realigned
+ * fields (eventType, and outOfOfficeProperties where Calendar will not
+ * patch it); private extended properties are patched too but are the
+ * add-on's own metadata (route cache, section 15.2.2), not compared owned
+ * state. A field written but not compared is one the user can change
+ * permanently, because nothing else in the pipeline looks at it.
  *
- * Technical Design section 15.2.1, REQ-GEN-014a, REQ-GEN-014b.
+ * Technical Design section 15.2.1, REQ-GEN-014a, REQ-GEN-014b,
+ * REQ-GEN-014c.
  */
 function ownedFieldsMatch(observed, desired) {
   throw new Error('Not implemented: Technical Design section 15.2.1');
@@ -147,7 +152,7 @@ function routeCacheFor(observedByKey, parentEventId) {
  * whose lookup never ran must not be applied blindly.
  * Technical Design section 15.2.7.
  */
-function resolveOutOfWindowCompanions(diff, cleanup, repository, shouldStop) {
+function resolveOutOfWindowCompanions(diff, cleanup, shouldStop) {
   throw new Error('Not implemented: Technical Design section 15.2.7');
 }
 
@@ -156,7 +161,11 @@ function resolveOutOfWindowCompanions(diff, cleanup, repository, shouldStop) {
  * ownership-filtered events updated since the sweep watermark (a stray
  * was necessarily moved, and moves bump `updated`; cancelled tombstones
  * excluded), selects candidates by event id absent from the window read
- * plus anchor inside the slacked planning range, then decides per parent
+ * plus anchor inside the maximal anchor band -- from planStart minus the
+ * discovery slack and duration cap up to NOW (not planStart) plus
+ * MAX_WINDOW_DAYS plus the duration cap, so a window shrink cannot hide
+ * a stray and the lookback offset cannot reject a far-edge one --
+ * then decides per parent
  * STATE via one point read: absent/cancelled, live-but-out-of-window,
  * and in-window ineligible parents delete; planned parents keep their
  * candidates unless an in-window event already satisfies the key; failed
@@ -173,8 +182,7 @@ function resolveOutOfWindowCompanions(diff, cleanup, repository, shouldStop) {
  * over gaps of skipped or incomplete sweeps.
  */
 function sweepOutOfWindowCompanions(
-    observedGenerated, planningOutcomes, window, now, repository,
-    shouldStop) {
+    observedGenerated, planningOutcomes, window, now, shouldStop) {
   throw new Error('Not implemented: Technical Design section 15.2.8');
 }
 

@@ -164,7 +164,7 @@ This matrix links requirement groups to architecture components, technical-desig
 | §19.4 (resumable) | Cleanup pages and deletes interleaved; retries resume without a persisted cursor | AC-CONFIG-004 |
 | REQ-RECON-017 (state-keyed) | Sweep decides on parent state: out-of-window and ineligible live parents delete too | AC-RECOVERY-015 |
 | §17.5 (deferred) | `applyDiff` budget-aware between operations; remainder deferred, not failed | AC-RECOVERY-013 |
-| REQ-PRIV-006 (unconditional) | Settings tombstone on every terminal cleanup outcome except user abort | AC-CONFIG-004 |
+| REQ-PRIV-006 (unconditional) | Origin addresses destroyed regardless of how cleanup later ends (tombstone placement finalized in the sixteenth round: written by the card action, never by the worker) | AC-CONFIG-004 |
 
 ## Requirements added in the thirteenth review round
 
@@ -197,3 +197,14 @@ This matrix links requirement groups to architecture components, technical-desig
 | Architecture §14.2 (guarded boundary) | Error-boundary status persistence guarded; `STATUS_PERSIST_FAILED` logged, result still returned | AC-RECOVERY-014 |
 | §21.4 / §12.3 (clarified) | Same-bucket refresh is no *user-visible* update; the metadata patch still writes the triplet | AC-CACHE-001 |
 | Architecture §5.4/§14.2 (global call) | `getGeneratedEventSpecs` called unqualified — no `DrivetimeProvider` object exists | — pseudocode |
+
+## Requirements added in the sixteenth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| Architecture §14.2 / TD (bare globals) | Repository and helper calls unqualified everywhere — no `repository` object exists in the shared Apps Script namespace | — pseudocode |
+| §5.4 (validated) | Settings schema version validated before indexing the migration table; unsupported versions become structural `INVALID_SETTINGS`, never a throw | AC-CONFIG-001 |
+| §19.4 (tombstone first) | Disabled tombstone written by the card action under its lock; the cleanup worker never writes settings, so REQ-PRIV-006 holds on every outcome | AC-CONFIG-004 |
+| §19.6 (aligned) | Continuation counter read via `PropertiesService.getUserProperties()`, matching the §5.1 User Properties storage convention | — snippet |
+| REQ-RECON-017 (maximal band) | Sweep anchor band reaches the largest configurable horizon, so a window shrink cannot hide a stray | AC-RECOVERY-015 |
+| REQ-GEN-014c | `outOfOfficeProperties` owned, compared, and restored; patch where Calendar permits, replacement otherwise | AC-RECOVERY-016 |

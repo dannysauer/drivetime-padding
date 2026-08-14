@@ -76,7 +76,7 @@ resolveOrigin(event, directives, settings, workingLocations)
 // Wraps listWorkingLocationEvents: a read failure records
 // WORKING_LOCATION_UNAVAILABLE (18.2) and returns [], so origin resolution
 // degrades to the default origin instead of failing the run (7.5)
-fetchWorkingLocationsSafely(repository, start, end) -> RawCalendarEvent[]
+fetchWorkingLocationsSafely(start, end) -> RawCalendarEvent[]
 
 // Routing and provider
 // requestContext carries { role, cacheEntry, now, budget, correlationId };
@@ -171,12 +171,17 @@ buildAppError(code, event) -> AppErrorRecord
 // Checks shouldStop between lookups; when it fires the engine re-evaluates
 // the budget and skips application -- an unresolved create must never be
 // applied blindly (15.2.7)
-resolveOutOfWindowCompanions(diff, cleanup, repository, shouldStop) -> void
+resolveOutOfWindowCompanions(diff, cleanup, shouldStop) -> void
 // Daily-run ownership sweep (15.2.8): updatedMin-bounded listing (a
 // stray was necessarily moved, and moves bump `updated`; cancelled
 // tombstones excluded; stops early when shouldStop fires),
 // anchor-selected candidates (event id absent from the window read,
-// anchor inside the slacked planning range), one getEventById per
+// anchor inside the maximal anchor band: from planStart minus the
+// discovery slack and duration cap up to NOW + MAX_WINDOW_DAYS + the
+// duration cap -- upper bound anchored at now, NOT planStart, which
+// sits a lookback behind and would reject a far-edge stray; the
+// current planEnd would let a window shrink hide one, 15.2.8),
+// one getEventById per
 // candidate parent -- shouldStop checked BETWEEN reads too, and a sweep
 // cut short anywhere never writes the watermark -- then a parent-STATE
 // decision: absent/cancelled,
@@ -194,7 +199,7 @@ resolveOutOfWindowCompanions(diff, cleanup, repository, shouldStop) -> void
 // watermark only after applyDiff confirms deletedAll(events) -- the
 // same application-gated rule as the shrink high-water mark
 sweepOutOfWindowCompanions(observedGenerated, planningOutcomes, window,
-                           now, repository, shouldStop)
+                           now, shouldStop)
   -> { events: ObservedGeneratedEvent[], sweepComplete: boolean }
 loadSweepWatermark() / saveSweepWatermark(now)                    // 15.2.8
 // Hourly diagnostic allowance (20.3): budget the routing client actually
@@ -227,8 +232,10 @@ buildUnresolvedEventDiagnostics(eventId, reason) -> EventDiagnostics
 
 // Triggers
 ensureTriggers() -> TriggerHealth
-// Card action: bounded work only -- under the user lock it persists
-// enabled=false, removes triggers, and enqueues the cleanup worker; the
+// Card action: bounded work only -- under the user lock it REPLACES the
+// settings document with the disabled tombstone (the 5.2 defaults with
+// enabled=false, destroying origin addresses -- REQ-PRIV-006), removes
+// triggers, initializes progress, and enqueues the cleanup worker; the
 // unbounded scan-and-delete lives in the worker (19.4)
 removeAutomation() -> ActionResponse
 // Budget-bounded cleanup passes: pages and deletes interleaved (fetch a
@@ -236,9 +243,10 @@ removeAutomation() -> ActionResponse
 // resume with no persisted cursor), persists cumulative counts in
 // CleanupProgress (dtp.removalProgress), re-enqueues until the scan
 // completes (capped at MAX_REMOVAL_PASSES; contention retries bounded
-// separately); every terminal outcome except a user abort writes the
-// settings tombstone -- REQ-PRIV-006 cannot be conditional on Calendar
-// accepting every delete (19.4)
+// separately). NEVER writes the settings document: the card action wrote
+// the disabled tombstone under its lock before the worker existed, so
+// REQ-PRIV-006 holds on every outcome including a worker that never
+// wins the lock again (19.4)
 runRemovalCleanup(e) -> CleanupProgress
 // Manual sync enqueues -- card callbacks cannot fit a full reconcile
 // (technical design 19.5; one-off trigger, subject to Spike 1). The

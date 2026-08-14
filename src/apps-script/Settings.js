@@ -37,6 +37,12 @@ function defaultSettings_() {
 /**
  * Returns validated, migrated settings.
  *
+ * Order: read the stored document; when ABSENT, the section 5.2 defaults
+ * apply directly (fresh install -- migrateSettings_ is not called and no
+ * INVALID_SETTINGS results); otherwise migrate first (section 5.4 -- an
+ * unsupportedSchema result becomes a structural INVALID_SETTINGS error on
+ * schemaVersion, never a throw), then deep-merge, then validate.
+ *
  * Must deep-merge against defaults rather than Object.assign: a stored
  * document containing a partial nested object would otherwise drop the
  * remaining keys of that object.
