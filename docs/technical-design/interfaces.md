@@ -23,9 +23,23 @@ parseDirectives(description) -> ParsedDirectives
 // Calendar
 // Deadline-aware: checks shouldStop between pages and returns the
 // retrieved prefix with scanComplete false when it fires -- truncation
-// is a first-class state downstream (7.2.1)
-listWindowEvents(calendarId, observeStart, observeEnd, shouldStop)
-  -> { events: RawCalendarEvent[], scanComplete: boolean }
+// is a first-class state downstream (7.2.1). RESUMABLE: nextPageToken is
+// non-null exactly when the listing stopped early; the engine persists
+// it (dtp.windowScanCursor, pinned to the range that produced it) and a
+// continuation passes it back as resumeToken so successive passes tile
+// the range instead of re-reading the same prefix until the cap. An
+// expired or rejected resumeToken falls back to a fresh scan, never a
+// thrown run
+listWindowEvents(calendarId, observeStart, observeEnd, shouldStop,
+                 resumeToken)
+  -> { events: RawCalendarEvent[], scanComplete: boolean,
+       nextPageToken: string | null, resumed: boolean }
+// resumed reports whether the resumeToken was HONORED: false when none
+// was given or the token was expired/rejected and the call fell back to
+// a fresh scan from page one. The engine keys slice semantics on it --
+// forcing scanComplete false, chainFinished, point-read deletes -- so a
+// fallback fresh scan that walks off the end keeps full complete-scan
+// credit instead of being misclassified as a slice
 listWorkingLocationEvents(calendarId, start, end) -> RawCalendarEvent[]
 // Ownership-filtered (privateExtendedProperty=dtp=1), paginated until
 // done or shouldStop fires, completeness reported -- a truncated shrink
@@ -172,14 +186,16 @@ saveRunStatusGuarded(result) -> void
 elapsedExceedsExecutionBudget(runStartMs) -> boolean
 markRemainingSourcesFailed(orderedSources, currentEvent, planningOutcomes) -> void
 // Non-fatal run warnings (codes from the 18.2 registry, e.g.
-// WORKING_LOCATION_UNAVAILABLE): appends to
-// ReconciliationDiagnostics.warnings (4.11) AND logs via logWarning,
-// without failing the run. The run's diagnostics object is created once
-// and carried by REFERENCE into the built result, so this works both
-// before and after buildRunResult -- one mechanism for every engine
-// warning site (bookkeeping guards, enqueue guard, origin fallback;
-// saveRunStatusGuarded embeds the same append+log internally for
-// STATUS_PERSIST_FAILED)
+// WORKING_LOCATION_UNAVAILABLE): appends to the run's WARNING BUFFER
+// (4.11) AND logs via logWarning, without failing the run. The buffer
+// is one array the engine creates at run start; the comparator installs
+// THAT ARRAY by reference as diff.diagnostics.warnings and every result
+// builder carries it into the result -- which is why warnings recorded
+// BEFORE the comparator (cursor persistence, the daily counter reset)
+// and AFTER the result is built (post-apply bookkeeping, the enqueue
+// guard) all land in the same persisted diagnostics. One mechanism for
+// every engine warning site; saveRunStatusGuarded embeds the same
+// append+log internally for STATUS_PERSIST_FAILED
 recordRunWarning(code, error) -> void
 // Constructs an AppErrorRecord (18.1) from a registry code (18.2):
 // message and retryability from the registry entry, sourceEventId from
@@ -227,13 +243,53 @@ sweepOutOfWindowCompanions(observedGenerated, planningOutcomes, window,
                            now, shouldStop)
   -> { events: ObservedGeneratedEvent[], sweepComplete: boolean }
 loadSweepWatermark() / saveSweepWatermark(now)                    // 15.2.8
-// Hourly diagnostic allowance (20.3): budget the routing client actually
-// decrements when reason === 'event-diagnostic'; spend recorded even on
-// dry runs -- the broker calls happened. The read FAILS CLOSED (returns
-// 0 on a Properties error) so an outage that breaks spend writes cannot
-// simultaneously mint fresh allowances (18.2)
-diagnosticBudgetRemaining(now) -> number
-recordDiagnosticRouteSpend(count, now) -> void
+// Incomplete-scan orphan resolution (15.2.3, 15.2.4): reads its
+// candidates from diff.preserved -- only companions whose parent has NO
+// planningOutcomes entry (a failed parent's outcome is known; no read).
+// One parent point read per candidate, shouldStop checked BETWEEN reads
+// -- absent/cancelled parent proves the orphan and MOVES it from
+// preserved into diff.deletes; a LIVE parent preserves it this run
+// (unread page and moved-out-of-range are indistinguishable here); a
+// read the guard cut off preserves it and counts in suppressedDeletes
+resolveUnmatchedCompanions(diff, planningOutcomes, shouldStop) -> void
+// Window-scan cursor persistence (7.2.1) -- User Properties, engine
+// policy, stubs live beside the other Status persistence, NOT in
+// CalendarRepository. Saved when a truncated non-dry scan STARTS or
+// ADVANCES a chain (a fresh truncated run never overwrites a pending
+// cursor -- the chain owns it); resumed by continuation and daily runs;
+// cleared by chain completion, by a fresh COMPLETE non-dry scan, and by
+// remove-all (19.4); dry runs never touch it. A resumed run is treated
+// as scanComplete false downstream regardless -- its coverage is a
+// slice by construction. The load NEVER THROWS and validates the stored
+// shape: absent, malformed, or unreadable cursors return null,
+// degrading to a fresh scan -- never a failed run (AC-RECOVERY-017)
+loadWindowScanCursor()
+  -> { pageToken, observeStart, observeEnd } | null
+saveWindowScanCursor(cursor) / clearWindowScanCursor()
+// Whether a partial run's remaining causes are ones another pass can
+// drain: deferred operations, an application skipped for time, an
+// exhausted route budget, or an unfinished scan chain. False when the
+// only cause is scan coverage after a FINISHED chain -- a fresh chain
+// would re-tile identical work (a pass justified by other causes may
+// re-tile as a side effect, bounded by the day's remaining allowance)
+// (19.6, 23.4)
+continuationStillUseful(result, chainFinished) -> boolean
+// Hourly diagnostic allowance (20.3), RESERVE-then-REFUND: the reserve
+// writes the whole remaining allowance as used BEFORE any broker call
+// and returns the grant (the run's RouteBudget when reason ===
+// 'event-diagnostic'); the refund returns the unspent remainder in the
+// engine's finally. Reservation order is the safety property: a failed
+// reserve grants 0 (FAILS CLOSED on any Properties error), a failed
+// refund under-grants until the bucket rolls over -- neither direction
+// can exceed the ceiling, unlike spend-then-record, where a post-call
+// write failure re-grants already-spent allowance (18.2)
+reserveDiagnosticAllowance(now) -> number
+// The refund is a DECREMENT (used = max(0, used - unspentCount)), never
+// an absolute write, and a no-op at unspentCount 0 -- so a reservation
+// that failed closed (granted 0, spent 0) cannot have its refund clobber
+// the bucket when Properties recovers; the engine additionally skips the
+// call entirely when nothing was granted
+refundDiagnosticAllowance(unspentCount, now) -> void
 // Console/log-only diagnostic for failures that occur after the run's
 // result is built (e.g. the finally-block spend write) -- never throws
 logWarning(code, error) -> void

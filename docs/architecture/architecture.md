@@ -249,7 +249,8 @@ The UI does not contain business logic. Manual synchronization calls the same en
 `CalendarRepository` hides Advanced Calendar API details and exposes business-oriented methods such as:
 
 ```javascript
-listWindowEvents(calendarId, observeStart, observeEnd, shouldStop)
+listWindowEvents(calendarId, observeStart, observeEnd, shouldStop,
+                 resumeToken)
 listGeneratedEventsBetween(calendarId, start, end, shouldStop)
 createGeneratedEvent(spec)
 updateGeneratedEvent(observed, spec)
@@ -722,6 +723,9 @@ function reconcile(options) {
   let routeBudget = null;
   let initialBudget = 0;
   let now = null;
+  // True when a cursor-RESUMED listing walked off the end: the scan
+  // chain's coverage work is done this episode (§7.2.1, §19.6).
+  let chainFinished = false;
 
   try {
     // §17.1: eventIdFilter and reason "event-diagnostic" are one package,
@@ -814,6 +818,21 @@ function reconcile(options) {
       incrementContinuationCount();
     }
 
+    // The DAILY run is the episode boundary: it resets the allowance
+    // unconditionally, under the lock, before substantive work
+    // (technical design §19.6). Without this, a calendar too large for
+    // any single scan -- where no run is ever `success` -- would hit the
+    // cap once and disable continuations permanently; resetting on mere
+    // chain completion instead would let a persistently-partial cause
+    // chain fresh scans forever. Guarded like the other counter writes.
+    if (options.reason === "daily-trigger" && !options.dryRun) {
+      try {
+        resetContinuationCount();
+      } catch (persistError) {
+        recordRunWarning("BOOKKEEPING_PERSIST_FAILED", persistError);
+      }
+    }
+
     // One clock for the whole run. Triggers pass no `now`, so default it
     // here; every later consumer (window, cache-age checks, provider
     // context) reuses this value rather than reading the clock again.
@@ -870,12 +889,86 @@ function reconcile(options) {
       // entire runtime inside this one call, before any engine-side
       // check runs (technical design §7.2.1). Truncation is a
       // first-class state downstream (§15.2.4, §15.2.8, §7.6).
-      ({ events: allEvents, scanComplete } = listWindowEvents(
-        "primary",
-        window.observeStart,
-        window.observeEnd,
-        () => elapsedExceedsExecutionBudget(runStart)
-      ));
+      //
+      // RESUMABLE (technical design §7.2.1): continuation AND daily
+      // runs resume a truncated predecessor's listing from the persisted
+      // cursor, PINNED to the stored observation range -- a page token
+      // is valid only for its own query, and successive slices must tile
+      // one span. The daily run resumes too: a chain longer than one
+      // day's continuation allowance must survive the episode boundary
+      // or the tail of the range is never reached (on ordinary calendars
+      // no cursor is pending at daily time). Calendar-trigger and manual
+      // runs scan fresh, but the pending cursor is the CHAIN's --
+      // ownership rules below. loadWindowScanCursor never throws and
+      // validates the stored shape: absent, malformed, or unreadable
+      // cursors return null and the run scans fresh (AC-RECOVERY-017).
+      let resume = null;
+      if (options.reason === "continuation" ||
+          options.reason === "daily-trigger") {
+        resume = loadWindowScanCursor();        // null when none stored
+      }
+      const scanRange = resume || window;
+      let nextPageToken = null;
+      let resumed = false;
+      ({ events: allEvents, scanComplete, nextPageToken, resumed } =
+        listWindowEvents(
+          "primary",
+          scanRange.observeStart,
+          scanRange.observeEnd,
+          () => elapsedExceedsExecutionBudget(runStart),
+          resume ? resume.pageToken : null
+        ));
+      // Slice semantics key on `resumed` -- whether the token was
+      // HONORED -- not on whether one was offered: an expired token
+      // falls back to a fresh scan, and a fallback that walks off the
+      // end earned full complete-scan credit; forcing it partial would
+      // skip the sweep and demote deletes for nothing. A genuinely
+      // resumed run read a SLICE: its coverage is partial by
+      // construction, however far the listing got. Walking off the end
+      // means the CHAIN finished -- clear the cursor -- not that this
+      // run observed the whole range.
+      if (!resumed) {
+        resume = null;
+      }
+      chainFinished = Boolean(resume) && scanComplete;
+      if (resume) {
+        scanComplete = false;
+      }
+      if (!options.dryRun) {
+        // Cursor OWNERSHIP (technical design §7.2.1): the pending cursor
+        // belongs to the chain. A resumed run advances it (truncated) or
+        // clears it (chain finished). A fresh run STARTS a chain only
+        // when none is stored -- a fresh truncated run must never
+        // overwrite a pending cursor, or every calendar-trigger edit on
+        // a busy calendar resets the chain to slice one and the tail is
+        // starved perpetually. A fresh COMPLETE scan clears any pending
+        // cursor: full coverage makes the chain moot. Guarded
+        // bookkeeping: a lost cursor restarts the scan from the front --
+        // wasteful, never wrong (technical design §18.2).
+        try {
+          if (resume) {
+            if (chainFinished) {
+              clearWindowScanCursor();
+            } else if (nextPageToken) {
+              saveWindowScanCursor({
+                pageToken: nextPageToken,
+                observeStart: scanRange.observeStart,
+                observeEnd: scanRange.observeEnd
+              });
+            }
+          } else if (scanComplete) {
+            clearWindowScanCursor();
+          } else if (nextPageToken && !loadWindowScanCursor()) {
+            saveWindowScanCursor({
+              pageToken: nextPageToken,
+              observeStart: scanRange.observeStart,
+              observeEnd: scanRange.observeEnd
+            });
+          }
+        } catch (persistError) {
+          recordRunWarning("BOOKKEEPING_PERSIST_FAILED", persistError);
+        }
+      }
     }
 
     // Raw Calendar resources are flattened into the ObservedGeneratedEvent
@@ -951,9 +1044,16 @@ function reconcile(options) {
     //
     // Diagnostics draw from the hourly allowance instead -- reopening the
     // event card must not grant a fresh 60 attempts per open (technical
-    // design §20.3, DIAGNOSTIC_ROUTE_CALLS_PER_HOUR).
+    // design §20.3, DIAGNOSTIC_ROUTE_CALLS_PER_HOUR). The allowance is
+    // RESERVED here, before any broker call, not recorded after: a
+    // post-call write failure would leave the stored count stale while
+    // the calls already happened, and the next card open would be
+    // granted the same allowance again -- reservation inverts that, so
+    // a later refund failure under-grants instead of over-spending.
+    // reserveDiagnosticAllowance fails CLOSED (any Properties error
+    // grants 0).
     initialBudget = isDiagnostic
-      ? diagnosticBudgetRemaining(now)
+      ? reserveDiagnosticAllowance(now)
       : MAX_ROUTE_CALLS_PER_RUN;
     routeBudget = { remaining: initialBudget };
 
@@ -1192,6 +1292,23 @@ function reconcile(options) {
       outOfTime = elapsedExceedsExecutionBudget(runStart);
     }
 
+    // On an INCOMPLETE scan, orphan deletion upgrades to per-event
+    // evidence the same way creates do (technical design §15.2.3,
+    // §15.2.4): one parent point read per unmatched companion -- absent
+    // or cancelled proves the orphan and moves it into diff.deletes; a
+    // LIVE parent (unread page or moved out of range, indistinguishable
+    // here) preserves it this run; a read the guard cut off leaves it
+    // preserved and counted in suppressedDeletes. Without this pass, a
+    // deleted source's companions would survive every truncated run on
+    // a calendar too large for any single scan. Skipped on scoped
+    // diagnostics (nothing is applied) and when out of time.
+    if (!options.eventIdFilter && !scanComplete &&
+        (options.dryRun || !outOfTime)) {
+      resolveUnmatchedCompanions(diff, planningOutcomes,
+        () => elapsedExceedsExecutionBudget(runStart));
+      outOfTime = elapsedExceedsExecutionBudget(runStart);
+    }
+
     // Daily-only ownership sweep for companions moved outside the
     // observation range whose parent no longer plans them (technical
     // design §15.2.8). Restoration above is create-driven, so it never
@@ -1311,6 +1428,11 @@ function reconcile(options) {
       // The engine, not the trigger layer, drives the continuation
       // lifecycle (technical design §19.6): success drains the deferred
       // work and resets the allowance; partial schedules the next pass.
+      // Chain completion does NOT reset the counter -- that would let a
+      // persistently-partial cause chain fresh scans forever; the daily
+      // run's unconditional reset (above) is the episode boundary that
+      // keeps the cap a bound without making one over-long chain a
+      // permanent disable (§19.6).
       // The reset is guarded like the other post-apply bookkeeping: a
       // stale counter is bounded harm (at most one episode's allowance,
       // §19.6), while an escaping throw would falsify a successful run.
@@ -1323,7 +1445,17 @@ function reconcile(options) {
           // same mechanism as the other two bookkeeping guards.
           recordRunWarning("BOOKKEEPING_PERSIST_FAILED", persistError);
         }
-      } else if (result.status === "partial") {
+      }
+      // Re-enqueue only while a continuation can still HELP: deferred
+      // operations, an application skipped for time, an exhausted route
+      // budget, or an unfinished scan chain. Scan coverage after a
+      // FINISHED chain never re-enqueues -- the next continuation would
+      // find no cursor, scan fresh, truncate, and start a new chain
+      // re-tiling identical work until the cap; the deletes still
+      // suppressed by partial coverage need one COMPLETE scan, which is
+      // the daily run's job (technical design §19.6, §23.4).
+      if (result.status === "partial" &&
+          continuationStillUseful(result, chainFinished)) {
         // {scheduled, capReached}: already-pending is fine (a pass is
         // coming anyway); capReached is the state diagnostics must show.
         // On diagnostics, not the result root -- the §17.2 contract
@@ -1374,23 +1506,30 @@ function reconcile(options) {
     }
     return failure;
   } finally {
-    // In the finally, not the success path: a diagnostic that throws
-    // AFTER its broker calls still spent them, and skipping the record
-    // would hand every reopened card a fresh allowance (technical design
-    // §20.3). Recorded under the lock this run still holds.
+    // The REFUND half of the reservation (technical design §20.3): the
+    // full allowance was reserved before routing, so what was not spent
+    // is returned here -- in the finally, because a diagnostic that
+    // throws AFTER its broker calls still spent them, and the unspent
+    // remainder should come back either way. Refunded under the lock
+    // this run still holds.
     //
-    // Guarded, with the lock release in an INNER finally: the spend
-    // record is itself a User Properties write and can throw. Unguarded,
-    // that throw would replace the structured result this function is
+    // Guarded, with the lock release in an INNER finally: the refund is
+    // itself a User Properties write and can throw. Unguarded, that
+    // throw would replace the structured result this function is
     // returning AND skip the release below -- an accounting failure must
     // not cost the run its result or strand the lock until timeout. The
     // result is already built, so the failure can only be LOGGED
-    // (DIAGNOSTIC_SPEND_RECORD_FAILED); the ceiling is protected by
-    // diagnosticBudgetRemaining failing CLOSED on its own read errors
-    // (technical design §18.2, §20.3).
+    // (DIAGNOSTIC_SPEND_RECORD_FAILED) -- and a lost refund is the SAFE
+    // side of the reservation: the hour under-grants until the bucket
+    // rolls over, it never over-spends (technical design §18.2, §20.3).
     try {
-      if (isDiagnostic && routeBudget) {
-        recordDiagnosticRouteSpend(initialBudget - routeBudget.remaining, now);
+      // Skipped when nothing was granted: a reservation that failed
+      // closed reserved nothing, so there is nothing to return -- and
+      // the refund itself is a DECREMENT, never an absolute write, so
+      // it cannot clobber the bucket on recovery (technical design
+      // §20.3).
+      if (isDiagnostic && routeBudget && initialBudget > 0) {
+        refundDiagnosticAllowance(routeBudget.remaining, now);
       }
     } catch (error) {
       logWarning("DIAGNOSTIC_SPEND_RECORD_FAILED", error);

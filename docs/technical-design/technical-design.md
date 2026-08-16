@@ -338,7 +338,12 @@ interface ReconciliationDiff {
     observed: ObservedGeneratedEvent;
     desired: GeneratedEventSpec;
   }>;
-  /** Preserved because the parent's planning failed. Never deleted. */
+  /** Not safe to delete THIS RUN: the parent's planning failed, or --
+      on an incomplete scan -- the parent was simply unread. The second
+      group is the input to the 15.2.3 point-read pass, which moves
+      proven orphans (parent absent or cancelled) from here into
+      deletes; failed-parent companions need no read (the outcome is
+      known) and are never deleted. */
   preserved: ObservedGeneratedEvent[];
   diagnostics: ReconciliationDiagnostics;
 }
@@ -348,9 +353,12 @@ interface ReconciliationDiff {
 
 ```typescript
 interface ReconciliationDiagnostics {
-  /** From the window read (7.2.1); gates absence-based operations. */
+  /** From the window read (7.2.1); false on every cursor-resumed slice.
+      Gates orphan deletion; creates are gated by the 15.2.7 lookup. */
   scanComplete: boolean;
-  /** Absence-based operations withheld on an incomplete scan (15.2.4). */
+  /** Creates withheld because their per-parent lookup never ran, and
+      companions preserved because their parent point read never ran on
+      an incomplete scan (15.2.3, 15.2.4). */
   suppressedCreates: number;
   suppressedDeletes: number;
   /** Route economics for the run (13.3, 23.3). */
@@ -699,7 +707,17 @@ Use Advanced Calendar service `Calendar.Events.list` with:
 
 One call covers both ranges. Read over the **observation** range, then apply the planning range when deciding which source events to evaluate — a source that does not overlap `[planStart, planEnd)` is reported `OUTSIDE_WINDOW`.
 
-The scan is driven to completion **when time permits**, and its completeness is reported rather than assumed: `listWindowEvents(calendarId, observeStart, observeEnd, shouldStop)` checks the guard between pages and, when the execution deadline nears, returns the safely retrieved prefix with `scanComplete: false` instead of consuming every `nextPageToken` unconditionally. A busy 180-day calendar (or a slow Calendar API) can span enough pages that a paginate-to-completion contract would spend the whole runtime inside one repository call, hard-killing the execution before any of the engine's own budget checks — no partial result, no continuation. A truncated read is already a first-class state everywhere downstream: absence-based operations are suppressed (§15.2.4), the sweep is skipped (§15.2.8), and the high-water mark stays put (§7.6), so returning early degrades the run to `partial` rather than to nothing.
+The scan is driven to completion **when time permits**, and its completeness is reported rather than assumed: `listWindowEvents(calendarId, observeStart, observeEnd, shouldStop, resumeToken)` checks the guard between pages and, when the execution deadline nears, returns the safely retrieved prefix with `scanComplete: false` **and the `nextPageToken` it stopped at** instead of consuming every page unconditionally. A busy 180-day calendar (or a slow Calendar API) can span enough pages that a paginate-to-completion contract would spend the whole runtime inside one repository call, hard-killing the execution before any of the engine's own budget checks — no partial result, no continuation. A truncated read is already a first-class state everywhere downstream: orphan deletions are suppressed (§15.2.4), the sweep is skipped (§15.2.8), and the high-water mark stays put (§7.6), so returning early degrades the run to `partial` rather than to nothing.
+
+**Truncated scans are resumable, or continuations spin.** The listing mutates nothing it lists, so a continuation that re-issues the same query from the first page retrieves the same prefix, truncates at the same depth, and schedules another continuation — on a calendar too large for one execution budget, the chain burns its whole allowance re-reading the front of the range while later sources go unreconciled indefinitely. The engine therefore persists the stopping point of a truncated non-dry scan (`dtp.windowScanCursor`: the `nextPageToken` plus the **pinned** observation range that produced it — a page token is valid only for its own query, and successive slices must tile one span), and **continuation and daily runs resume it** — the daily run too, because a chain longer than one day's continuation allowance must survive the episode boundary or the tail of the range is never reached; on ordinary calendars no cursor is pending at daily time and the daily run scans fresh as always.
+
+The pending cursor is **owned by the chain**. A calendar-trigger or manual run scans fresh — a full pass is its purpose — but when its own scan truncates it must **not overwrite a pending cursor**: on busy calendars such runs fire on every edit, and each overwrite would reset the chain to slice one, perpetually starving the tail. A fresh truncated run *starts* a chain only when no cursor is stored; a fresh **complete** scan clears any pending cursor (full coverage makes the chain moot). A resumed run advances the cursor when it truncates and clears it when it walks off the end — the **chain** finished, not this run's coverage: a resumed run's own coverage is its slice only, so the engine treats it as `scanComplete: false` downstream *however far the listing gets*. All cursor writes are non-dry only and guarded bookkeeping (§18.2, `BOOKKEEPING_PERSIST_FAILED`): a lost cursor restarts the scan from the front — wasteful, never wrong — and the repository treats an expired or rejected resume token the same way, falling back to a fresh scan rather than failing the run. The pinned range governs the *listing* only; eligibility still evaluates against the run's own planning range.
+
+What slices deliver: presence-based work for every slice, creates through the §15.2.7 lookup, and orphan deletes through §15.2.3's parent point reads — each gated on per-event evidence rather than scan completeness (§15.2.4). What still requires a genuinely complete scan degrades on such calendars and is accepted explicitly (§15.2.4): duplicate convergence and the §15.2.8 sweep.
+
+**Division of labor between the chain and fresh runs.** A resumed continuation reads the *next* slice, so it cannot re-plan work an earlier slice deferred — deferred operations and route-starved planning belong to the slice that produced them and are drained when that slice is next *read*. That is not the chain's job: fresh runs (calendar triggers on every edit, manual clicks, and — chain permitting — the daily run) re-read the range from the front, so the front-of-window slice, which holds the soonest and most user-visible events, is also the most frequently re-planned. The chain's job is the tail nothing else reaches. `continuationStillUseful` reflects this: while a chain is unfinished, coverage is itself the cause; a chain-finishing run re-enqueues only for its *own* remaining causes.
+
+**One accepted residual**: a cursor pending at daily time makes the daily run resume the chain instead of scanning fresh, so a day's sweep and front-of-window re-plan can slip to the *next* daily run when a chain died mid-way (the documented case: a truncated calendar-trigger run whose continuation enqueue failed on trigger quota). On a quiet calendar with no intervening edits that is up to ~48 hours of deferral for the failed run's work — a bounded degradation in a compound-failure case, accepted in preference to the alternative, where a daily fresh scan overwrites the chain's progress and the tail of an oversized calendar is starved *permanently*.
 
 Whether every page was retrieved determines if an unmatched companion can safely be treated as an orphan (§15.2.3), so the repository reports scan completeness alongside the events.
 
@@ -1488,7 +1506,7 @@ Convert signed byte values to two-digit hexadecimal.
 
 For every desired key:
 
-- no observed event: **out-of-window lookup, then create** — the engine checks for a managed companion the scan cannot see before creating (§15.2.7), and creates only when the scan was complete (§15.2.4);
+- no observed event: **out-of-window lookup, then create** — the engine checks for a managed companion the scan cannot see before creating (§15.2.7), and the create proceeds only after that lookup clears it, whatever the scan's coverage (§15.2.4);
 - one observed event, desired `eventType` differs from observed: **replace** — delete and recreate (see §15.2.5). The same branch fires for an `outOfOfficeProperties` difference **if** the open patchability question resolves against patching the field (§16.5, `docs/open-questions.md`): a difference whose only write path is replacement must classify as replace here, or the update branch below issues a patch Calendar rejects identically on every run — the permanent failure loop §15.2.5 exists to prevent;
 - one observed event, fingerprint matches **and** owned fields match, **and** the route cache needs persisting: **metadata patch** (see §15.2.2);
 - one observed event, fingerprint matches **and** owned fields match, cache fine: **unchanged**;
@@ -1552,12 +1570,17 @@ See §16.6.
 
 A source event can leave the observation range entirely — moved months out, or deleted. Its old companions stay behind inside the range. If an absent parent always meant preserve, those companions would never be deleted; they would simply age out of the read range still sitting on the user's calendar, violating REQ-RECON-009.
 
-So an absent parent means **orphaned**, and orphans are deleted — but only when the scan that failed to find the parent was complete. A run truncated by pagination failure or execution budget has not established that the parent is gone, only that it was not reached.
+So an absent parent means **orphaned**, and orphans are deleted — but only on evidence strong enough to prove the absence. A complete scan is that evidence. A run truncated by pagination failure or execution budget has not established that the parent is gone, only that it was not reached — but it can **upgrade its evidence per event**: one `getEventById` point read of the unmatched companion's parent, the same rule the §15.2.8 sweep already trusts ("`getEventById` returning nothing means the resource is gone, not that a page went unretrieved").
 
 ```text
-scanComplete && parent not found   ->  orphan, delete
-!scanComplete && parent not found  ->  unknown, preserve
+scanComplete && parent not found            ->  orphan, delete
+!scanComplete && point read: parent absent
+                 or cancelled               ->  orphan, delete
+!scanComplete && point read: parent LIVE    ->  preserve this run
+!scanComplete && point read never ran       ->  unknown, preserve
 ```
+
+A live parent on an incomplete scan is preserved *whatever its position*: unlike the sweep, a truncated run cannot distinguish "on an unread page" from "moved out of range", and preserving is the safe default — the complete-scan path and the sweep own those cases. The point reads run in a budget-guarded engine post-pass (`resolveUnmatchedCompanions`, checked between reads like every unbounded loop); companions whose read never ran stay preserved and count in `suppressedDeletes`. This is what keeps orphan cleanup alive on calendars too large for any single-budget scan (§7.2.1) — without it, a deleted source's companions would survive every truncated run forever.
 
 The distinction that matters is *evaluated and failed* versus *not present at all*. Only the former is a planning failure; the latter is ordinary cleanup.
 
@@ -1567,22 +1590,26 @@ The distinction that matters is *evaluated and failed* versus *not present at al
 
 The rule §15.2.3 states for deletes applies with equal force to creates, because both are **absence-based**: they act on what the scan failed to find rather than on anything it read.
 
-A truncated scan can cut between a source event and its own companion. Pagination fails after the page carrying the source but before the page carrying its return block; the source is planned, the desired return spec finds no observed match, and an absence-gated-only-for-deletes comparator creates a second return block. Every partial run repeats it, and §13.5's duplicate convergence cannot help until a *complete* scan finally reads both copies — this is the same blindness that produced the window-edge duplicates, arriving through a different door.
+A truncated scan can cut between a source event and its own companion. Pagination fails after the page carrying the source but before the page carrying its return block; the source is planned, the desired return spec finds no observed match, and a blindly absence-gated comparator creates a second return block. Every partial run repeats it, and §13.5's duplicate convergence cannot help until a *complete* scan finally reads both copies — this is the same blindness that produced the window-edge duplicates, arriving through a different door.
 
 So the diff outcomes divide by what they rely on:
 
 | Operation | Based on | On incomplete scan |
 |---|---|---|
-| create | absence | **suppressed** |
-| delete (orphan) | absence | **suppressed** (§15.2.3) |
+| create | absence, **upgraded by the §15.2.7 lookup** | proceeds **only through the lookup** |
+| delete (orphan) | absence, **upgraded by a parent point read** | proceeds **only via the point read** (parent absent or cancelled, §15.2.3) |
 | update | an observed event | proceeds |
 | replace (§15.2.5) | an observed event | proceeds |
 | metadata patch | an observed event | proceeds |
 | unchanged | an observed event | proceeds |
 
+Both absence-based operations upgrade to **per-event complete evidence** on an incomplete scan. Every pending create passes through §15.2.7's **unbounded per-parent companion lookup** before application — complete for that parent regardless of how much of the window the scan covered; a create the lookup cleared cannot duplicate anything (the truncated-scan scenario above lands in the lookup, finds the unread return block, and converts the create into an update of it). Every unmatched observed companion gets a **parent point read** (§15.2.3) — absent or cancelled proves the orphan, a live parent preserves it this run. Scan completeness was only ever an approximation of per-event evidence, and gating on the evidence itself is what lets the resumable slices of §7.2.1 make creation *and* cleanup progress on calendars no single budget can list.
+
+Two absence-based mechanisms genuinely require a complete scan and **degrade on calendars beyond any single execution budget**, and the design accepts both residuals explicitly: §13.5's duplicate convergence (duplicates arise only from past defects or races, and each slice still converges duplicates it co-observes) and the §15.2.8 sweep (its state-keyed rules need trustworthy planning outcomes; out-of-observation strays on such calendars persist until remove-all, which reaches everything).
+
 Presence-based operations proceed because the events they touch were actually read — their data is real regardless of what the scan missed. Suppressing them too would discard sound work and make a flaky page fetch cost a whole run.
 
-A run with suppressed operations reports `partial`, records the suppressed counts in diagnostics, and relies on retry — the next trigger, continuation, or daily run — to complete the scan and perform them.
+A run with suppressed operations reports `partial`, records the suppressed counts in diagnostics (`suppressedCreates` counts creates whose lookup never ran — the engine skips application entirely when the lookup pass is cut short, §15.2.7 — and `suppressedDeletes` counts companions preserved because their parent point read never ran), and relies on retry — the next trigger, continuation, or daily run — to complete the coverage and perform them.
 
 Replacements proceed on an incomplete scan for the same reason updates do: both halves of a replacement act on an event the scan actually read.
 
@@ -1630,6 +1657,8 @@ listCompanionsByParent('primary', spec.parentEventId)
 ```
 
 Any returned managed event whose `parent|role` key matches the absent desired key is **updated** to the desired specification — the standard restoration path, applied to an event found by targeted read instead of window scan. Only when the lookup finds nothing does the create proceed.
+
+This lookup is also what **licenses creates on incomplete scans** (§15.2.4): it is complete for its parent whatever the window scan covered, so a cleared create cannot duplicate a companion sitting on an unread page — the lookup finds that companion and converts the create to an update of it. When the pass's `shouldStop` guard fires before every pending create was resolved, the engine skips application entirely (below), so a create never applies without its lookup having run.
 
 The comparator stays pure: it has no repository access, so it emits the create and the engine post-processes the diff, converting creates to updates where the lookup finds a match — the same engine-side pattern as the overlong and window-shrink cleanups. One lookup covers both roles of a parent. (It is never shared with a §15.2.6 lookup: that pass fires only for ineligible parents, while a pending create requires a planned one — the two conditions are mutually exclusive per parent.)
 
@@ -2097,13 +2126,13 @@ MANUAL_ENQUEUE_FAILED
 
 `STATUS_PERSIST_FAILED`: `saveRunStatus` threw. **Every** persistence site is guarded — the success path, the error boundary, and both validation-gate branches (structural invalidity and write-readiness) — through one shared wrapper, `saveRunStatusGuarded(result)`, which is the *only* way the engine calls `saveRunStatus`: four hand-rolled copies of the same guard would drift apart the first time one is tweaked. A run's returned result must survive a Properties outage whichever exit it takes, so the wrapper joins the code to the *returned* result's `warnings` (the result is still in hand at all four sites, unlike the finally-block spend record) as well as logging it. Each site's guard protects something specific. The success path: an unguarded save throwing into the boundary would rebuild a run Calendar fully accepted as `failed`, and — should Properties recover for the boundary's retry — persist an affirmatively **false** failure record with zero applied counts (REQ-ERROR-006 violated in storage). The validation gates: the throw would *replace* the `INVALID_SETTINGS` result, and with it the full validation error list that carries the card's reset guidance, with a generic persistence failure. The boundary's own save: retrying an unavailable write unguarded would throw past the boundary, leaving trigger callers with no structured result at all. A persistence outage therefore degrades to "truthful result returned, stored record stale until the next successful persist, warning attached" — never to a lie about what Calendar did.
 
-`BOOKKEEPING_PERSIST_FAILED`: a post-apply bookkeeping write threw — the shrink high-water mark, the sweep watermark, or the continuation-counter reset. Guarded because Calendar has already accepted the run's operations by the time these fire: an escaping throw would rebuild an applied run as a failure with an empty diff. Losing any of them is **safe by construction** — an unlowered mark re-scans and retries next run, an unadvanced watermark widens the next sweep's bounds over the gap, and a stale continuation counter costs at most one episode's allowance (§19.6). All three sites use `recordRunWarning`, which appends *and* logs; the run's diagnostics object is created once and carried by reference into the built result, so the one mechanism works before and after `buildRunResult` — three hand-rolled variants would drift exactly as the shared `saveRunStatusGuarded` rationale warns.
+`BOOKKEEPING_PERSIST_FAILED`: a bookkeeping write threw — the shrink high-water mark, the sweep watermark, or the continuation-counter reset (all post-apply, where Calendar has already accepted the run's operations and an escaping throw would rebuild an applied run as a failure with an empty diff), or the window-scan cursor save/clear (pre-apply, where an escaping throw would fail a run whose listing succeeded). Losing any of them is **safe by construction** — an unlowered mark re-scans and retries next run, an unadvanced watermark widens the next sweep's bounds over the gap, a stale continuation counter costs at most one episode's allowance (§19.6), and a lost cursor restarts the scan from the front (§7.2.1). All sites use `recordRunWarning`, which appends *and* logs; the run's diagnostics object is created once and carried by reference into the built result, so the one mechanism works before and after `buildRunResult` — hand-rolled variants would drift exactly as the shared `saveRunStatusGuarded` rationale warns.
 
 `CONTINUATION_ENQUEUE_FAILED`: `enqueueContinuation`'s trigger creation threw (per-user trigger quota, transient ScriptApp error). Emitted from **two call sites with different carriers** (§19.6): the engine's partial-run call joins the returned result's `warnings` — the run's applied operations are real, and rebuilding it as a failure would be a false record — while the handler's skip-path re-enqueue is **log-only**, because a lock-contention skip did no work and has no persisted result to carry the code. Either way the deferred work falls to the daily backstop (REQ-TRIGGER-002).
 
 `MANUAL_ENQUEUE_FAILED`: the manual handler's skip-path re-enqueue threw (§19.5) — the same throwable trigger-creation API, guarded for the same reason. **Log-only**: a skipped run's result is never persisted or rendered. The failure stays honest without a carrier because manual pendingness is *derived* from the trigger list — the home card shows no run pending and the button invites a retry. The card action's own enqueue is deliberately unguarded: it fails synchronously in front of the user as the action's error response, which is the correct surface.
 
-`DIAGNOSTIC_SPEND_RECORD_FAILED`: the hourly diagnostic-spend write threw inside the engine's `finally`. The failure is caught and **logged** with this code rather than rethrown — an accounting error must not replace the run's already-built structured result or strand the user lock (Architecture §14.2). It cannot retroactively join that run's `warnings`: the result was assembled and persisted before the `finally` ran. The ceiling is protected from the other side instead — `diagnosticBudgetRemaining` **fails closed**, returning `0` when its own Properties read throws, so an outage that breaks spend *writes* (the same service) cannot simultaneously mint fresh allowances; at worst one run's spend goes unrecorded against a working counter.
+`DIAGNOSTIC_SPEND_RECORD_FAILED`: the allowance **refund** threw inside the engine's `finally` (§20.3). The failure is caught and **logged** with this code rather than rethrown — an accounting error must not replace the run's already-built structured result or strand the user lock (Architecture §14.2). It cannot retroactively join that run's `warnings`: the result was assembled and persisted before the `finally` ran. And a lost refund is the *safe* side of the reserve-then-refund design: the reservation was written before the first broker call, so the hour under-grants until the bucket rolls over — the ceiling is never exceeded. (`reserveDiagnosticAllowance` fails closed on its own errors, granting `0`, so both failure directions land conservative.)
 
 `ROUTE_TOO_LONG` and `ROUTE_BUDGET_EXCEEDED` are both **planning failures**, not ineligibility. Per §17.3 they preserve existing generated events rather than deleting them.
 
@@ -2198,7 +2227,7 @@ The unbounded scan plus one conditional delete per historical companion **cannot
 3. re-checks `settings.enabled`: if the user re-enabled the add-on between passes, the cleanup **aborts** and marks the progress record `aborted` — deleting companions a re-enabled automation is actively maintaining would just churn recreations against the user's changed intent;
 4. **interleaves paging and deletion** rather than scanning to completion first: fetch one ownership-filtered page (`listGeneratedEventsPage`), delete its events through `deleteGeneratedEvent` — §15.3's marker rule and §16.5.1's conditional delete apply unchanged — checking `elapsedExceedsExecutionBudget` between pages and between deletions (§23.1). A materialize-everything-then-delete contract would put the entire multi-page scan ahead of the first budget check: a history large enough to spend the deadline on pagination alone would hard-kill the worker mid-scan, and — with no cursor to resume from — every retry would repeat the same full scan and die the same way, forever. The walk order within a pass: attempt every event on the fetched page that has not already failed this pass; if the page produced **any successful deletion**, re-fetch from the start (the set shrank, and the first page now holds fresh work); if it produced **none** — every event on it already failed — advance via `nextPageToken` instead (the **no-progress guard**: re-fetching an all-failing first page would spin forever). The scan is **complete only when this walk runs off the end of the listing** — a fetch yields no attemptable events *and* no `nextPageToken` — meaning every remaining managed event was attempted this pass and either deleted or recorded as a failure; an all-failing first page is *not* completion, it is the cue to advance to the pages behind it. Interleaving needs no persisted cursor: each deletion shrinks the result set, so re-fetching the first page after a kill or a re-enqueue naturally resumes where the deletions stopped, and cross-pass, failed events are simply retried. When the budget expires with work remaining, the worker folds the pass's counts into the progress record, re-enqueues itself, and exits;
 5. working passes are capped at `MAX_REMOVAL_PASSES` (recommended 20 — a generous multiple of any realistic history at ~thousands of deletions per pass). At the cap the record is marked failed with the counts so far; the action can be offered again;
-6. on the **fully-successful** terminal outcome (scan complete, zero failures), clear the remaining stored state — the high-water mark, the continuation counter, the diagnostic spend counter, the sweep watermark, the last-run record. A `failed` outcome retains those alongside `CleanupProgress` for the retry. **The worker never writes the settings document** — the tombstone was the card action's step 2, so no terminal path (including the contention cap) has settings work left to do, no path can clobber a mid-flow re-enable's freshly-entered configuration, and the old unlocked-tombstone race is gone by construction.
+6. on the **fully-successful** terminal outcome (scan complete, zero failures), clear the remaining stored state — the high-water mark, the continuation counter, the diagnostic spend counter, the sweep watermark, the window-scan cursor, the last-run record. A `failed` outcome retains those alongside `CleanupProgress` for the retry. **The worker never writes the settings document** — the tombstone was the card action's step 2, so no terminal path (including the contention cap) has settings work left to do, no path can clobber a mid-flow re-enable's freshly-entered configuration, and the old unlocked-tombstone race is gone by construction.
 
 **The enable flow acquires the same user lock before persisting `enabled = true`** (and is rejected with a cleanup-in-progress notice while a pass holds it), so a re-enable can only land between passes, where the next pass's step-3 check sees it and aborts.
 
@@ -2323,6 +2352,8 @@ Like continuations, this depends on one-off trigger creation and is therefore **
 
 §23.4 promises that a `partial` run schedules its own continuation, with a do-not-stack rule and a cap of `MAX_CONSECUTIVE_CONTINUATIONS`. This section is the worker behind that promise — without it, the constant and the requirement exist but nothing can enforce either rule.
 
+A continuation run also **resumes a truncated window scan** where its predecessor stopped: it loads the persisted scan cursor (§7.2.1) and lists from there, pinned to the stored observation range, so a chain of continuations tiles a calendar too large for any single execution budget instead of re-reading the same prefix until the cap.
+
 The trigger machinery mirrors manual synchronization (§19.5): pendingness derived from the trigger list, handler deletes its own trigger on entry.
 
 ```javascript
@@ -2389,7 +2420,7 @@ The **counter lifecycle** is what makes the cap enforceable:
 - stored in User Properties under `dtp.continuationCount` — unlike pendingness it cannot be derived, because it must survive across runs;
 - **incremented by the engine, under the user lock, after the cheap gate checks and before the window read** (`reason === 'continuation'`, non-dry): the lock is what serializes the counter against the concurrent successful run that resets it — a handler-side increment races that reset, losing it or leaving a stale refund. Counting before substantive work preserves crash-safety: a continuation that dies mid-run still counted itself. The gate checks it sits behind cannot loop on the allowance either — each one either terminates the episode (a failed result schedules nothing) or is transient (a skip re-enqueues without counting);
 - a `skipped` run never touched the counter (the increment is behind the lock it failed to take), so there is no refund path — the handler simply re-enqueues;
-- reset to `0` by any **non-dry** run that completes with status `success`, whatever its reason — success means the deferred work drained, so the next `partial` episode starts a fresh allowance. Increment and reset are both under the lock, so they cannot interleave;
+- reset to `0` by any **non-dry** run that completes with status `success`, whatever its reason — success means the deferred work drained, so the next `partial` episode starts a fresh allowance — **and unconditionally at the start of every daily run**, which makes the daily trigger the episode boundary. The daily reset is what keeps the cap a *bound* without making it a *death sentence*: on a calendar too large for any single scan no run is ever `success`, so a success-only reset would let the counter hit the cap once and disable continuations permanently, while resetting on mere chain completion would let a persistently-partial cause chain fresh scans forever with the counter never accumulating — the unbounded loop the cap exists to stop. Between daily runs the cap holds absolutely; each day starts a fresh allowance, and a scan chain longer than one day's allowance survives the boundary through the persisted cursor, which the daily run resumes (§7.2.1). Increment and reset are both under the lock, so they cannot interleave;
 - when the cap is reached, `enqueueContinuation` returns `capReached: true` and the engine records it as `diagnostics.continuationCapReached` on the run result — the field's home in the §4.11 contract, which is where status persistence and the UI read it;
 - the engine's call is **guarded**: `ScriptApp.newTrigger(...).create()` can throw — the per-user trigger quota is the obvious case — and the partial result in hand describes operations Calendar already *accepted*. An unguarded throw would reach the error boundary and rebuild the run as a generic failure with an empty diff, discarding the true applied counts (the same false-record hazard as an unguarded status save). The engine catches the failure, keeps the truthful partial result, records a `CONTINUATION_ENQUEUE_FAILED` warning (§18.2), and lets the deferred work wait for the daily backstop (REQ-TRIGGER-002).
 
@@ -2478,21 +2509,30 @@ const DIAGNOSTIC_ROUTE_CALLS_PER_HOUR = 20;
 // Hour-bucketed counter in User Properties: { "bucket": "2026-08-09T22", "used": 3 }.
 // Read and written under the user lock the run already holds, so the
 // read-modify-write is serialized without extra machinery.
-diagnosticBudgetRemaining(now)
-  -> Math.max(0, DIAGNOSTIC_ROUTE_CALLS_PER_HOUR - usedThisHour)
 
-// Engine, when building the run's budget:
-const routeBudget = {
-  remaining: options.reason === 'event-diagnostic'
-    ? diagnosticBudgetRemaining(now)
-    : MAX_ROUTE_CALLS_PER_RUN,
-};
+// RESERVE before routing, REFUND after -- never spend-then-record.
+// Reads the bucket, writes used = DIAGNOSTIC_ROUTE_CALLS_PER_HOUR
+// (the whole remaining allowance is reserved), returns the grant:
+// Math.max(0, DIAGNOSTIC_ROUTE_CALLS_PER_HOUR - usedThisHour).
+// FAILS CLOSED: any Properties error -- read or write -- returns 0.
+reserveDiagnosticAllowance(now) -> grantedCount
 
-// After the run (diagnostic reason only): persist what was spent.
-recordDiagnosticRouteSpend(initialRemaining - routeBudget.remaining, now);
+// Engine, when building a diagnostic run's budget:
+initialBudget = reserveDiagnosticAllowance(now);   // BEFORE any broker call
+const routeBudget = { remaining: initialBudget };
+
+// After the run (finally block): refund what was NOT spent -- a
+// DECREMENT (used = max(0, used - unspent)), never an absolute write,
+// and skipped entirely when nothing was granted: a reservation that
+// failed closed reserved nothing, and an absolute-style refund landing
+// after Properties recovered would clobber the bucket with a full
+// reservation nothing took.
+refundDiagnosticAllowance(initialBudget - spent, now);
 ```
 
-The spend is recorded even though diagnostics are dry runs — the broker calls happened regardless of whether Calendar was written, and the counter exists to bound exactly those calls. A fresh hour bucket resets the allowance; without the ceiling, reopening the card across a day of appointments issues up to 60 attempts per open with no cumulative bound.
+Reservation order is the point. The retired spend-then-record shape had a one-sided failure: the broker attempts happen, the *post-call* counter write throws, the next read sees the stale count, and the next card open is granted the same allowance again — actual calls exceed the ceiling, and a fail-closed *read* is powerless because the stored count is simply wrong. Reserving the full grant before the first broker call inverts the failure mode: the counter records intent ahead of spend, so if the **refund** write later fails, the hour under-grants (the reservation conservatively stands) instead of over-spending. Both failure directions now land on the safe side: a failed reservation write grants nothing, a failed refund write forfeits allowance until the bucket rolls over — at most one hour's degradation, never an unbounded ceiling breach.
+
+The reservation is taken even though diagnostics are dry runs — the broker calls happen regardless of whether Calendar is written, and the counter exists to bound exactly those calls. A fresh hour bucket resets the allowance; without the ceiling, reopening the card across a day of appointments issues up to 60 attempts per open with no cumulative bound.
 
 #### Where diagnostic routes are cached
 
@@ -2701,9 +2741,9 @@ A run that stops at `MAX_ROUTE_CALLS_PER_RUN` leaves real work undone. Relying o
 A run ending with status `partial` must therefore schedule its own continuation:
 
 - create a one-off time-based trigger a few minutes out;
-- the continuation is an ordinary reconciliation, not a resumed cursor — reconciliation is idempotent, and the events completed in the previous pass now have valid cache entries, so they cost nothing;
+- the continuation is an ordinary reconciliation for everything except the window scan: planning is recomputed idempotently over what it reads, and events completed in the previous pass have valid cache entries, so they cost nothing — but a **truncated window scan is resumed from its persisted cursor** (§7.2.1), because re-listing the same prefix on a calendar too large for one budget would repeat the same slice until the cap with no forward progress. A resumed continuation therefore re-plans the *next* slice, not the one that deferred work — earlier slices are re-planned when a fresh run next reads them (§7.2.1's division of labor);
 - do not stack continuations: if one is already pending, do not create another;
-- cap consecutive continuations (recommended 10) so a persistent failure cannot loop indefinitely, and report the cap in run status.
+- cap consecutive continuations (recommended 10) so a persistent failure cannot loop indefinitely, and report the cap in run status. The counter resets on success **and at the start of every daily run** — the episode boundary that keeps the cap a bound without letting one over-long scan chain disable continuations permanently (§19.6); a chain longer than a day's allowance survives the boundary through its persisted cursor, which the daily run resumes. After a **finished** chain, scan coverage never re-enqueues (a fresh chain would re-tile identical work); only the other deferred causes — deferred operations, an out-of-time application, an exhausted route budget — justify another pass, and a pass they justify may re-tile as a side effect, bounded by the day's remaining allowance.
 
 The worker, the do-not-stack check, and the counter lifecycle that enforces the cap are specified in §19.6.
 

@@ -5,7 +5,15 @@
 
 /**
  * Lists every event in the observation range, following nextPageToken
- * until done OR shouldStop() fires, returning { events, scanComplete }.
+ * until done OR shouldStop() fires, returning
+ * { events, scanComplete, nextPageToken } -- nextPageToken non-null
+ * exactly when the listing stopped early, so the ENGINE can persist it
+ * and a continuation can resume the scan instead of re-reading the same
+ * prefix forever on a calendar too large for one execution budget
+ * (section 7.2.1). resumeToken, when provided, starts the listing there
+ * -- valid only for the SAME query (the engine pins the stored
+ * observation range); an expired or rejected token falls back to a
+ * fresh scan from the first page, never a thrown run.
  *
  * Pagination is not optional, and scanComplete is not decoration. Silent
  * truncation would make source events invisible while their companions remain
@@ -16,7 +24,8 @@
  * budget check -- an early return with scanComplete false degrades the run
  * to partial instead of a hard kill (section 7.2.1).
  */
-function listWindowEvents(calendarId, observeStart, observeEnd, shouldStop) {
+function listWindowEvents(
+    calendarId, observeStart, observeEnd, shouldStop, resumeToken) {
   throw new Error('Not implemented: Technical Design section 7.2.1');
 }
 

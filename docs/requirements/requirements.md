@@ -852,11 +852,11 @@ A generated event whose source event is absent from a **complete** scan shall be
 
 Preservation shall not be extended to every unevaluated parent. Doing so would strand generated events whose source moved outside the read range, leaving stale travel blocks that age out of view without ever being removed.
 
-### REQ-RECON-013: Absence-based writes require a complete scan
+### REQ-RECON-013: Absence-based writes require complete evidence
 
-Creates and orphan deletions shall be performed only when the observation scan that failed to find the corresponding event completed successfully.
+Orphan deletions shall be performed only on complete evidence of the parent's absence: a complete observation scan that did not contain it, or — on an incomplete scan — an individual point read proving the parent absent or cancelled; a live parent, or a point read that did not run, preserves the companion for that run. Creates shall be performed only after an individually complete companion lookup for the parent (the REQ-RECON-016 lookup) found no existing companion for the desired key — evidence that is complete for that parent regardless of scan coverage; a create whose lookup did not run shall be withheld.
 
-Both operations act on absence, and a truncated scan can cut between a source event and its own companion — planning the source while its existing companion sits on an unretrieved page, so an absence-gated create would duplicate it on every partial run. Operations based on events actually read (updates, metadata patches) may proceed.
+Both operations act on absence, and a truncated scan can cut between a source event and its own companion — planning the source while its existing companion sits on an unretrieved page. The per-parent lookup finds that companion and converts the create into an update, and the per-parent point read distinguishes a genuinely deleted parent from one merely unread — which together make creation and cleanup progress possible on calendars too large for any single scan. Operations based on events actually read (updates, metadata patches) may proceed.
 
 ### REQ-RECON-010: Dry-run support
 

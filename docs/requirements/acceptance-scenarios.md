@@ -495,12 +495,26 @@ Patching only the duration and timestamp would leave the bad hash in place, so t
 **And** an observation scan that fails after reading the source but before reaching its return block  
 **When** reconciliation runs  
 **Then** the run records `scanComplete: false`  
-**And** no create is performed for the seemingly missing return block  
-**And** no orphan deletion is performed  
+**And** the pending create for the seemingly missing return block is resolved through the unbounded per-parent companion lookup, which finds the existing block — it is **updated**, never duplicated  
+**And** orphan deletion proceeds only for unmatched companions whose parent a point read proves absent or cancelled; a live parent — on an unread page or moved away, indistinguishable here — preserves its companion this run  
 **And** updates and metadata patches for events that were read proceed normally  
 **And** the run reports `partial`.
 
-Creates and deletes both act on absence, and a truncated scan proves only that an event was not reached — not that it does not exist.
+Creates and deletes both act on absence, and a truncated scan proves only that an event was not reached — not that it does not exist. Both upgrade to per-event evidence: the create's parent lookup is complete for that parent whatever the scan covered, and the delete's parent point read proves absence the same way the daily sweep's absent-parent rule does.
+
+## AC-RECOVERY-017: Continuations advance through a calendar too large for one scan
+
+**Given** a calendar whose observation range spans more pages than one execution budget can list  
+**When** a run truncates its window scan and schedules a continuation  
+**Then** the truncated run persists the listing cursor pinned to its observation range  
+**And** the continuation resumes listing from that cursor instead of re-reading the same prefix  
+**And** successive passes plan, update, and — through the per-parent lookup — create for successive slices of the calendar  
+**And** unmatched companions in each slice are deleted only on a point read proving their parent absent or cancelled, and preserved otherwise  
+**And** a chain longer than one day's continuation allowance survives the episode boundary: the daily run resets the allowance and resumes the pending cursor  
+**And** intervening calendar-trigger runs scan fresh without overwriting the chain's pending cursor  
+**And** a lost or expired cursor degrades to a fresh scan from the front, never to an error.
+
+Without the cursor, every continuation re-issues the same query from the first page, retrieves the same prefix, and truncates at the same depth — the chain reaches the continuation cap having repeated itself, and every source past the truncation point stays unreconciled indefinitely.
 
 ## AC-ORIGIN-005: Place ID origin survives the return route
 

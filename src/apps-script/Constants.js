@@ -87,7 +87,11 @@ const OBSERVE_HIGH_WATER_KEY = 'dtp.observeHighWater';
 const CONTINUATION_COUNT_KEY = 'dtp.continuationCount';
 // Hour-bucketed diagnostic broker spend: { bucket, used }. Read and written
 // under the user lock; feeds the RouteBudget when reason is
-// event-diagnostic. Technical Design section 20.3.
+// event-diagnostic. Reserve-then-refund: the whole remaining allowance
+// is written as used BEFORE any broker call and the unspent remainder
+// refunded in the engine's finally, so neither a failed reservation
+// (grants 0) nor a failed refund (under-grants for the hour) can exceed
+// the ceiling. Technical Design section 20.3.
 const DIAGNOSTIC_SPEND_KEY = 'dtp.diagnosticRouteSpend';
 // Remove-all cleanup progress: survives the worker's re-enqueues and feeds
 // the home card's status surface. Technical Design section 19.4.
@@ -96,6 +100,15 @@ const REMOVAL_PROGRESS_KEY = 'dtp.removalProgress';
 // complete. Stretches the sweep's updatedMin bound and anchor band over
 // gaps of skipped or incomplete sweeps. Technical Design section 15.2.8.
 const SWEEP_COMPLETED_AT_KEY = 'dtp.sweepCompletedAt';
+// Resumable window-scan cursor: { pageToken, observeStart, observeEnd }.
+// Saved when a truncated non-dry scan STARTS or ADVANCES a chain (a
+// fresh truncated run never overwrites a pending cursor -- the chain
+// owns it); resumed by continuation AND daily runs, PINNED to the stored
+// range; cleared by chain completion, a fresh COMPLETE non-dry scan, and
+// remove-all; dry runs never touch it. Without it a calendar too large
+// for one execution budget makes every continuation re-read the same
+// prefix until the cap. Technical Design section 7.2.1.
+const WINDOW_SCAN_CURSOR_KEY = 'dtp.windowScanCursor';
 const CURRENT_SETTINGS_SCHEMA = 1;
 
 // Generated-event metadata. ADR 0009 -- this property is the deletion-safety

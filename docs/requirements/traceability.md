@@ -75,7 +75,7 @@ This matrix links requirement groups to architecture components, technical-desig
 
 | Requirement | Covers | Scenario |
 |---|---|---|
-| REQ-RECON-013 | Absence-based writes require a complete scan | AC-RECOVERY-009 |
+| REQ-RECON-013 | Absence-based writes require complete evidence (amended in the twentieth round: creates lookup-gated, deletions point-read-gated on incomplete scans) | AC-RECOVERY-009 |
 | REQ-PERF-017 | Schedule-only changes cost no broker calls | AC-CACHE-011 |
 | REQ-PERF-014 (extended) | Cache repair persists the full triplet including the hash | AC-CACHE-012 |
 | REQ-ROUTE-011 | Uniform typed endpoints in both directions | AC-ORIGIN-005 |
@@ -237,3 +237,11 @@ This matrix links requirement groups to architecture components, technical-desig
 | Architecture §14.2 (guarded gates) | Both validation-gate `saveRunStatus` sites guarded; the `INVALID_SETTINGS` result and its reset guidance survive a persistence outage | AC-RECOVERY-014 |
 | §18.2 (`BOOKKEEPING_PERSIST_FAILED`) | Post-apply bookkeeping writes guarded (high-water mark, sweep watermark, continuation reset); each loss is safe by construction | — §18.2 registry |
 | §17.6 (destination carried) | `EventDiagnostics.destination` copied from the source location at capture; the card shows REQ-UI-014's destination without a second read, never persisted | — §20.3 card |
+
+## Requirements added in the twentieth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| §20.3 (reserve-then-refund) | Diagnostic allowance reserved before any broker call and unspent remainder refunded; both failure directions land conservative — the ceiling is never exceeded by a lost write | AC-CACHE-004 |
+| §7.2.1 (resumable scan) | Truncated window scans persist a chain-owned cursor pinned to their range; continuation and daily runs resume it, fresh runs never overwrite it, and the daily run's counter reset is the episode boundary — passes tile a too-large calendar instead of re-reading the same prefix until the cap | AC-RECOVERY-017 |
+| REQ-RECON-013 (evidence-keyed) | Both absence operations upgrade to per-event evidence on incomplete scans: creates through the per-parent lookup, orphan deletions through a parent point read (absent/cancelled deletes, live preserves) | AC-RECOVERY-009 |

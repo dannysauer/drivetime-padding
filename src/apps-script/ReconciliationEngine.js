@@ -105,9 +105,13 @@ function orderForPlanning(events, now) {
 }
 
 /**
- * scanComplete gates BOTH absence-based operations. Creates and orphan
- * deletes act on what the scan failed to find; a truncated scan proves only
- * that an event was not reached. Presence-based operations (update, metadata
+ * scanComplete gates orphan DELETES only; creates are gated by the
+ * section 15.2.7 per-parent lookup, which is complete for its parent
+ * whatever the scan covered (15.2.4) -- that is what lets cursor-resumed
+ * slices (7.2.1) create for sources the first slice never read. Orphan
+ * deletes act on what the scan failed to find, and a truncated scan
+ * proves only that an event was not reached. Presence-based operations
+ * (update, metadata
  * patch, unchanged) proceed, because the events they touch were actually
  * read. Technical Design sections 15.2.3 and 15.2.4, REQ-RECON-013.
  */
@@ -160,6 +164,22 @@ function routeCacheFor(observedByKey, parentEventId) {
  */
 function resolveOutOfWindowCompanions(diff, cleanup, shouldStop) {
   throw new Error('Not implemented: Technical Design section 15.2.7');
+}
+
+/**
+ * Engine post-pass for INCOMPLETE scans (Technical Design 15.2.3,
+ * 15.2.4): upgrades orphan deletion to per-event evidence. One
+ * getEventById parent point read per unmatched observed companion --
+ * absent or cancelled proves the orphan (the same rule the 15.2.8 sweep
+ * trusts) and moves it into diff.deletes; a LIVE parent preserves the
+ * companion this run, because a truncated scan cannot distinguish an
+ * unread page from a moved-out-of-range parent. Checks shouldStop
+ * BETWEEN reads; companions whose read never ran stay preserved and
+ * count in diagnostics.suppressedDeletes. This is what keeps cleanup
+ * alive on calendars too large for any single-budget scan (7.2.1).
+ */
+function resolveUnmatchedCompanions(diff, planningOutcomes, shouldStop) {
+  throw new Error('Not implemented: Technical Design section 15.2.3');
 }
 
 /**

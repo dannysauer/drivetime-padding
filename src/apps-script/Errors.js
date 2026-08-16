@@ -34,8 +34,11 @@ const ERROR_CODES = {
   // Directive named an unconfigured home/office origin; resolution fell
   // back to default. Recorded by the engine, not the resolver (10.2).
   DIRECTIVE_ORIGIN_UNCONFIGURED: 'DIRECTIVE_ORIGIN_UNCONFIGURED',
-  // Hourly diagnostic-spend write threw in the engine finally; recorded,
-  // never rethrown -- accounting must not cost the run its result.
+  // The diagnostic-allowance REFUND threw in the engine finally; logged,
+  // never rethrown -- accounting must not cost the run its result. Safe
+  // by construction: the reservation was written before the first broker
+  // call, so a lost refund under-grants until the hour bucket rolls
+  // over, never over-spends (20.3).
   DIAGNOSTIC_SPEND_RECORD_FAILED: 'DIAGNOSTIC_SPEND_RECORD_FAILED',
   // saveRunStatus threw. EVERY persistence site is guarded -- success
   // path, error boundary, and both validation-gate branches; the code
