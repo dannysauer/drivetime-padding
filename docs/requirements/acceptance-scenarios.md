@@ -563,6 +563,11 @@ Without the observation range extending past `planEnd`, `timeMax` would exclude 
 **Then** every one of those states is reported as a structural `INVALID_SETTINGS` error on `schemaVersion` naming the version the chain could not get past — never a throw inside a trigger and never an unterminated migration loop —  
 **And** the settings card offers the reset-to-defaults path.
 
+**Given** instead `dtp.settings` holding truncated or otherwise malformed JSON  
+**When** settings are loaded  
+**Then** the parse failure is caught and reported as a structural `INVALID_SETTINGS` error rather than throwing before validation can run  
+**And** the settings card offers the same reset-to-defaults path.
+
 **Given** instead no stored settings document at all  
 **When** settings are loaded  
 **Then** the defaults apply directly — a fresh install is not a validation failure.

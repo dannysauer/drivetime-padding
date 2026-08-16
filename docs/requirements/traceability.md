@@ -208,3 +208,14 @@ This matrix links requirement groups to architecture components, technical-desig
 | §19.6 (aligned) | Continuation counter read via `PropertiesService.getUserProperties()`, matching the §5.1 User Properties storage convention | — snippet |
 | REQ-RECON-017 (maximal band) | Sweep anchor band reaches the largest configurable horizon, so a window shrink cannot hide a stray | AC-RECOVERY-015 |
 | REQ-GEN-014c | `outOfOfficeProperties` owned, compared, and restored; patch where Calendar permits, replacement otherwise | AC-RECOVERY-016 |
+
+## Requirements added in the seventeenth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| §17.1 (validated redirect) | Companion parent metadata validated before the diagnostic redirect; a blank or missing `parent` yields `PARENT_NOT_FOUND` with no repository calls on an invalid id | — §20.3 card |
+| §11.5 (reachable) | `muteHttpExceptions: true` is part of the routing-client contract; the no-response mapping is reserved for actual transport exceptions | — §11.5 table |
+| §20.3 (aligned) | Ephemeral cache stores `calculatedAt` as the canonical §4.7 ISO string, no `Date` conversion | AC-CACHE-010 |
+| §19.6 (guarded enqueue) | Continuation trigger creation failures caught at both call sites; truthful partial result kept with `CONTINUATION_ENQUEUE_FAILED` warning; deferred work waits for the daily backstop | — §19.6 |
+| §5.4 (guarded parse) | Malformed stored JSON caught in `loadSettings` and reported as structural `INVALID_SETTINGS` with the reset path | AC-CONFIG-001 |
+| §15.2.7 (scoped skip) | Restoration pass skipped on scoped diagnostics — the targeted read already performed the same lookup | — §17.1 |

@@ -39,9 +39,12 @@ function defaultSettings_() {
  *
  * Order: read the stored document; when ABSENT, the section 5.2 defaults
  * apply directly (fresh install -- migrateSettings_ is not called and no
- * INVALID_SETTINGS results); otherwise migrate first (section 5.4 -- an
- * unsupportedSchema result becomes a structural INVALID_SETTINGS error on
- * schemaVersion, never a throw), then deep-merge, then validate.
+ * INVALID_SETTINGS results); parse with JSON.parse GUARDED (malformed or
+ * truncated JSON becomes a structural INVALID_SETTINGS error on field
+ * `settings`, never a throw -- the section 5.4 guarded-parse contract);
+ * otherwise migrate first (section 5.4 -- an unsupportedSchema result
+ * becomes a structural INVALID_SETTINGS error on schemaVersion, never a
+ * throw), then deep-merge, then validate.
  *
  * Must deep-merge against defaults rather than Object.assign: a stored
  * document containing a partial nested object would otherwise drop the

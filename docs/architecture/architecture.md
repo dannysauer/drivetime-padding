@@ -815,14 +815,25 @@ function reconcile(options) {
       // desired state of its own, and diagnosing it directly would leave
       // its parent unevaluated -- the comparator would then classify the
       // very event the user is inspecting as an orphan and propose
-      // deleting it (technical design §17.1).
+      // deleting it (technical design §17.1). The parent id is VALIDATED
+      // before it is used: dtp=1 does not guarantee the rest of the
+      // metadata survived, and a blank or missing parent sent into the
+      // point read or the companion listing can throw before the
+      // PARENT_NOT_FOUND fallback below ever runs. An unresolvable
+      // redirect issues no further repository calls; the unresolved-
+      // diagnostics path then reports PARENT_NOT_FOUND for the clicked
+      // event.
       if (target && isGeneratedEvent(target)) {
         diagnosticRedirected = true;
-        targetId = target.extendedProperties.private.parent;
-        target = getEventById("primary", targetId);
+        const parentId = target.extendedProperties.private.parent;
+        targetId = (typeof parentId === "string" && parentId.trim() !== "")
+          ? parentId
+          : null;
+        target = targetId ? getEventById("primary", targetId) : null;
       }
 
-      const companions = listCompanionsByParent("primary", targetId);
+      const companions =
+        targetId ? listCompanionsByParent("primary", targetId) : [];
       allEvents = (target ? [target] : [])
         .concat(companions.map(companion => companion.rawEvent));
       scanComplete = true;
@@ -1133,7 +1144,15 @@ function reconcile(options) {
     // the high-water mark forever. Skipped when out of time on a write
     // run: its unbounded lookups only matter to an application that will
     // not happen.
-    if (options.dryRun || !outOfTime) {
+    // Skipped for scoped diagnostics: the targeted read above already
+    // performed this exact unbounded companion lookup for the one parent
+    // this run compares, so every managed companion -- in-window or not --
+    // is already in the observed set and no pending create can have an
+    // invisible match. Re-querying would pay a redundant Calendar round
+    // trip on the latency-sensitive card-open path, and a failure of that
+    // redundant call would fail an otherwise complete diagnosis
+    // (technical design §15.2.7, §17.1).
+    if (!options.eventIdFilter && (options.dryRun || !outOfTime)) {
       // Budget-aware INSIDE the pass, not just gated ahead of it: one
       // unbounded lookup per pending create can consume the remaining
       // runtime on a large diff, and a hard kill here skips status
@@ -1257,8 +1276,25 @@ function reconcile(options) {
         // On diagnostics, not the result root -- the §17.2 contract
         // exposes the flag as diagnostics.continuationCapReached, and
         // status persistence reads the documented shape.
-        result.diagnostics.continuationCapReached =
-          enqueueContinuation().capReached;
+        //
+        // Guarded: ScriptApp trigger creation can fail (per-user trigger
+        // quota, transient ScriptApp error), and the partial result in
+        // hand describes operations Calendar already ACCEPTED. Letting
+        // the throw reach the boundary would rebuild the run as a
+        // generic failure with an empty diff -- an affirmatively false
+        // record. The truthful partial result is kept, the missing
+        // continuation becomes a warning, and the deferred work waits
+        // for the daily backstop (REQ-TRIGGER-002).
+        try {
+          result.diagnostics.continuationCapReached =
+            enqueueContinuation().capReached;
+        } catch (enqueueError) {
+          result.diagnostics.warnings.push({
+            code: "CONTINUATION_ENQUEUE_FAILED",
+            message: "continuation trigger not created"
+          });
+          logWarning("CONTINUATION_ENQUEUE_FAILED", enqueueError);
+        }
       }
       // Guarded HERE, not just in the boundary: if this save threw into
       // the catch, a run Calendar fully accepted would be rebuilt as a

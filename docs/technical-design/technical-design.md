@@ -357,7 +357,12 @@ interface ReconciliationDiagnostics {
   cacheHits: number;
   cacheMisses: number;
   routeAttemptsUsed: number;
-  /** Set when a partial run could not schedule its continuation (19.6). */
+  /** Assigned on every non-dry partial run: true when the continuation
+      CAP declined scheduling, false when a pass was scheduled or already
+      pending (19.6). Absent on other runs -- and on the partial run whose
+      enqueue THREW, which is reported as a CONTINUATION_ENQUEUE_FAILED
+      warning instead: the cap is a policy decision, the throw an
+      infrastructure failure, and the UI renders them differently. */
   continuationCapReached?: boolean;
   /** Daily runs only: whether the 15.2.8 sweep ran to completion. False
       distinguishes "gave up under the budget" from "found nothing". */
@@ -513,6 +518,8 @@ function migrateSettings_(settings) {
 ```
 
 `migrateSettings_` is never called for an **absent** document. `loadSettings` reads the stored document first; when User Properties holds no `dtp.settings` at all, the §5.2 defaults apply directly — a fresh install loads defaults, it is not a validation failure and no `INVALID_SETTINGS` results. The `settings ? … : null` branch above is defense against an explicitly stored `null` or non-object document (corruption), not the fresh-install path.
+
+**Deserialization is guarded the same way the migration chain is.** The stored value is arbitrary text — a truncated write leaves `dtp.settings` holding malformed JSON, and `JSON.parse` then throws *before* migration or structural validation ever runs, turning exactly the corrupted-state case this section promises to handle into an unexpected run failure with no reset path. `loadSettings` catches the parse failure and returns a structurally invalid `ValidationResult` (`INVALID_SETTINGS`, field `settings`, "stored document is not valid JSON"), so the settings card presents the same reset-to-defaults offer as every other unrecoverable-document state — never a throw.
 
 An `unsupportedSchema` result flows into `loadSettings`' returned `validation` as a structural error (`INVALID_SETTINGS`, field `schemaVersion`) — never a throw. The diagnostic card then shows the corrupt version value, and the settings card offers the reset-to-defaults path (REQ-CONFIG-018).
 
@@ -1037,6 +1044,8 @@ The broker's wire vocabulary (Architecture §19.4) and the application's error c
 | 500 | `INTERNAL_ERROR` | `BROKER_UNAVAILABLE` | yes — one immediate retry |
 | *(no response)* | `UrlFetchApp` throw — timeout, DNS failure, connection reset | `BROKER_UNAVAILABLE` | yes — one immediate retry |
 | any | body missing, unparseable, or code unrecognized | `BROKER_PROTOCOL_ERROR` | no |
+
+The table is reachable only if non-2xx responses come back as *responses*: every broker request **must set `muteHttpExceptions: true`**. Without it, `UrlFetchApp.fetch` throws on 400, 401, 404, 429, and 503 alike, so the status and body rows above are never consulted — every HTTP error collapses into the *(no response)* transport row and is classified retryable `BROKER_UNAVAILABLE`, including the validation and authorization failures the table marks explicitly non-retryable. The option is part of the routing-client contract, and the *(no response)* row is reserved for **actual transport exceptions** — timeout, DNS failure, connection reset — the only failures that still throw with the option set.
 
 The transport row matters as much as the HTTP rows: a fetch exception is the single most transient failure class, and routing it through the body-missing catch-all would classify an ordinary outage as a non-retryable protocol error.
 
@@ -1618,6 +1627,8 @@ Cost: one `Events.list` per parent with an absent desired role. For a genuinely 
 
 The pass is **budget-aware internally**: it takes a `shouldStop` guard and checks it between lookups, because a diff with many pending creates multiplies the per-parent lookups past what any single up-front check can bound — the same one-gate-cannot-cover-a-loop reasoning as `applyDiff` (§17.5). When the guard fires, the pass stops issuing lookups and the engine re-evaluates the execution budget before application: a create whose lookup never ran must not be applied blindly (that is the duplicate this section exists to prevent), and with the deadline reached the run skips application entirely, reports `partial`, and lets the continuation recompute the diff.
 
+**Scoped diagnostic runs skip this pass entirely.** The §17.1 targeted read already performed this exact lookup — `listCompanionsByParent` for the one parent the run compares — so every managed companion, in-window or not, is already in the observed set and no pending create can have a match the pass could find. Running it again would pay a redundant Calendar round trip on the latency-sensitive card-open path, and a failure of that redundant call would convert an otherwise complete diagnosis into a run-wide failure. The diff a diagnostic renders is unaffected: the lookup could only convert a create to an update, and the conversion already happened implicitly by reading the companion into observation.
+
 Two interactions need pinning:
 
 - **The lookup excludes cancelled tombstones.** `listCompanionsByParent` must filter `status: "cancelled"` — a manually deleted companion comes back with its `dtp` metadata intact (§7.3), and matching it here would convert the recreate into an update of a deleted resource, breaking restoration on every run. The same exclusion protects §15.2.6's delete path from 404s on tombstones.
@@ -1838,10 +1849,11 @@ interface ReconciliationOptions {
 `eventIdFilter` scopes a run to one source event, and is how the event diagnostic card (§20.3) avoids spending its 20-attempt hourly allowance planning unrelated events before reaching the one that was opened. When set:
 
 - the **window scan is replaced by a targeted read**: the opened event via `getEventById` plus its managed companions via `listCompanionsByParent`. This is a correctness requirement, not just economy — an event beyond the observation range is invisible to the bounded listing, so a window-scan-based filter would leave the card with silence instead of the `OUTSIDE_WINDOW` reason the user needs; and it removes the full window listing from the hot card-open path. Eligibility still evaluates against the planning range, so the out-of-range diagnosis is reported correctly;
-- when the opened event is itself a **generated companion**, the filter is redirected to its `parent` id before the targeted read. The companion is derived state with no planning story of its own; diagnosing it literally would classify it as an unparented orphan and, on a hypothetical write run, propose deleting the very event the user asked about. The working-location fetch is likewise scoped to the diagnosed event's span rather than the observation range;
+- when the opened event is itself a **generated companion**, the filter is redirected to its `parent` id before the targeted read. The companion is derived state with no planning story of its own; diagnosing it literally would classify it as an unparented orphan and, on a hypothetical write run, propose deleting the very event the user asked about. The parent id is **validated before it is used** — a non-empty string, or the redirect resolves nothing: `dtp === '1'` does not guarantee the rest of the metadata survived, and a blank or missing `parent` handed to the point read or the companion listing can throw before the `PARENT_NOT_FOUND` fallback is ever built. An unresolvable redirect issues no further repository calls and reports `PARENT_NOT_FOUND` for the clicked event. The working-location fetch is likewise scoped to the diagnosed event's span rather than the observation range;
 - when the targeted read resolves **no source event** — the id no longer exists, or a companion's `parent` reference points at a purged event — the result still carries a diagnostic payload: `eventDiagnostics` holds a synthesized ineligible `EligibilityResult` with reason `EVENT_NOT_FOUND` (or `PARENT_NOT_FOUND` when a companion redirect failed) and null/empty remaining fields. Silence is the failure mode the targeted read exists to eliminate, and an orphaned companion is exactly the event a user most needs explained. The dry-run diff may simultaneously propose deleting such a companion; that is honest reporting — with its parent gone it *is* an orphan — and the card presents the reason alongside it;
 - planning and comparison therefore naturally cover only that parent — nothing else was read, so nothing else can be misreported as an orphan;
 - the cleanup passes (window-shrink, overlong) are skipped — the card cannot act on or display them, and the shrink scan costs real Calendar quota on the hot card-open path;
+- the **§15.2.7 restoration pass is skipped too**: the targeted read above already performed that pass's exact lookup — `listCompanionsByParent` for the one parent this run compares — so every managed companion, in-window or not, is already observed and no pending create can have a match the pass could find. Re-querying would pay a redundant round trip on the latency-sensitive card path, and a failure of the redundant call would fail an otherwise complete diagnosis;
 - the engine **rejects the option unless the run is both dry and carries `reason: "event-diagnostic"` — and rejects that reason on any run that is not a scoped dry run**. The invariant is bidirectional: a scoped run without the diagnostic reason would draw the ordinary per-run route budget on every card open with none of the spend recorded, bypassing the §20.3 hourly ceiling (which keys on the reason); the reason without the scope would point a full — even write-mode — reconcile at the shared 20-attempt hourly allowance and drain it for every genuine card open that hour; and a write-mode run scoped to one event would carry deletion authority over a comparison that deliberately cannot see everything else. The rejection is a returned failed result, not silent acceptance;
 - the result carries the per-event diagnostic payload (§17.6) the card renders.
 
@@ -2041,9 +2053,12 @@ WORKING_LOCATION_UNAVAILABLE
 DIRECTIVE_ORIGIN_UNCONFIGURED
 DIAGNOSTIC_SPEND_RECORD_FAILED
 STATUS_PERSIST_FAILED
+CONTINUATION_ENQUEUE_FAILED
 ```
 
 `DIRECTIVE_ORIGIN_UNCONFIGURED`: a directive named a `home` or `office` origin that is not configured, and resolution fell back to the default (§10.2). Recorded by the **engine** after `resolveOrigin` — the resolver stays a pure lookup — whenever `directives.origin` is set but the resolved origin's `name` differs from the requested one (never for an honored `origin=default`). Without a registered code the fallback §10.2 requires would have no carrier, and the event card could not explain that the user's explicit selection was ignored.
+
+`CONTINUATION_ENQUEUE_FAILED`: `enqueueContinuation`'s trigger creation threw (per-user trigger quota, transient ScriptApp error). Emitted from **two call sites with different carriers** (§19.6): the engine's partial-run call joins the returned result's `warnings` — the run's applied operations are real, and rebuilding it as a failure would be a false record — while the handler's skip-path re-enqueue is **log-only**, because a lock-contention skip did no work and has no persisted result to carry the code. Either way the deferred work falls to the daily backstop (REQ-TRIGGER-002).
 
 `DIAGNOSTIC_SPEND_RECORD_FAILED`: the hourly diagnostic-spend write threw inside the engine's `finally`. The failure is caught and **logged** with this code rather than rethrown — an accounting error must not replace the run's already-built structured result or strand the user lock (Architecture §14.2). It cannot retroactively join that run's `warnings`: the result was assembled and persisted before the `finally` ran. The ceiling is protected from the other side instead — `diagnosticBudgetRemaining` **fails closed**, returning `0` when its own Properties read throws, so an outage that breaks spend *writes* (the same service) cannot simultaneously mint fresh allowances; at worst one run's spend goes unrecorded against a working counter.
 
@@ -2296,8 +2311,18 @@ function runContinuationReconciliation(e) {
   // just retry. This cannot loop unboundedly: Apps Script locks release
   // when the holding execution ends (hard 6-minute execution ceiling),
   // so contention is inherently transient.
+  //
+  // Guarded like the engine's call: trigger creation is the same
+  // throwable API (per-user quota), and an escape here is an uncaught
+  // throw inside a trigger handler. Log-only -- a skipped run has no
+  // applied results to protect; the dropped re-enqueue falls to the
+  // daily backstop (REQ-TRIGGER-002).
   if (result.status === 'skipped') {
-    enqueueContinuation();
+    try {
+      enqueueContinuation();
+    } catch (enqueueError) {
+      logWarning('CONTINUATION_ENQUEUE_FAILED', enqueueError);
+    }
   }
   return result;
 }
@@ -2309,7 +2334,8 @@ The **counter lifecycle** is what makes the cap enforceable:
 - **incremented by the engine, under the user lock, after the cheap gate checks and before the window read** (`reason === 'continuation'`, non-dry): the lock is what serializes the counter against the concurrent successful run that resets it — a handler-side increment races that reset, losing it or leaving a stale refund. Counting before substantive work preserves crash-safety: a continuation that dies mid-run still counted itself. The gate checks it sits behind cannot loop on the allowance either — each one either terminates the episode (a failed result schedules nothing) or is transient (a skip re-enqueues without counting);
 - a `skipped` run never touched the counter (the increment is behind the lock it failed to take), so there is no refund path — the handler simply re-enqueues;
 - reset to `0` by any **non-dry** run that completes with status `success`, whatever its reason — success means the deferred work drained, so the next `partial` episode starts a fresh allowance. Increment and reset are both under the lock, so they cannot interleave;
-- when the cap is reached, `enqueueContinuation` returns `capReached: true` and the engine records it as `diagnostics.continuationCapReached` on the run result — the field's home in the §4.11 contract, which is where status persistence and the UI read it.
+- when the cap is reached, `enqueueContinuation` returns `capReached: true` and the engine records it as `diagnostics.continuationCapReached` on the run result — the field's home in the §4.11 contract, which is where status persistence and the UI read it;
+- the engine's call is **guarded**: `ScriptApp.newTrigger(...).create()` can throw — the per-user trigger quota is the obvious case — and the partial result in hand describes operations Calendar already *accepted*. An unguarded throw would reach the error boundary and rebuild the run as a generic failure with an empty diff, discarding the true applied counts (the same false-record hazard as an unguarded status save). The engine catches the failure, keeps the truthful partial result, records a `CONTINUATION_ENQUEUE_FAILED` warning (§18.2), and lets the deferred work wait for the daily backstop (REQ-TRIGGER-002).
 
 **Dry runs are exempt from all of this.** A diagnostic dry run that would end `partial` neither schedules a continuation nor resets the counter — a diagnostic must not mutate trigger state (see the engine pseudocode, Architecture §14.2).
 
@@ -2414,9 +2440,12 @@ Repeated card opens on an unplanned event would therefore call the broker every 
 Diagnostics use a second, ephemeral cache instead:
 
 ```javascript
+// calculatedAt is stored as-is: RouteResult.calculatedAt is already the
+// canonical ISO-8601 string (4.7) -- calling .toISOString() on it would
+// throw and the cache would never warm.
 CacheService.getUserCache().put(
   routeInputHash,
-  JSON.stringify({ secs: rawSeconds, at: calculatedAt.toISOString() }),
+  JSON.stringify({ secs: rawSeconds, at: calculatedAt }),
   ttlSeconds
 );
 ```

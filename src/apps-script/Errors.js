@@ -43,4 +43,14 @@ const ERROR_CODES = {
   // Calendar-accepted run from being stored as a false failure; guarding
   // the boundary keeps its return-a-result guarantee.
   STATUS_PERSIST_FAILED: 'STATUS_PERSIST_FAILED',
+  // enqueueContinuation's trigger creation threw (per-user trigger quota,
+  // transient ScriptApp error). Two guarded call sites, different
+  // carriers (19.6): the engine's partial-run call keeps the truthful
+  // applied result and joins its warnings -- an unguarded throw would
+  // rebuild a Calendar-accepted run as a failure with an empty diff --
+  // while the handler's skip-path re-enqueue is log-only: skipped
+  // results are never persisted or rendered, so a warning on one would
+  // reach nobody. Deferred work falls to the daily backstop
+  // (REQ-TRIGGER-002).
+  CONTINUATION_ENQUEUE_FAILED: 'CONTINUATION_ENQUEUE_FAILED',
 };

@@ -150,6 +150,12 @@ function routeCacheFor(observedByKey, parentEventId) {
  * multiplies past what a single up-front gate can bound. When it fires,
  * the engine re-evaluates the budget and skips application -- a create
  * whose lookup never ran must not be applied blindly.
+ *
+ * SKIPPED on scoped diagnostic runs (eventIdFilter): the section 17.1
+ * targeted read already performed this exact companion lookup for the one
+ * parent the run compares, so every managed companion is already observed
+ * -- re-querying pays a redundant round trip on the card-open path and a
+ * failure would fail an otherwise complete diagnosis.
  * Technical Design section 15.2.7.
  */
 function resolveOutOfWindowCompanions(diff, cleanup, shouldStop) {

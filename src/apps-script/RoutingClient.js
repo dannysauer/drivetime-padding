@@ -25,6 +25,12 @@
  * retries included (section 11.2). The ceiling bounds wire traffic, not
  * logical calls; enforcing it above the retry layer would double the spend
  * during a broker outage.
+ *
+ * Every fetch sets muteHttpExceptions: true (section 11.5). Without it,
+ * UrlFetchApp throws on any non-2xx, the status/body mapping table is
+ * never consulted, and non-retryable validation and auth failures are
+ * misclassified as retryable BROKER_UNAVAILABLE. The no-response mapping
+ * is reserved for actual transport exceptions.
  */
 function getRouteDuration(from, to, requestContext) {
   throw new Error('Not implemented: broker authentication unresolved');

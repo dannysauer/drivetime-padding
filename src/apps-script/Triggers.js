@@ -71,9 +71,13 @@ function runManualReconciliation(e) {
  * then runs the shared engine. The counter increment lives in the ENGINE,
  * under the user lock, before substantive work -- a handler-side increment
  * races the reset a concurrent successful run performs. A lock-contention
- * skip never reached the counter, so the handler just re-enqueues; the
- * counter resets to 0 on any successful non-dry run; the cap is enforced
- * at enqueue time. Technical Design section 19.6.
+ * skip never reached the counter, so the handler just re-enqueues -- with
+ * the enqueue GUARDED, like the engine's call: trigger creation can throw
+ * (per-user quota), an escape here is an uncaught throw inside a trigger
+ * handler, and the failure is logged as CONTINUATION_ENQUEUE_FAILED with
+ * the dropped re-enqueue falling to the daily backstop. The counter
+ * resets to 0 on any successful non-dry run; the cap is enforced at
+ * enqueue time. Technical Design section 19.6.
  */
 function runContinuationReconciliation(e) {
   throw new Error('Not implemented: Technical Design section 19.6');

@@ -9,7 +9,10 @@ Write operations take the observed event rather than an event ID, so the ownersh
 ```javascript
 // Settings
 // Never throws on validation problems: the engine branches on the tiers
-// (structurallyValid gates every run, writeReady gates writes -- 5.3)
+// (structurallyValid gates every run, writeReady gates writes -- 5.3).
+// Never throws on a corrupt document either: malformed stored JSON and
+// unmigratable schemas both come back as structural INVALID_SETTINGS
+// errors (5.4); an absent document loads the 5.2 defaults
 loadSettings() -> { settings: UserSettings, validation: ValidationResult }
 saveSettings(settings) -> UserSettings
 validateSettings(settings) -> ValidationResult
@@ -32,8 +35,11 @@ listGeneratedEventsBetween(calendarId, start, end, shouldStop)
   -> { events: ObservedGeneratedEvent[], scanComplete: boolean }
 // Ownership + parent filtered, no time bounds, EXCLUDES cancelled
 // tombstones (a deleted companion keeps its dtp metadata and must read as
-// absent). Used by the overlong-source cleanup (15.2.6) and the
-// out-of-window restoration pass (15.2.7)
+// absent). Used by the overlong-source cleanup (15.2.6), the
+// out-of-window restoration pass (15.2.7), AND the 17.1 targeted
+// diagnostic read -- which is why scoped diagnostics may skip 15.2.7:
+// the unbounded, tombstone-filtered semantics here are load-bearing for
+// that skip, so narrowing them breaks it
 listCompanionsByParent(calendarId, parentEventId) -> ObservedGeneratedEvent[]
 // Targeted single-event fetch for diagnostic runs (17.1): the window scan
 // cannot see an event beyond the observation range, and the card must be
@@ -170,7 +176,10 @@ buildAppError(code, event) -> AppErrorRecord
 // cleanup: a matched event is removed from diff.deletes AND cleanup.events.
 // Checks shouldStop between lookups; when it fires the engine re-evaluates
 // the budget and skips application -- an unresolved create must never be
-// applied blindly (15.2.7)
+// applied blindly (15.2.7). SKIPPED on scoped diagnostic runs: the 17.1
+// targeted read already performed this exact lookup for the one parent,
+// so re-querying is a redundant round trip whose failure would fail an
+// otherwise complete diagnosis
 resolveOutOfWindowCompanions(diff, cleanup, shouldStop) -> void
 // Daily-run ownership sweep (15.2.8): updatedMin-bounded listing (a
 // stray was necessarily moved, and moves bump `updated`; cancelled
@@ -261,7 +270,13 @@ runManualReconciliation(e) -> ReconciliationResult
 // the counter, so no refund path exists -- the handler just re-enqueues.
 // Reset by any successful non-dry run; cap enforced at enqueue time; the
 // enqueue return value is how diagnostics.continuationCapReached (4.11)
-// reaches the run result.
+// reaches the run result. BOTH call sites guard it -- trigger creation
+// can throw (per-user quota): the engine's partial-run call keeps the
+// truthful applied result and records a CONTINUATION_ENQUEUE_FAILED
+// warning, never a false failure record; the handler's skip-path
+// re-enqueue logs the same code (log-only -- skipped results are never
+// persisted or rendered, so a warning on one reaches nobody). Deferred
+// work falls to the daily backstop (19.6)
 enqueueContinuation() -> { scheduled: boolean, capReached: boolean }
 incrementContinuationCount() / resetContinuationCount()
 runContinuationReconciliation(e) -> ReconciliationResult
