@@ -875,14 +875,16 @@ Each run shall produce a structured result containing at least:
 - eligible events;
 - created count;
 - updated count;
+- metadata-patch count;
 - replaced count;
 - deleted count;
 - ignored count;
 - failed-write count;
+- deferred-operation count;
 - error count;
 - start and completion timestamps.
 
-Write counts shall reflect operations Calendar **accepted**, taken from the diff application result, not operations the diff proposed. A run with one or more failed writes shall not report success (REQ-ERROR-006). Dry runs report proposal counts, marked as such, and shall not overwrite the stored last-run record.
+Write counts shall reflect operations Calendar **accepted**, taken from the diff application result, not operations the diff proposed. A run with one or more failed writes shall not report success (REQ-ERROR-006). A run in which no application ran — a dry run, a failure before application, or a write run out of time before applying — carries a null application summary in its result; when persisted, the stored record's applied, failed-write, and deferred-operation counts are zero, with the status carrying the explanation (the out-of-time case is `partial` with zero counts and no errors — the continuation reschedules it). Dry runs report proposal counts, marked as such, and shall not overwrite the stored last-run record.
 
 ### REQ-RECON-014: Event type changes are applied by replacement
 

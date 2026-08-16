@@ -1881,6 +1881,21 @@ interface ReconciliationResult {
   dryRun: boolean;
   diagnostics: ReconciliationDiagnostics;
   diff: ReconciliationDiff;
+  /** What Calendar ACCEPTED, summarized from the ApplyResult (17.5):
+      accepted counts per operation, plus failedWrites (the size of the
+      failure list) and deferredOps. This is the contract-defined path by
+      which applied counts reach saveRunStatus and the 20.2 stored
+      record; without it the result exposes only the PROPOSED diff, and
+      persistence could not distinguish accepted operations from rejected
+      or deferred ones (REQ-RECON-012, REQ-ERROR-006). Null whenever no
+      application ran — dry runs, status-only results, failure results
+      (the validation gates and the error boundary), and write runs out
+      of time before application. */
+  applied: {
+    creates: number; updates: number; metadataPatches: number;
+    replaces: number; deletes: number;
+    failedWrites: number; deferredOps: number;
+  } | null;
   errors: AppErrorRecord[];
 }
 ```
@@ -1958,7 +1973,7 @@ interface ApplyResult {
 
 `applyDiff(diff, runStart)` is itself budget-aware: it checks `elapsedExceedsExecutionBudget` **between operations** and stops when the budget nears, counting the remainder as `deferredOps`. The engine's single pre-application check is necessary but not sufficient — a diff with many writes can pass it and still cross the Apps Script hard deadline partway through application, and a hard kill bypasses the catch, the status write, and continuation scheduling: exactly the failure the gate exists to prevent, reintroduced one layer down. A run with `deferredOps > 0` reports `partial` (the deferred work is real, just postponed), the continuation machinery reschedules it, and the recomputed diff on the next pass picks up whatever was deferred — reconciliation is idempotent, so nothing is lost. Deferred operations are never merged into `failures`: nothing was rejected, and counting them as failures would make a clean budget-bounded run look broken.
 
-The `ReconciliationResult` and the stored last-run record (§20.2) are built **from this object**, not from the proposed diff. The distinction is REQ-ERROR-006: the diff says what the run intended, the `ApplyResult` says what Calendar accepted, and only the second can honestly claim success. A run whose `failures` list is non-empty reports `partial` (or `failed` when nothing applied), merges each failure's `AppErrorRecord` into `errors`, and counts it in the stored record — otherwise a rejected write vanishes: the UI shows success, and nothing distinguishes "done" from "silently dropped".
+The `ReconciliationResult` and the stored last-run record (§20.2) are built **from this object**, not from the proposed diff — concretely, `buildRunResult` summarizes it into `ReconciliationResult.applied` (§17.2), which is what `saveRunStatus` reads. The distinction is REQ-ERROR-006: the diff says what the run intended, the `ApplyResult` says what Calendar accepted, and only the second can honestly claim success. A run whose `failures` list is non-empty reports `partial` (or `failed` when nothing applied), merges each failure's `AppErrorRecord` into `errors`, and counts it in the stored record — otherwise a rejected write vanishes: the UI shows success, and nothing distinguishes "done" from "silently dropped".
 
 A write-mode run can also end with no `ApplyResult`: when the execution budget expires after the diff is computed but before application (§23.1), the engine skips `applyDiff` rather than risk a hard kill mid-apply, and `buildRunResult(diff, null, options, null)` on a non-dry run reports `partial` — the diff was proposed, nothing was applied, and the continuation machinery reschedules it.
 
@@ -1975,6 +1990,14 @@ interface EventDiagnostics {
   eventId: string;
   eligibility: EligibilityResult;
   directives: ParsedDirectives | null;      // null when never parsed
+  /** The normalized event's location (trimmed, 8.4; empty string when
+      the source has none — the MISSING_LOCATION ineligible case) — the
+      destination REQ-UI-014 requires the card to show. Null only in the
+      synthesized fallback payloads, where no event was ever read
+      (not-found, disabled, unsupported-calendar). Diagnostics run
+      dry-only and are never persisted (17.5), so the address renders
+      in-card and lands in no stored record. */
+  destination: string | null;
   origin: ResolvedOrigin | null;            // null when ineligible
   /** Directive override or settings default, supplied by the engine at
       capture time — never inferred from spec timestamps, which do not
@@ -2065,19 +2088,22 @@ WORKING_LOCATION_UNAVAILABLE
 DIRECTIVE_ORIGIN_UNCONFIGURED
 DIAGNOSTIC_SPEND_RECORD_FAILED
 STATUS_PERSIST_FAILED
+BOOKKEEPING_PERSIST_FAILED
 CONTINUATION_ENQUEUE_FAILED
 MANUAL_ENQUEUE_FAILED
 ```
 
 `DIRECTIVE_ORIGIN_UNCONFIGURED`: a directive named a `home` or `office` origin that is not configured, and resolution fell back to the default (§10.2). Recorded by the **engine** after `resolveOrigin` — the resolver stays a pure lookup — whenever `directives.origin` is set but the resolved origin's `name` differs from the requested one (never for an honored `origin=default`). Without a registered code the fallback §10.2 requires would have no carrier, and the event card could not explain that the user's explicit selection was ignored.
 
+`STATUS_PERSIST_FAILED`: `saveRunStatus` threw. **Every** persistence site is guarded — the success path, the error boundary, and both validation-gate branches (structural invalidity and write-readiness) — through one shared wrapper, `saveRunStatusGuarded(result)`, which is the *only* way the engine calls `saveRunStatus`: four hand-rolled copies of the same guard would drift apart the first time one is tweaked. A run's returned result must survive a Properties outage whichever exit it takes, so the wrapper joins the code to the *returned* result's `warnings` (the result is still in hand at all four sites, unlike the finally-block spend record) as well as logging it. Each site's guard protects something specific. The success path: an unguarded save throwing into the boundary would rebuild a run Calendar fully accepted as `failed`, and — should Properties recover for the boundary's retry — persist an affirmatively **false** failure record with zero applied counts (REQ-ERROR-006 violated in storage). The validation gates: the throw would *replace* the `INVALID_SETTINGS` result, and with it the full validation error list that carries the card's reset guidance, with a generic persistence failure. The boundary's own save: retrying an unavailable write unguarded would throw past the boundary, leaving trigger callers with no structured result at all. A persistence outage therefore degrades to "truthful result returned, stored record stale until the next successful persist, warning attached" — never to a lie about what Calendar did.
+
+`BOOKKEEPING_PERSIST_FAILED`: a post-apply bookkeeping write threw — the shrink high-water mark, the sweep watermark, or the continuation-counter reset. Guarded because Calendar has already accepted the run's operations by the time these fire: an escaping throw would rebuild an applied run as a failure with an empty diff. Losing any of them is **safe by construction** — an unlowered mark re-scans and retries next run, an unadvanced watermark widens the next sweep's bounds over the gap, and a stale continuation counter costs at most one episode's allowance (§19.6). All three sites use `recordRunWarning`, which appends *and* logs; the run's diagnostics object is created once and carried by reference into the built result, so the one mechanism works before and after `buildRunResult` — three hand-rolled variants would drift exactly as the shared `saveRunStatusGuarded` rationale warns.
+
 `CONTINUATION_ENQUEUE_FAILED`: `enqueueContinuation`'s trigger creation threw (per-user trigger quota, transient ScriptApp error). Emitted from **two call sites with different carriers** (§19.6): the engine's partial-run call joins the returned result's `warnings` — the run's applied operations are real, and rebuilding it as a failure would be a false record — while the handler's skip-path re-enqueue is **log-only**, because a lock-contention skip did no work and has no persisted result to carry the code. Either way the deferred work falls to the daily backstop (REQ-TRIGGER-002).
 
 `MANUAL_ENQUEUE_FAILED`: the manual handler's skip-path re-enqueue threw (§19.5) — the same throwable trigger-creation API, guarded for the same reason. **Log-only**: a skipped run's result is never persisted or rendered. The failure stays honest without a carrier because manual pendingness is *derived* from the trigger list — the home card shows no run pending and the button invites a retry. The card action's own enqueue is deliberately unguarded: it fails synchronously in front of the user as the action's error response, which is the correct surface.
 
 `DIAGNOSTIC_SPEND_RECORD_FAILED`: the hourly diagnostic-spend write threw inside the engine's `finally`. The failure is caught and **logged** with this code rather than rethrown — an accounting error must not replace the run's already-built structured result or strand the user lock (Architecture §14.2). It cannot retroactively join that run's `warnings`: the result was assembled and persisted before the `finally` ran. The ceiling is protected from the other side instead — `diagnosticBudgetRemaining` **fails closed**, returning `0` when its own Properties read throws, so an outage that breaks spend *writes* (the same service) cannot simultaneously mint fresh allowances; at worst one run's spend goes unrecorded against a working counter.
-
-`STATUS_PERSIST_FAILED`: `saveRunStatus` threw. **Both** persistence sites are guarded — the success path's save and the error boundary's own save — and in both the code is appended to the *returned* result's `warnings` (the result is still in hand at those sites, unlike the finally-block spend record) as well as logged. Guarding the success path is what keeps the record truthful: an unguarded success-path save throwing into the boundary would rebuild a run Calendar fully accepted as a `failed` result, and — should Properties recover for the boundary's retry — persist an affirmatively **false** failure record with zero applied counts, violating REQ-ERROR-006 in storage. Guarding the boundary's save is what keeps the boundary's guarantee: retrying an unavailable write unguarded would throw past it, leaving trigger callers with no structured result at all. A persistence outage therefore degrades to "truthful result returned, stored record stale until the next successful persist, warning attached" — never to a lie about what Calendar did.
 
 `ROUTE_TOO_LONG` and `ROUTE_BUDGET_EXCEEDED` are both **planning failures**, not ineligibility. Per §17.3 they preserve existing generated events rather than deleting them.
 
@@ -2398,16 +2424,20 @@ Store only compact operational data, not addresses or event titles.
   "plannedEvents": 8,
   "created": 2,
   "updated": 1,
+  "metadataPatches": 1,
   "replaced": 0,
   "deleted": 0,
   "failedWrites": 0,
+  "deferredOps": 0,
   "errors": 0
 }
 ```
 
-The write counts are **applied** counts taken from the `ApplyResult` (§17.5), not proposal counts taken from the diff. `failedWrites` is the size of the failure list; any non-zero value forces `status` to `partial` or `failed`, so the home card can never display success over rejected writes.
+The write counts are **applied** counts taken from the `ApplyResult` (§17.5) via `ReconciliationResult.applied` (§17.2), not proposal counts taken from the diff. `failedWrites` is the size of the failure list; any non-zero value forces `status` to `partial` or `failed`, so the home card can never display success over rejected writes. The record carries **all seven** of the carrier's counts: without `metadataPatches`, a run whose only accepted operations were cache-triplet patches would store all-zero write counts and read as a no-op; without `deferredOps`, a budget-bounded run with no failures would store `partial` with nothing in the record explaining why.
 
-Dry runs never write this record (§17.5). Only runs that actually applied a diff — or genuinely attempted to — belong in it.
+A persisted result can carry `applied: null` — a failure result from a validation gate or the boundary, or a write run whose budget expired *before* application (§17.5). The record then stores **zero for all seven counts**, and the status plus `errors` carry the story: `failed` with zero counts is a run that never applied anything, and `partial` with all-zero counts and no errors is precisely the computed-but-never-applied case — the diff was proposed, application was skipped for time, and the continuation reschedules it. `saveRunStatus` must handle the null without dereferencing it.
+
+Dry runs never write this record (§17.5). Every **non-dry** run's result is persisted — including failures and never-applied partials, via the guarded save at each engine exit — and the zero counts plus status are what distinguish those from runs that applied work.
 
 ### 20.3 Event diagnostic mode
 
@@ -2422,6 +2452,7 @@ It should display:
 - eligibility result;
 - directive interpretation;
 - selected origin name, but avoid displaying a sensitive full address unless the user is in settings;
+- destination — carried as `EventDiagnostics.destination` (§17.6), copied from the source event's location at capture time; nothing else in the result retains it, and diagnostics are never persisted, so the address renders in-card only;
 - route durations;
 - buffer;
 - desired timestamps;

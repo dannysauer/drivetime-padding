@@ -148,7 +148,10 @@ runReconciliation(options) -> ReconciliationResult
 // remainder (deferredOps -- not failures; deferred > 0 reports partial)
 applyDiff(diff, runStartMs) -> ApplyResult
 // applied null on dry run; eventDiagnostics null except on
-// eventIdFilter runs, where it becomes result.eventDiagnostics (17.6)
+// eventIdFilter runs, where it becomes result.eventDiagnostics (17.6).
+// Summarizes the ApplyResult into result.applied (17.2) -- the
+// contract-defined path by which ACCEPTED counts reach saveRunStatus
+// and the 20.2 record; the diff alone is only the proposal
 buildRunResult(diff, applied, options, eventDiagnostics) -> ReconciliationResult
 // Top-level error boundary: a run-wide throw (settings, window read)
 // becomes a failed result and reaches the stored record (arch 14.2)
@@ -156,6 +159,13 @@ buildFailureResult(error, options) -> ReconciliationResult
 // Complete ReconciliationResult for skipped/disabled outcomes -- bare
 // status objects would make callers special-case those states (17.2)
 buildStatusOnlyResult(status, reason, options) -> ReconciliationResult
+// THE guarded persistence wrapper -- the only way the engine calls
+// saveRunStatus. On a throw it pushes STATUS_PERSIST_FAILED onto the
+// result's diagnostics.warnings and logs, never rethrows (18.2). One
+// shared helper for all four call sites (both validation gates, the
+// success path, the error boundary) so the guard cannot drift between
+// hand-rolled copies
+saveRunStatusGuarded(result) -> void
 // Execution-budget degradation (23.1): wall-clock check plus marking every
 // unprocessed source failed (EXECUTION_BUDGET_EXCEEDED) before the loop
 // stops -- a bare break orphans their companions
@@ -163,7 +173,13 @@ elapsedExceedsExecutionBudget(runStartMs) -> boolean
 markRemainingSourcesFailed(orderedSources, currentEvent, planningOutcomes) -> void
 // Non-fatal run warnings (codes from the 18.2 registry, e.g.
 // WORKING_LOCATION_UNAVAILABLE): appends to
-// ReconciliationDiagnostics.warnings (4.11) without failing the run
+// ReconciliationDiagnostics.warnings (4.11) AND logs via logWarning,
+// without failing the run. The run's diagnostics object is created once
+// and carried by REFERENCE into the built result, so this works both
+// before and after buildRunResult -- one mechanism for every engine
+// warning site (bookkeeping guards, enqueue guard, origin fallback;
+// saveRunStatusGuarded embeds the same append+log internally for
+// STATUS_PERSIST_FAILED)
 recordRunWarning(code, error) -> void
 // Constructs an AppErrorRecord (18.1) from a registry code (18.2):
 // message and retryability from the registry entry, sourceEventId from
@@ -226,7 +242,12 @@ logWarning(code, error) -> void
 // routes copied from outcome.routes (17.4). effectiveBufferMinutes is
 // passed in by the engine (directive override or settings default) --
 // it must be displayable even when planning failed before any spec
-// existed to infer it from
+// existed to infer it from. destination is the NORMALIZED location
+// (trimmed, 8.4; empty string when the source has none; null only in
+// the synthesized fallback payloads) -- REQ-UI-014: nothing downstream
+// retains it, and without the capture the card would need a second
+// Calendar read to show it. Diagnostics are dry-only and never
+// persisted, so the address stays in-card
 captureEventDiagnostics(event, eligibility, directives, origin, outcome,
                         effectiveBufferMinutes)
   -> EventDiagnostics

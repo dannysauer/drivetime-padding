@@ -228,3 +228,12 @@ This matrix links requirement groups to architecture components, technical-desig
 | §17.1 (disabled payload) | Scoped diagnostic against disabled automation returns a synthesized `DISABLED_GLOBALLY` payload; the card handles the `skipped` status explicitly, so no engine exit renders blank | — §20.3 card |
 | §11.5 (transient-first) | Bare or non-JSON 5xx classified `BROKER_UNAVAILABLE` before the unparseable-body fallback; broker code refines only when present | — §11.5 table |
 | REQ-PERF-009 (excepted) | Zero-padding routes have no durable carrier; ephemeral-TTL refresh bound stated as an explicit exception in requirement and design | AC-CACHE-013 |
+
+## Requirements added in the nineteenth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| §17.2 (applied carrier) | `ReconciliationResult.applied` summarizes the `ApplyResult` — the contract-defined path by which accepted counts reach `saveRunStatus` and the §20.2 record | AC-RECOVERY-010 |
+| Architecture §14.2 (guarded gates) | Both validation-gate `saveRunStatus` sites guarded; the `INVALID_SETTINGS` result and its reset guidance survive a persistence outage | AC-RECOVERY-014 |
+| §18.2 (`BOOKKEEPING_PERSIST_FAILED`) | Post-apply bookkeeping writes guarded (high-water mark, sweep watermark, continuation reset); each loss is safe by construction | — §18.2 registry |
+| §17.6 (destination carried) | `EventDiagnostics.destination` copied from the source location at capture; the card shows REQ-UI-014's destination without a second read, never persisted | — §20.3 card |

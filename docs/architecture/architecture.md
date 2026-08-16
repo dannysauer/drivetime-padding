@@ -764,8 +764,13 @@ function reconcile(options) {
     const { settings, validation } = loadSettings();
     if (!validation.structurallyValid) {
       const failure = buildFailureResult(validation, options);
+      // Guarded like every other persistence site: a transient
+      // Properties throw here would enter the boundary and REPLACE the
+      // INVALID_SETTINGS result -- and its full validation list, the
+      // card's reset guidance -- with a generic persistence failure.
+      // The stored record goes stale; the returned result stays true.
       if (!options.dryRun) {
-        saveRunStatus(failure);
+        saveRunStatusGuarded(failure);
       }
       return failure;
     }
@@ -793,7 +798,9 @@ function reconcile(options) {
 
     if (!options.dryRun && !validation.writeReady) {
       const failure = buildFailureResult(validation, options);
-      saveRunStatus(failure);
+      // Same guard as the structural branch above: the returned
+      // validation result must survive a persistence outage.
+      saveRunStatusGuarded(failure);
       return failure;
     }
 
@@ -1253,8 +1260,20 @@ function reconcile(options) {
       // scan could delete its one retrieved page, satisfy deletedAll, and
       // strand every later page outside all future scans. A partial
       // cleanup leaves the mark high so the next run retries.
+      //
+      // GUARDED, like every post-apply bookkeeping write: Calendar has
+      // already accepted this run's operations, and a Properties throw
+      // escaping to the boundary would rebuild the run as a failure with
+      // an empty diff -- a false record. Losing the write is safe by
+      // construction: an unlowered mark means the next run re-scans the
+      // vacated range and retries (technical design §18.2,
+      // BOOKKEEPING_PERSIST_FAILED).
       if (cleanup.shrunk && cleanup.scanComplete && applied.deletedAll(cleanup.events)) {
-        saveHighWater(window.observeEnd);
+        try {
+          saveHighWater(window.observeEnd);
+        } catch (persistError) {
+          recordRunWarning("BOOKKEEPING_PERSIST_FAILED", persistError);
+        }
       }
 
       // The sweep watermark is APPLICATION-gated, same rule as the mark
@@ -1262,9 +1281,14 @@ function reconcile(options) {
       // were deferred or never applied must not advance it -- the
       // continuation cannot re-run the daily-gated sweep, and an advanced
       // watermark shrinks the next sweep's bounds past the very strays
-      // this one found, stranding them permanently.
+      // this one found, stranding them permanently. Guarded like the
+      // mark: an unadvanced watermark just widens tomorrow's sweep.
       if (sweep && sweep.sweepComplete && applied.deletedAll(sweep.events)) {
-        saveSweepWatermark(now);
+        try {
+          saveSweepWatermark(now);
+        } catch (persistError) {
+          recordRunWarning("BOOKKEEPING_PERSIST_FAILED", persistError);
+        }
       }
     }
 
@@ -1287,8 +1311,18 @@ function reconcile(options) {
       // The engine, not the trigger layer, drives the continuation
       // lifecycle (technical design §19.6): success drains the deferred
       // work and resets the allowance; partial schedules the next pass.
+      // The reset is guarded like the other post-apply bookkeeping: a
+      // stale counter is bounded harm (at most one episode's allowance,
+      // §19.6), while an escaping throw would falsify a successful run.
       if (result.status === "success") {
-        resetContinuationCount();
+        try {
+          resetContinuationCount();
+        } catch (persistError) {
+          // recordRunWarning works here too: the diagnostics object was
+          // created once and carried by reference into the result --
+          // same mechanism as the other two bookkeeping guards.
+          recordRunWarning("BOOKKEEPING_PERSIST_FAILED", persistError);
+        }
       } else if (result.status === "partial") {
         // {scheduled, capReached}: already-pending is fine (a pass is
         // coming anyway); capReached is the state diagnostics must show.
@@ -1308,11 +1342,7 @@ function reconcile(options) {
           result.diagnostics.continuationCapReached =
             enqueueContinuation().capReached;
         } catch (enqueueError) {
-          result.diagnostics.warnings.push({
-            code: "CONTINUATION_ENQUEUE_FAILED",
-            message: "continuation trigger not created"
-          });
-          logWarning("CONTINUATION_ENQUEUE_FAILED", enqueueError);
+          recordRunWarning("CONTINUATION_ENQUEUE_FAILED", enqueueError);
         }
       }
       // Guarded HERE, not just in the boundary: if this save threw into
@@ -1322,15 +1352,7 @@ function reconcile(options) {
       // applied counts (REQ-ERROR-006 violated in storage). A persistence
       // outage must degrade to "truthful result returned, stored record
       // stale, warning attached", never to a lie about what Calendar did.
-      try {
-        saveRunStatus(result);
-      } catch (persistError) {
-        result.diagnostics.warnings.push({
-          code: "STATUS_PERSIST_FAILED",
-          message: "last-run record not persisted"
-        });
-        logWarning("STATUS_PERSIST_FAILED", persistError);
-      }
+      saveRunStatusGuarded(result);
     }
     return result;
   } catch (error) {
@@ -1348,15 +1370,7 @@ function reconcile(options) {
       // boundary guarantees. The failure joins the RETURNED result's
       // warnings (the result is still in hand here, unlike the
       // finally-block spend record) and is logged.
-      try {
-        saveRunStatus(failure);
-      } catch (persistError) {
-        failure.diagnostics.warnings.push({
-          code: "STATUS_PERSIST_FAILED",
-          message: "last-run record not persisted"
-        });
-        logWarning("STATUS_PERSIST_FAILED", persistError);
-      }
+      saveRunStatusGuarded(failure);
     }
     return failure;
   } finally {

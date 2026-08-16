@@ -37,12 +37,20 @@ const ERROR_CODES = {
   // Hourly diagnostic-spend write threw in the engine finally; recorded,
   // never rethrown -- accounting must not cost the run its result.
   DIAGNOSTIC_SPEND_RECORD_FAILED: 'DIAGNOSTIC_SPEND_RECORD_FAILED',
-  // saveRunStatus threw. Both persistence sites (success path and error
-  // boundary) are guarded; the code joins the RETURNED result's warnings
-  // and is logged, never rethrown. Guarding the success path keeps a
-  // Calendar-accepted run from being stored as a false failure; guarding
-  // the boundary keeps its return-a-result guarantee.
+  // saveRunStatus threw. EVERY persistence site is guarded -- success
+  // path, error boundary, and both validation-gate branches; the code
+  // joins the RETURNED result's warnings and is logged, never rethrown.
+  // Guarding the success path keeps a Calendar-accepted run from being
+  // stored as a false failure; guarding the gates keeps the
+  // INVALID_SETTINGS result (and its reset guidance) from being replaced
+  // by a generic persistence failure; guarding the boundary keeps its
+  // return-a-result guarantee.
   STATUS_PERSIST_FAILED: 'STATUS_PERSIST_FAILED',
+  // A post-apply bookkeeping write threw: shrink high-water mark, sweep
+  // watermark, or continuation-counter reset. Guarded because Calendar
+  // already accepted the run's operations; losing each write is safe by
+  // construction (re-scan, wider sweep, one episode's allowance -- 18.2).
+  BOOKKEEPING_PERSIST_FAILED: 'BOOKKEEPING_PERSIST_FAILED',
   // enqueueContinuation's trigger creation threw (per-user trigger quota,
   // transient ScriptApp error). Two guarded call sites, different
   // carriers (19.6): the engine's partial-run call keeps the truthful
