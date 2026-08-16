@@ -36,10 +36,12 @@ listWindowEvents(calendarId, observeStart, observeEnd, shouldStop,
        nextPageToken: string | null, resumed: boolean }
 // resumed reports whether the resumeToken was HONORED: false when none
 // was given or the token was expired/rejected and the call fell back to
-// a fresh scan from page one. The engine keys slice semantics on it --
-// forcing scanComplete false, chainFinished, point-read deletes -- so a
-// fallback fresh scan that walks off the end keeps full complete-scan
-// credit instead of being misclassified as a slice
+// listing the SAME requested range from page one. Any run that was
+// OFFERED a cursor listed the chain's pinned -- possibly stale -- span,
+// so it never claims complete-scan credit for the current window,
+// honored or not; a rejected token's stored cursor is replaced by the
+// fallback's own nextPageToken (or cleared when the fallback walked off
+// the end -- the pinned span is then fully covered and the chain done)
 listWorkingLocationEvents(calendarId, start, end) -> RawCalendarEvent[]
 // Ownership-filtered (privateExtendedProperty=dtp=1), paginated until
 // done or shouldStop fires, completeness reported -- a truncated shrink
@@ -184,7 +186,21 @@ saveRunStatusGuarded(result) -> void
 // unprocessed source failed (EXECUTION_BUDGET_EXCEEDED) before the loop
 // stops -- a bare break orphans their companions
 elapsedExceedsExecutionBudget(runStartMs) -> boolean
+// Tighter guard for READ passes (window/shrink/sweep listings,
+// restoration and orphan lookups): fires at READ_BUDGET_FRACTION of the
+// execution threshold, reserving headroom to plan and APPLY what was
+// read -- a read guarded by the full threshold returns with that check
+// already true, and everything it retrieved is marked failed and never
+// applied; on a resumable scan the cursor would advance past a slice
+// nothing reconciled (23.1)
+elapsedExceedsReadBudget(runStartMs) -> boolean
 markRemainingSourcesFailed(orderedSources, currentEvent, planningOutcomes) -> void
+// Resets the run-scoped warning buffer. The engine's FIRST statement,
+// before even the lock attempt -- every result builder (the
+// lock-contention skip included) installs the buffer by reference as
+// diagnostics.warnings, and pre-comparator warning sites (daily counter
+// reset, cursor persistence, working-location fetch) append to it
+beginRunWarnings() -> void
 // Non-fatal run warnings (codes from the 18.2 registry, e.g.
 // WORKING_LOCATION_UNAVAILABLE): appends to the run's WARNING BUFFER
 // (4.11) AND logs via logWarning, without failing the run. The buffer
@@ -254,15 +270,20 @@ loadSweepWatermark() / saveSweepWatermark(now)                    // 15.2.8
 resolveUnmatchedCompanions(diff, planningOutcomes, shouldStop) -> void
 // Window-scan cursor persistence (7.2.1) -- User Properties, engine
 // policy, stubs live beside the other Status persistence, NOT in
-// CalendarRepository. Saved when a truncated non-dry scan STARTS or
-// ADVANCES a chain (a fresh truncated run never overwrites a pending
-// cursor -- the chain owns it); resumed by continuation and daily runs;
-// cleared by chain completion, by a fresh COMPLETE non-dry scan, and by
-// remove-all (19.4); dry runs never touch it. A resumed run is treated
-// as scanComplete false downstream regardless -- its coverage is a
-// slice by construction. The load NEVER THROWS and validates the stored
-// shape: absent, malformed, or unreadable cursors return null,
-// degrading to a fresh scan -- never a failed run (AC-RECOVERY-017)
+// CalendarRepository. Saved when a truncated non-dry scan STARTS a
+// chain (no cursor stored -- a fresh truncated run never overwrites a
+// pending cursor, the chain owns it), ADVANCES one (honored token,
+// truncated again), or REPLACES a dead one (token rejected, fallback
+// truncated -- leaving the dead token stored would loop every later
+// resume on the first page); resumed by continuation and daily runs;
+// cleared by chain completion (offered cursor, listing walked off the
+// end -- honored or fallback alike), by a fresh COMPLETE non-dry scan,
+// and by remove-all (19.4); dry runs never touch it. Every
+// cursor-OFFERED run is treated as scanComplete false downstream --
+// it listed the pinned, possibly stale span, not the current window.
+// The load NEVER THROWS and validates the stored shape: absent,
+// malformed, or unreadable cursors return null, degrading to a fresh
+// scan -- never a failed run (AC-RECOVERY-017)
 loadWindowScanCursor()
   -> { pageToken, observeStart, observeEnd } | null
 saveWindowScanCursor(cursor) / clearWindowScanCursor()

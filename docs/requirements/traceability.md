@@ -245,3 +245,14 @@ This matrix links requirement groups to architecture components, technical-desig
 | §20.3 (reserve-then-refund) | Diagnostic allowance reserved before any broker call and unspent remainder refunded; both failure directions land conservative — the ceiling is never exceeded by a lost write | AC-CACHE-004 |
 | §7.2.1 (resumable scan) | Truncated window scans persist a chain-owned cursor pinned to their range; continuation and daily runs resume it, fresh runs never overwrite it, and the daily run's counter reset is the episode boundary — passes tile a too-large calendar instead of re-reading the same prefix until the cap | AC-RECOVERY-017 |
 | REQ-RECON-013 (evidence-keyed) | Both absence operations upgrade to per-event evidence on incomplete scans: creates through the per-parent lookup, orphan deletions through a parent point read (absent/cancelled deletes, live preserves) | AC-RECOVERY-009 |
+
+## Requirements added in the twenty-first review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| §23.1 (read budget) | Read passes stop at `READ_BUDGET_FRACTION` of the execution threshold, reserving headroom to plan and apply what they retrieved — a truncated slice, sweep, or shrink pass is productive, not wasted | AC-RECOVERY-013, AC-RECOVERY-017 |
+| §15.2.8 / §7.6 (advancing truncation) | Applied deletions vanish from later listings, so truncated sweep and shrink retries reach past the applied prefix instead of re-retrieving it | AC-RECOVERY-015 |
+| §7.2.1 (dead cursor replaced) | A rejected resume token's cursor is replaced by the fallback's own token (or cleared when the fallback covers the span); offered-cursor runs never claim current-window scan credit | AC-RECOVERY-017 |
+| §20.2 (disabled persisted) | Non-dry disabled results persist through the guarded save; only the lock-contention skip is unpersisted | — §20.2 |
+| Architecture §14.2 (buffer init) | `beginRunWarnings()` creates the run's warning buffer before any warning site can fire | — §18.2 |
+| §16.1 (spec-driven transparency) | Ordinary-companion transparency built from `spec.transparency`; null omits the field and observed normalization maps default back to null | AC-ELIG-007 |

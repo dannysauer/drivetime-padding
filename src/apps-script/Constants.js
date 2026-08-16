@@ -49,6 +49,21 @@ const MANUAL_ENQUEUE_LOCK_MS = 2000;
 // Partial runs schedule their own continuation. Technical Design 19.6/23.4.
 const CONTINUATION_DELAY_MS = 5 * 60000;
 
+// Conservative execution threshold the budget guards measure against:
+// Apps Script hard-kills executions at 6 minutes, and the margin below
+// it is what lets status persistence, continuation scheduling, and lock
+// release run even on a run that used its whole budget. Technical
+// Design 23.1.
+const EXECUTION_BUDGET_MS = 4.5 * 60000;
+// Read passes (window/shrink/sweep listings, restoration and orphan
+// lookups) stop at this fraction of EXECUTION_BUDGET_MS so planning and
+// application keep headroom -- a read guarded by the full threshold
+// returns with the same check already true, and everything it retrieved
+// is marked failed and never applied. Deliberately coarse: it only
+// guarantees application headroom; applyDiff's between-operations checks
+// handle a diff too large for the remainder. Technical Design 23.1.
+const READ_BUDGET_FRACTION = 0.5;
+
 // Remove-all cleanup runs as budget-bounded worker passes, never inside the
 // card callback. Lock-contention retries are bounded separately from
 // working passes -- counting them together would let zero-work retries

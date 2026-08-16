@@ -353,8 +353,11 @@ interface ReconciliationDiff {
 
 ```typescript
 interface ReconciliationDiagnostics {
-  /** From the window read (7.2.1); false on every cursor-resumed slice.
-      Gates orphan deletion; creates are gated by the 15.2.7 lookup. */
+  /** From the window read (7.2.1); false on every cursor-OFFERED run --
+      resumed slices and rejected-token fallbacks alike, since both
+      listed the chain's possibly-stale pinned span rather than the
+      current window. Gates orphan deletion; creates are gated by the
+      15.2.7 lookup. */
   scanComplete: boolean;
   /** Creates withheld because their per-parent lookup never ran, and
       companions preserved because their parent point read never ran on
@@ -711,7 +714,9 @@ The scan is driven to completion **when time permits**, and its completeness is 
 
 **Truncated scans are resumable, or continuations spin.** The listing mutates nothing it lists, so a continuation that re-issues the same query from the first page retrieves the same prefix, truncates at the same depth, and schedules another continuation — on a calendar too large for one execution budget, the chain burns its whole allowance re-reading the front of the range while later sources go unreconciled indefinitely. The engine therefore persists the stopping point of a truncated non-dry scan (`dtp.windowScanCursor`: the `nextPageToken` plus the **pinned** observation range that produced it — a page token is valid only for its own query, and successive slices must tile one span), and **continuation and daily runs resume it** — the daily run too, because a chain longer than one day's continuation allowance must survive the episode boundary or the tail of the range is never reached; on ordinary calendars no cursor is pending at daily time and the daily run scans fresh as always.
 
-The pending cursor is **owned by the chain**. A calendar-trigger or manual run scans fresh — a full pass is its purpose — but when its own scan truncates it must **not overwrite a pending cursor**: on busy calendars such runs fire on every edit, and each overwrite would reset the chain to slice one, perpetually starving the tail. A fresh truncated run *starts* a chain only when no cursor is stored; a fresh **complete** scan clears any pending cursor (full coverage makes the chain moot). A resumed run advances the cursor when it truncates and clears it when it walks off the end — the **chain** finished, not this run's coverage: a resumed run's own coverage is its slice only, so the engine treats it as `scanComplete: false` downstream *however far the listing gets*. All cursor writes are non-dry only and guarded bookkeeping (§18.2, `BOOKKEEPING_PERSIST_FAILED`): a lost cursor restarts the scan from the front — wasteful, never wrong — and the repository treats an expired or rejected resume token the same way, falling back to a fresh scan rather than failing the run. The pinned range governs the *listing* only; eligibility still evaluates against the run's own planning range.
+The pending cursor is **owned by the chain**. A calendar-trigger or manual run scans fresh — a full pass is its purpose — but when its own scan truncates it must **not overwrite a pending cursor**: on busy calendars such runs fire on every edit, and each overwrite would reset the chain to slice one, perpetually starving the tail. A fresh truncated run *starts* a chain only when no cursor is stored; a fresh **complete** scan clears any pending cursor (full coverage makes the chain moot).
+
+Slice semantics key on whether a cursor was **offered**, not on whether its token was honored. A run offered a cursor listed the chain's pinned — possibly stale — span: resumed mid-chain when the token was honored, or from that span's first page when the repository rejected an expired token and fell back. Either way the coverage is not the current window's, so the engine treats the run as `scanComplete: false` downstream *however far the listing gets*, and a listing that walks off the end means the **chain** finished — the pinned span is fully covered and the cursor clears — not that this run observed the current window. A **rejected token's stored cursor must not survive**: left in place, every later resume would retry it, fall back, and re-read the same first-page prefix indefinitely; the fallback's own `nextPageToken` replaces it, restarting the chain over the same span (or the clear-on-completion applies when the fallback covered it all). All cursor writes are non-dry only and guarded bookkeeping (§18.2, `BOOKKEEPING_PERSIST_FAILED`): a lost cursor restarts the scan from the front — wasteful, never wrong. The pinned range governs the *listing* only; eligibility still evaluates against the run's own planning range.
 
 What slices deliver: presence-based work for every slice, creates through the §15.2.7 lookup, and orphan deletes through §15.2.3's parent point reads — each gated on per-event evidence rather than scan completeness (§15.2.4). What still requires a genuinely complete scan degrades on such calendars and is accepted explicitly (§15.2.4): duplicate convergence and the §15.2.8 sweep.
 
@@ -796,9 +801,13 @@ function findStrandedCompanions(window, settings, dryRun, shouldStop) {
   // same runtime hazard: a large horizon reduction can leave enough
   // events in the vacated range that paginating to completion spends the
   // remaining execution budget inside this one call, hard-killing the
-  // run before status or continuation. Early return with scanComplete
-  // false is already safe -- the mark is retained and the next run
-  // retries.
+  // run before status or continuation. The guard is the READ budget
+  // (23.1), which is what makes a truncated pass PRODUCTIVE, not merely
+  // safe: application headroom remains, the retrieved page's deletions
+  // apply this run, and -- because deleted events vanish from later
+  // listings -- the retry's same-bounds read reaches new events instead
+  // of re-retrieving an identical prefix forever. The mark is retained
+  // until a COMPLETE pass's deletions all apply.
   const scan = listGeneratedEventsBetween(
     'primary',
     window.observeEnd,
@@ -822,7 +831,7 @@ The return shape is the point. This function is a *finder*; the deletions happen
 ```javascript
 const cleanup = findStrandedCompanions(
   window, settings, options.dryRun,
-  () => elapsedExceedsExecutionBudget(runStart));
+  () => elapsedExceedsReadBudget(runStart));   // READ budget, 23.1
 diff.deletes.push(...cleanup.events);
 
 if (!options.dryRun) {
@@ -1690,7 +1699,7 @@ The **absent-parent** rule is safe without `scanComplete`: the swept events were
 
 Steady-state cost is one small `updatedMin`-bounded listing per day — recently-patched in-window companions (excluded by the id test at no further cost) plus any strays — and a small band of point reads: the discovery slack deliberately reaches behind the observation range, so recently-updated companions of sources that ended roughly 40–80 hours ago can be candidates until their anchors age out of the band, a handful of lookups each finding a live parent and skipping. Beyond that, the §7.2 completeness proof applies: a companion whose anchor lies inside the range sits inside the observation range *unless it was moved out*, so the remaining lookups are proportional to anomalies, normally zero.
 
-The sweep is **budget-aware at every unbounded point**: it runs only when `elapsedExceedsExecutionBudget` is still false when its turn comes (after the restoration pass), its listing stops paging early when the budget nears, its parent point-read loop checks the same `shouldStop` guard **between reads**, and the engine re-evaluates the budget after the sweep before applying the diff (§23.1). A sweep cut short at any of those points is *incomplete* (`sweepComplete: false`) — the watermark stays put, so the next completed sweep's bounds stretch back over the unprocessed candidates. And even a complete sweep advances the watermark **only after its deletes actually applied**: application can be skipped (out of time) or defer the deletes, and continuations cannot re-run the sweep (it is daily-gated), so an application-blind advance would strand the found strays exactly as permanently as never finding them. A truncated listing is safe to act on: candidate selection only *finds* strays, and each deletion decision rests on its own point read — truncation merely means some strays wait for tomorrow's sweep. A sweep skipped or cut short costs nothing, while an unbounded listing racing the execution ceiling into `applyDiff` risks the hard-kill-mid-apply failure the budget gate exists to prevent.
+The sweep is **budget-aware at every unbounded point**, on the **read budget** (§23.1): it runs only when `elapsedExceedsReadBudget` is still false when its turn comes (after the restoration pass), its listing stops paging early when that tighter threshold nears, its parent point-read loop checks the same guard **between reads**, and the engine re-evaluates the full execution budget after the sweep before applying the diff. The read-budget guard is what makes a truncated sweep *productive* rather than wasted: it leaves application headroom, so the deletions its point reads already proved are applied this run — and since each applied deletion removes its stray from the `updatedMin` listing, the next daily sweep's same-bounds read reaches past them instead of re-retrieving a stable prefix forever. A sweep cut short at any of those points is *incomplete* (`sweepComplete: false`) — the watermark stays put, so the next completed sweep's bounds stretch back over the unprocessed candidates. And even a complete sweep advances the watermark **only after its deletes actually applied**: application can be skipped (out of time) or defer the deletes, and continuations cannot re-run the sweep (it is daily-gated), so an application-blind advance would strand the found strays exactly as permanently as never finding them. A truncated listing is safe to act on: candidate selection only *finds* strays, and each deletion decision rests on its own point read — truncation merely means some strays wait for tomorrow's sweep. A sweep skipped or cut short costs nothing, while an unbounded listing racing the execution ceiling into `applyDiff` risks the hard-kill-mid-apply failure the budget gate exists to prevent.
 
 Why daily only: a per-calendar-trigger sweep would pay the unbounded listing on every edit, and a stray outside the observation range is invisible in the user's near-term view — a one-day discovery bound matches the daily cycle that already backstops eventual consistency (REQ-TRIGGER-002). The residual case — source deleted and automation disabled before the next daily run ever fires — is accepted; the remove-all action's unbounded cleanup (§19.4) still reaches such events.
 
@@ -1710,7 +1719,7 @@ The comparator always creates a complete diff object. Application of that diff i
 
 ### 16.1 Ordinary event body
 
-Representative structure:
+Representative structure (`transparency` shown with a sample value — see below):
 
 ```json
 {
@@ -1734,6 +1743,8 @@ Representative structure:
   }
 }
 ```
+
+`transparency` is **built from `spec.transparency`, never hardcoded**: §12.6 makes an ordinary companion inherit its title-pattern source's transparency, so a transparent source gets a transparent travel block — a hardcoded `opaque` would create a busy block contrary to the source's behavior and immediately register as an owned-field mismatch the next comparison "repairs". And because Calendar's *default* is `opaque`, the default is **folded to `null` on both sides**: normalization maps an absent *or explicit* `"opaque"` to `null` when reading (source and companion alike, §4.3/§4.9), spec building carries that `null` through, and the write **omits** the field for a `null` spec — only `"transparent"` is ever written or compared explicitly. A one-sided fold would churn: a source carrying an explicit `"opaque"` would produce an `"opaque"` spec, the written companion would read back as `null`, and every subsequent comparison would "repair" a pair that already agrees.
 
 ### 16.2 OOO body
 
@@ -2468,7 +2479,7 @@ The write counts are **applied** counts taken from the `ApplyResult` (§17.5) vi
 
 A persisted result can carry `applied: null` — a failure result from a validation gate or the boundary, or a write run whose budget expired *before* application (§17.5). The record then stores **zero for all seven counts**, and the status plus `errors` carry the story: `failed` with zero counts is a run that never applied anything, and `partial` with all-zero counts and no errors is precisely the computed-but-never-applied case — the diff was proposed, application was skipped for time, and the continuation reschedules it. `saveRunStatus` must handle the null without dereferencing it.
 
-Dry runs never write this record (§17.5). Every **non-dry** run's result is persisted — including failures and never-applied partials, via the guarded save at each engine exit — and the zero counts plus status are what distinguish those from runs that applied work.
+Dry runs never write this record (§17.5). Every **non-dry** run that acquired the user lock persists its result — including failures, `disabled`, and never-applied partials, via the guarded save at each engine exit — and the zero counts plus status are what distinguish those from runs that applied work. The one unpersisted non-dry exit is the lock-contention `skipped` result: it did no work and holds no lock to serialize the write under.
 
 ### 20.3 Event diagnostic mode
 
@@ -2696,6 +2707,8 @@ If nearing a conservative execution threshold:
 - allow daily or subsequent trigger execution to continue.
 
 Marking the skipped sources is the load-bearing step, not bookkeeping. The observation scan has usually **completed** by the time planning runs out of budget, and §15.2.3's complete-scan rule treats a companion whose parent is absent from `planningOutcomes` as a genuine orphan. Breaking out of the loop with a bare `break` would therefore hand deletion authority over every unplanned source's companions to the very degradation path that exists to protect them — the run would delete travel blocks *because* it ran out of time. `failed` is the outcome that carries no deletion authority (§17.4), which is exactly the semantics of "not evaluated."
+
+**Read passes stop at a tighter threshold than the run.** One deadline cannot serve both phases: a read pass guarded by the full execution threshold runs *until* that threshold, so the same check is already true when it returns — planning marks every retrieved source failed, application is suppressed, and the work of reading is thrown away. On a resumable scan that is worse than waste: the cursor advances past a slice none of whose events were reconciled, and the chain "covers" the calendar without doing anything to it. The read passes — the window listing, the shrink listing, the sweep's listing and point reads, the restoration and orphan-resolution lookups — therefore take `elapsedExceedsReadBudget(runStart)` as their guard, which fires at `READ_BUDGET_FRACTION` (recommended 0.5) of the execution threshold; planning and `applyDiff` keep the full-threshold guard. A read pass that fills its half leaves the other half to plan and apply what it retrieved: a slice is read *and reconciled*, a truncated sweep still applies the deletions its point reads proved (its candidate set shrinks, so the next daily sweep advances past them), and a truncated shrink listing still deletes what it retrieved (deletions shrink the vacated-range listing, so the retry's same-prefix read reaches new events). The split is deliberately coarse — a fraction, not a measurement — because its job is only to guarantee application headroom, and `applyDiff`'s between-operations checks already handle a diff too large for whatever remains.
 
 ### 23.2 Ordering
 

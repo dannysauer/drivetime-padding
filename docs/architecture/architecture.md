@@ -700,6 +700,14 @@ flowchart TD
 
 ```javascript
 function reconcile(options) {
+  // One warning buffer for the whole run, created before ANY result is
+  // built -- the lock-contention skip below included, since every
+  // result builder installs this same array by reference as
+  // diagnostics.warnings (interfaces; 4.11 declares the field
+  // non-optional). recordRunWarning appends to it; the comparator
+  // installs it into diff.diagnostics.
+  beginRunWarnings();
+
   const lock = LockService.getUserLock();
 
   if (!lock.tryLock(5000)) {
@@ -723,8 +731,10 @@ function reconcile(options) {
   let routeBudget = null;
   let initialBudget = 0;
   let now = null;
-  // True when a cursor-RESUMED listing walked off the end: the scan
-  // chain's coverage work is done this episode (§7.2.1, §19.6).
+  // True when a cursor-OFFERED listing walked off the end -- resumed
+  // mid-chain, or a rejected-token fallback that covered the whole
+  // pinned span: either way the chain's coverage work is done and the
+  // cursor clears (§7.2.1, §19.6).
   let chainFinished = false;
 
   try {
@@ -748,10 +758,17 @@ function reconcile(options) {
     // caller's bug would surface only after the user re-enables.
     if (Boolean(options.eventIdFilter) !== isDiagnostic ||
         (options.eventIdFilter && !options.dryRun)) {
-      return buildFailureResult(
+      const rejection = buildFailureResult(
         new Error(
           "eventIdFilter, reason 'event-diagnostic', and dryRun go together"),
         options);
+      // Persisted like every other locked non-dry exit (technical
+      // design §20.2): the caller's bug should be visible in the
+      // last-run record, not hidden behind the previous outcome.
+      if (!options.dryRun) {
+        saveRunStatusGuarded(rejection);
+      }
+      return rejection;
     }
 
     // Validation failure is an explicit failed result, not a throw: it
@@ -796,6 +813,13 @@ function reconcile(options) {
       if (options.eventIdFilter) {
         disabled.eventDiagnostics = buildUnresolvedEventDiagnostics(
           options.eventIdFilter, "DISABLED_GLOBALLY");
+      }
+      // Persisted like every other non-dry exit (technical design
+      // §20.2): a leftover trigger or direct invocation after disable
+      // must update the last-run record, or the home card keeps showing
+      // the previous outcome as the most recent invocation.
+      if (!options.dryRun) {
+        saveRunStatusGuarded(disabled);
       }
       return disabled;
     }
@@ -883,12 +907,14 @@ function reconcile(options) {
         .concat(companions.map(companion => companion.rawEvent));
       scanComplete = true;
     } else {
-      // Deadline-aware: the read checks the guard between pages and
-      // returns the retrieved prefix with scanComplete false when the
-      // budget nears -- a paginate-to-completion contract could spend the
-      // entire runtime inside this one call, before any engine-side
-      // check runs (technical design §7.2.1). Truncation is a
-      // first-class state downstream (§15.2.4, §15.2.8, §7.6).
+      // Deadline-aware, on the READ budget (technical design §23.1):
+      // every read pass stops at READ_BUDGET_FRACTION of the execution
+      // threshold, reserving headroom to plan and APPLY what it
+      // retrieved -- a read guarded by the full threshold returns with
+      // that check already true, everything it read is marked failed,
+      // and on a resumable scan the cursor advances past a slice
+      // nothing reconciled. Truncation is a first-class state
+      // downstream (§15.2.4, §15.2.8, §7.6).
       //
       // RESUMABLE (technical design §7.2.1): continuation AND daily
       // runs resume a truncated predecessor's listing from the persisted
@@ -915,23 +941,25 @@ function reconcile(options) {
           "primary",
           scanRange.observeStart,
           scanRange.observeEnd,
-          () => elapsedExceedsExecutionBudget(runStart),
+          () => elapsedExceedsReadBudget(runStart),
           resume ? resume.pageToken : null
         ));
-      // Slice semantics key on `resumed` -- whether the token was
-      // HONORED -- not on whether one was offered: an expired token
-      // falls back to a fresh scan, and a fallback that walks off the
-      // end earned full complete-scan credit; forcing it partial would
-      // skip the sweep and demote deletes for nothing. A genuinely
-      // resumed run read a SLICE: its coverage is partial by
-      // construction, however far the listing got. Walking off the end
-      // means the CHAIN finished -- clear the cursor -- not that this
-      // run observed the whole range.
-      if (!resumed) {
-        resume = null;
-      }
-      chainFinished = Boolean(resume) && scanComplete;
-      if (resume) {
+      // Slice semantics key on whether a cursor was OFFERED: any run
+      // that listed the chain's PINNED range -- resumed mid-chain, or
+      // fallen back to that range's first page on a rejected token --
+      // covered a span that may be stale, so it never claims
+      // complete-scan credit for the CURRENT window (`resumed` reports
+      // whether the token was honored; either way the range listed was
+      // the stored one). Walking off the end means the CHAIN finished
+      // -- the pinned span is fully covered and the cursor clears --
+      // not that this run observed the current window. A rejected
+      // token's cursor must not survive: leaving it stored would make
+      // every later resume retry it, fall back, and re-read the same
+      // first-page prefix indefinitely; the fallback's own nextPageToken
+      // replaces it below, restarting the chain over the same span.
+      const offeredResume = Boolean(resume);
+      chainFinished = offeredResume && scanComplete;
+      if (offeredResume) {
         scanComplete = false;
       }
       if (!options.dryRun) {
@@ -946,7 +974,10 @@ function reconcile(options) {
         // bookkeeping: a lost cursor restarts the scan from the front --
         // wasteful, never wrong (technical design §18.2).
         try {
-          if (resume) {
+          if (offeredResume) {
+            // Advance (honored, truncated), REPLACE (rejected, fallback
+            // truncated -- the dead token must not survive), or clear
+            // (either way the pinned span is fully covered).
             if (chainFinished) {
               clearWindowScanCursor();
             } else if (nextPageToken) {
@@ -959,6 +990,8 @@ function reconcile(options) {
           } else if (scanComplete) {
             clearWindowScanCursor();
           } else if (nextPageToken && !loadWindowScanCursor()) {
+            // A fresh truncated run STARTS a chain only when none is
+            // stored -- the chain owns a pending cursor.
             saveWindowScanCursor({
               pageToken: nextPageToken,
               observeStart: scanRange.observeStart,
@@ -1231,7 +1264,7 @@ function reconcile(options) {
     const cleanup = options.eventIdFilter
       ? { shrunk: false, events: [], scanComplete: true }
       : findStrandedCompanions(window, settings, options.dryRun,
-          () => elapsedExceedsExecutionBudget(runStart));
+          () => elapsedExceedsReadBudget(runStart));
     diff.deletes.push(...cleanup.events);
 
     // Deduplicate by event id before merging. An overlong source with one
@@ -1288,7 +1321,7 @@ function reconcile(options) {
       // creates must never be applied blindly (technical design
       // §15.2.7).
       resolveOutOfWindowCompanions(diff, cleanup,
-        () => elapsedExceedsExecutionBudget(runStart));
+        () => elapsedExceedsReadBudget(runStart));
       outOfTime = elapsedExceedsExecutionBudget(runStart);
     }
 
@@ -1305,7 +1338,7 @@ function reconcile(options) {
     if (!options.eventIdFilter && !scanComplete &&
         (options.dryRun || !outOfTime)) {
       resolveUnmatchedCompanions(diff, planningOutcomes,
-        () => elapsedExceedsExecutionBudget(runStart));
+        () => elapsedExceedsReadBudget(runStart));
       outOfTime = elapsedExceedsExecutionBudget(runStart);
     }
 
@@ -1349,10 +1382,10 @@ function reconcile(options) {
     // incomplete sweeps.
     let sweep = null;
     if (options.reason === "daily-trigger" && scanComplete &&
-        !elapsedExceedsExecutionBudget(runStart)) {
+        !elapsedExceedsReadBudget(runStart)) {
       sweep = sweepOutOfWindowCompanions(
         observedGenerated, planningOutcomes, window, now,
-        () => elapsedExceedsExecutionBudget(runStart));
+        () => elapsedExceedsReadBudget(runStart));
       const queuedIds = new Set(diff.deletes.map(event => event.id));
       diff.deletes.push(
         ...sweep.events.filter(event => !queuedIds.has(event.id))
