@@ -233,10 +233,11 @@ captureEventDiagnostics(event, eligibility, directives, origin, outcome,
 // Fallback payload when the diagnostic flow cannot evaluate the opened
 // event: a synthesized ineligible EligibilityResult with reason
 // EVENT_NOT_FOUND or PARENT_NOT_FOUND (engine-side, targeted read
-// resolved nothing, 17.1) or UNSUPPORTED_CALENDAR (card-side, opened
-// calendar differs from the resolved primary id, BEFORE any engine run,
-// 20.3) -- the card must never render silence for exactly the events
-// users most wonder about
+// resolved nothing, 17.1), DISABLED_GLOBALLY (engine-side, the disabled
+// gate precedes the targeted read on a scoped run, 17.1), or
+// UNSUPPORTED_CALENDAR (card-side, opened calendar differs from the
+// resolved primary id, BEFORE any engine run, 20.3) -- the card must
+// never render silence for exactly the events users most wonder about
 buildUnresolvedEventDiagnostics(eventId, reason) -> EventDiagnostics
 
 // Triggers

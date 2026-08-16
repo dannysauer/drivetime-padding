@@ -724,6 +724,32 @@ function reconcile(options) {
   let now = null;
 
   try {
+    // §17.1: eventIdFilter and reason "event-diagnostic" are one package,
+    // enforced in BOTH directions, plus dryRun. A scoped run without the
+    // reason would draw the ordinary 60-attempt budget on every card open
+    // with none of the spend recorded, bypassing the §20.3 hourly
+    // ceiling; the reason without the scope (or without dryRun) would
+    // point a full -- even write-mode -- reconcile at the shared
+    // 20-attempt hourly allowance and drain it for every genuine card
+    // open that hour. And a scoped run carries deletion authority over a
+    // comparison that deliberately cannot see everything else, so it is
+    // dry-run only. One canonical invocation, enforced rather than
+    // assumed.
+    //
+    // Checked FIRST -- a pure contract check on the options, ahead of any
+    // settings read or gate. The disabled gate below consumes
+    // eventIdFilter to synthesize its diagnostics payload; checking the
+    // contract after it would let an invalid scoped invocation against a
+    // disabled install return a plausible-looking result, and the
+    // caller's bug would surface only after the user re-enables.
+    if (Boolean(options.eventIdFilter) !== isDiagnostic ||
+        (options.eventIdFilter && !options.dryRun)) {
+      return buildFailureResult(
+        new Error(
+          "eventIdFilter, reason 'event-diagnostic', and dryRun go together"),
+        options);
+    }
+
     // Validation failure is an explicit failed result, not a throw: it
     // must reach the stored record with INVALID_SETTINGS, and the failure
     // carries the validation errors so the diagnostic card can show the
@@ -749,33 +775,26 @@ function reconcile(options) {
     // schema-complete, with empty origins -- and a disabled install must
     // report "disabled", not manufacture a MISSING_DEFAULT_ORIGIN failure
     // record moments after cleanup cleared the last one.
+    //
+    // A scoped diagnostic still owes the card a payload: this gate sits
+    // BEFORE the targeted read, buildEventCard renders
+    // result.eventDiagnostics, and REQ-UI-012 promises every opened event
+    // an eligibility answer -- a bare status here would render a blank
+    // card for exactly the state the user most needs explained.
+    // DISABLED_GLOBALLY is already in the 4.5 reason registry.
     if (!settings.enabled) {
-      return buildStatusOnlyResult("disabled", null, options);
+      const disabled = buildStatusOnlyResult("disabled", null, options);
+      if (options.eventIdFilter) {
+        disabled.eventDiagnostics = buildUnresolvedEventDiagnostics(
+          options.eventIdFilter, "DISABLED_GLOBALLY");
+      }
+      return disabled;
     }
 
     if (!options.dryRun && !validation.writeReady) {
       const failure = buildFailureResult(validation, options);
       saveRunStatus(failure);
       return failure;
-    }
-
-    // §17.1: eventIdFilter and reason "event-diagnostic" are one package,
-    // enforced in BOTH directions, plus dryRun. A scoped run without the
-    // reason would draw the ordinary 60-attempt budget on every card open
-    // with none of the spend recorded, bypassing the §20.3 hourly
-    // ceiling; the reason without the scope (or without dryRun) would
-    // point a full -- even write-mode -- reconcile at the shared
-    // 20-attempt hourly allowance and drain it for every genuine card
-    // open that hour. And a scoped run carries deletion authority over a
-    // comparison that deliberately cannot see everything else, so it is
-    // dry-run only. One canonical invocation, enforced rather than
-    // assumed.
-    if (Boolean(options.eventIdFilter) !== isDiagnostic ||
-        (options.eventIdFilter && !options.dryRun)) {
-      return buildFailureResult(
-        new Error(
-          "eventIdFilter, reason 'event-diagnostic', and dryRun go together"),
-        options);
     }
 
     // Counted HERE, under the lock -- not in the trigger handler. A

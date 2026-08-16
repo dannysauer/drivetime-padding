@@ -652,7 +652,7 @@ Definitive ineligibility carries deletion authority, but the window scan cannot 
 **And** the cached zero is accepted by validation rather than treated as absent  
 **And** the entry is served from the tier that carries it.
 
-Zero is a legitimate duration. A truthiness check on the cached value would reject it before validation, forcing a broker call and metadata rewrite on every run. The two tiers have different lifetimes: the ephemeral tier is capped by CacheService well under `ROUTE_CACHE_MAX_AGE_HOURS` (§20.3), so a companion-less zero route re-fetched after ephemeral eviction is conformant — §12.5's bound is two broker calls per ephemeral TTL, not per durable lifetime.
+Zero is a legitimate duration. A truthiness check on the cached value would reject it before validation, forcing a broker call and metadata rewrite on every run. The two tiers have different lifetimes: the ephemeral tier is capped by CacheService well under `ROUTE_CACHE_MAX_AGE_HOURS` (§20.3), so a companion-less zero route re-fetched after ephemeral eviction is conformant — §12.5's expected-case behavior is two broker calls per ephemeral TTL, not per durable lifetime, and because CacheService is best-effort the hard bound is the per-run ceiling (REQ-PERF-010 exception), not the TTL. A test must not assert the TTL figure as an invariant.
 
 ## AC-CONFIG-003: Companion spanning the reduced horizon is not double-handled
 

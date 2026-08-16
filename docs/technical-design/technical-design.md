@@ -203,7 +203,7 @@ PARENT_NOT_FOUND
 UNSUPPORTED_CALENDAR
 ```
 
-`EVENT_NOT_FOUND` and `PARENT_NOT_FOUND` are synthesized only by diagnostic runs when the targeted read resolves nothing (§17.1); the eligibility evaluator itself never produces them — an event it is handed necessarily exists. `UNSUPPORTED_CALENDAR` is synthesized only by the **card flow** via `buildUnresolvedEventDiagnostics`, before the engine is ever invoked, when the event was opened from a calendar whose id differs from the resolved primary-calendar id (§20.3 — never a comparison against the literal `"primary"` alias, which trigger payloads do not contain). The engine's contract stays primary-only.
+`EVENT_NOT_FOUND` and `PARENT_NOT_FOUND` are synthesized only by diagnostic runs when the targeted read resolves nothing (§17.1); the eligibility evaluator itself never produces them — an event it is handed necessarily exists. `DISABLED_GLOBALLY` has **two producers**: §9.2's evaluator lists the global-disable check as its step 1 — the reason's ordinary home, kept as defense in depth — and the engine's **disabled gate** synthesizes it via `buildUnresolvedEventDiagnostics` on a scoped run, because the gate precedes the targeted read (the evaluator never runs there) and the card still owes the opened event an answer (§17.1, REQ-UI-012). The two produce the same reason for the same state; neither contradicts the other. `UNSUPPORTED_CALENDAR` is synthesized only by the **card flow** via `buildUnresolvedEventDiagnostics`, before the engine is ever invoked, when the event was opened from a calendar whose id differs from the resolved primary-calendar id (§20.3 — never a comparison against the literal `"primary"` alias, which trigger payloads do not contain). The engine's contract stays primary-only.
 
 ### 4.6 ResolvedOrigin
 
@@ -1042,14 +1042,22 @@ The broker's wire vocabulary (Architecture §19.4) and the application's error c
 | 429 | `RATE_LIMITED` | `BROKER_RATE_LIMITED` | no (until a `Retry-After` policy exists) |
 | 502 / 503 / 504 | `UPSTREAM_UNAVAILABLE` | `BROKER_UNAVAILABLE` | yes — one immediate retry |
 | 500 | `INTERNAL_ERROR` | `BROKER_UNAVAILABLE` | yes — one immediate retry |
+| 500 / 502 / 503 / 504 | body missing, unparseable, or code unrecognized | `BROKER_UNAVAILABLE` | yes — one immediate retry |
+| 429 | body missing, unparseable, or code unrecognized | `BROKER_RATE_LIMITED` | no (same policy as the recognized-body row) |
 | *(no response)* | `UrlFetchApp` throw — timeout, DNS failure, connection reset | `BROKER_UNAVAILABLE` | yes — one immediate retry |
-| any | body missing, unparseable, or code unrecognized | `BROKER_PROTOCOL_ERROR` | no |
+| any other | body missing, unparseable, or code unrecognized | `BROKER_PROTOCOL_ERROR` | no |
 
 The table is reachable only if non-2xx responses come back as *responses*: every broker request **must set `muteHttpExceptions: true`**. Without it, `UrlFetchApp.fetch` throws on 400, 401, 404, 429, and 503 alike, so the status and body rows above are never consulted — every HTTP error collapses into the *(no response)* transport row and is classified retryable `BROKER_UNAVAILABLE`, including the validation and authorization failures the table marks explicitly non-retryable. The option is part of the routing-client contract, and the *(no response)* row is reserved for **actual transport exceptions** — timeout, DNS failure, connection reset — the only failures that still throw with the option set.
 
 The transport row matters as much as the HTTP rows: a fetch exception is the single most transient failure class, and routing it through the body-missing catch-all would classify an ordinary outage as a non-retryable protocol error.
 
-The **application code decides retryability and user messaging**; the HTTP status and broker code are inputs to the mapping, never consulted downstream. An unrecognized broker code maps to `BROKER_PROTOCOL_ERROR` even on a 2xx — a response the client cannot interpret is not a success.
+The mapping's **precedence order** resolves every status/code combination, including pairs no table row names:
+
+1. **On an error status, a recognized broker `code` is authoritative.** It necessarily came from the broker's own error writer, and is more specific than the transport status — a 500 whose body carries `RATE_LIMITED` classifies `BROKER_RATE_LIMITED`, not a retryable outage; retrying a rate-limited backend burns budget against exactly the backend asking for less traffic. A **2xx** is different: success bodies are governed by §11.3's validation, and a 200 carrying an error code — or anything else that fails that validation — is `BROKER_PROTOCOL_ERROR`, because the broker's contract never pairs error codes with success statuses.
+2. **The status classifies bodies that carry no recognized code.** A 5xx or 429 is frequently emitted by infrastructure that never reached the broker's JSON error writer — Cloud Run's own front end, a proxy, a load balancer shedding load — as a bare or HTML body. Requiring a parseable body would misclassify exactly those responses as permanent `BROKER_PROTOCOL_ERROR`: for the 5xx family that contradicts §11.2's immediate-retry policy, and for a bare 429 it would blame the wire contract for what is rate limiting — and permanently sideline the table's own hook for a future `Retry-After` policy from the infrastructure-emitted 429s that need it most. So a code-less 500/502/503/504 maps to `BROKER_UNAVAILABLE` and a code-less 429 to `BROKER_RATE_LIMITED`.
+3. **Everything else is `BROKER_PROTOCOL_ERROR`.** An unrecognized code, or a missing/unparseable body, on a status the table does not otherwise recognize — *including a 2xx*: a response the client cannot interpret is not a success.
+
+The **application code decides retryability and user messaging**; the HTTP status and broker code are inputs to the mapping, never consulted downstream.
 
 ---
 
@@ -1197,7 +1205,9 @@ Use integer seconds internally to avoid drift. Because durations are quantized t
 
 **Zero-length blocks are never emitted.** A zero-second route (coincident endpoints, §13.3) with a zero-minute buffer — both explicitly allowed — makes `quantize(duration) + buffer === 0`, and the formulas above would produce a companion whose start equals its end. Calendar rejects zero-length events, so every reconciliation would end `partial` on an insert that can never succeed. When a direction's total padding is zero, the provider emits **no spec for that role**: a zero-minute drive with zero buffer needs no travel block. The outcome is still `planned`, so a stale companion for that role is cleaned up through the ordinary orphan path — desired state genuinely contains no block.
 
-No companion also means **no durable cache carrier** — the route cache lives in companion metadata (§13.3). To keep the cost bound, a broker result with no durable home is written to the **ephemeral cache** (§20.3; entries are keyed by the same route input hash and interchangeable between tiers). That bounds the degenerate case at two broker calls per ephemeral TTL instead of two per run; with any nonzero buffer a block exists and the durable tier carries the entry as usual.
+No companion also means **no durable cache carrier** — the route cache lives in companion metadata (§13.3). A broker result with no durable home is written to the **ephemeral cache** (§20.3; entries are keyed by the same route input hash and interchangeable between tiers), which in the expected case holds the degenerate case to two broker calls per ephemeral TTL instead of two per run; with any nonzero buffer a block exists and the durable tier carries the entry as usual.
+
+This is a **stated exception to REQ-PERF-009's once-per-day refresh bound**, not a silent violation of it — and it is **per direction**, because the cache carrier is (§13.3): with a zero buffer and asymmetric routes, an outbound that quantizes to zero has no companion while the nonzero return does, and the return's companion caches only its own direction — the outbound result is ephemeral-only even though a companion exists for the other role. The ephemeral TTL is well under 24 hours, so an affected direction under continuous trigger activity re-calls the broker after each eviction — typically a handful of calls per day for that direction. And since `CacheService` is **best-effort** (entries can be evicted before their TTL under cache pressure), the TTL figure is the expected case, not a platform guarantee: the *hard* ceiling remains the per-run route budget times trigger frequency (REQ-PERF-010), which is what actually bounds spend. The exception is accepted rather than engineered away because the alternative is real machinery for a vanishing case: a companion-less durable store (User Properties keyed by route hash) needs its own pruning discipline to avoid unbounded growth, for route directions that arise only when the drive **quantizes to zero** *and* the buffer is zero — and the first broker call is what discovers that. REQ-PERF-009 carries the same exception in its own text, so the requirement and this design cannot drift apart on it.
 
 ### 12.6 Generated type
 
@@ -1850,6 +1860,8 @@ interface ReconciliationOptions {
 
 - the **window scan is replaced by a targeted read**: the opened event via `getEventById` plus its managed companions via `listCompanionsByParent`. This is a correctness requirement, not just economy — an event beyond the observation range is invisible to the bounded listing, so a window-scan-based filter would leave the card with silence instead of the `OUTSIDE_WINDOW` reason the user needs; and it removes the full window listing from the hot card-open path. Eligibility still evaluates against the planning range, so the out-of-range diagnosis is reported correctly;
 - when the opened event is itself a **generated companion**, the filter is redirected to its `parent` id before the targeted read. The companion is derived state with no planning story of its own; diagnosing it literally would classify it as an unparented orphan and, on a hypothetical write run, propose deleting the very event the user asked about. The parent id is **validated before it is used** — a non-empty string, or the redirect resolves nothing: `dtp === '1'` does not guarantee the rest of the metadata survived, and a blank or missing `parent` handed to the point read or the companion listing can throw before the `PARENT_NOT_FOUND` fallback is ever built. An unresolvable redirect issues no further repository calls and reports `PARENT_NOT_FOUND` for the clicked event. The working-location fetch is likewise scoped to the diagnosed event's span rather than the observation range;
+- when **automation is disabled**, the disabled gate — which precedes the targeted read — still returns the payload: a synthesized ineligible result with reason `DISABLED_GLOBALLY`. `buildEventCard` renders `result.eventDiagnostics`, and REQ-UI-012 promises every opened event an eligibility answer; a bare status-only result would render a blank card for exactly the state the user most needs explained;
+- the card's rendering is **exhaustive over the statuses a scoped run can return**, in precedence order: `eventDiagnostics` when present (the planned, ineligible, disabled, and not-found cases all carry it); otherwise `skipped` (lock contention — the exit that precedes everything, including the diagnostics synthesis) renders "synchronization in progress — reopen shortly", because no eligibility answer exists while another run holds the lock and inventing one would misreport (REQ-UI-012 carries this exception); otherwise `failed` renders the result's errors — the §5.3 validation list for `INVALID_SETTINGS`, the §18.3 message for a contract rejection or boundary failure. No engine exit leaves the card blank;
 - when the targeted read resolves **no source event** — the id no longer exists, or a companion's `parent` reference points at a purged event — the result still carries a diagnostic payload: `eventDiagnostics` holds a synthesized ineligible `EligibilityResult` with reason `EVENT_NOT_FOUND` (or `PARENT_NOT_FOUND` when a companion redirect failed) and null/empty remaining fields. Silence is the failure mode the targeted read exists to eliminate, and an orphaned companion is exactly the event a user most needs explained. The dry-run diff may simultaneously propose deleting such a companion; that is honest reporting — with its parent gone it *is* an orphan — and the card presents the reason alongside it;
 - planning and comparison therefore naturally cover only that parent — nothing else was read, so nothing else can be misreported as an orphan;
 - the cleanup passes (window-shrink, overlong) are skipped — the card cannot act on or display them, and the shrink scan costs real Calendar quota on the hot card-open path;
@@ -2054,11 +2066,14 @@ DIRECTIVE_ORIGIN_UNCONFIGURED
 DIAGNOSTIC_SPEND_RECORD_FAILED
 STATUS_PERSIST_FAILED
 CONTINUATION_ENQUEUE_FAILED
+MANUAL_ENQUEUE_FAILED
 ```
 
 `DIRECTIVE_ORIGIN_UNCONFIGURED`: a directive named a `home` or `office` origin that is not configured, and resolution fell back to the default (§10.2). Recorded by the **engine** after `resolveOrigin` — the resolver stays a pure lookup — whenever `directives.origin` is set but the resolved origin's `name` differs from the requested one (never for an honored `origin=default`). Without a registered code the fallback §10.2 requires would have no carrier, and the event card could not explain that the user's explicit selection was ignored.
 
 `CONTINUATION_ENQUEUE_FAILED`: `enqueueContinuation`'s trigger creation threw (per-user trigger quota, transient ScriptApp error). Emitted from **two call sites with different carriers** (§19.6): the engine's partial-run call joins the returned result's `warnings` — the run's applied operations are real, and rebuilding it as a failure would be a false record — while the handler's skip-path re-enqueue is **log-only**, because a lock-contention skip did no work and has no persisted result to carry the code. Either way the deferred work falls to the daily backstop (REQ-TRIGGER-002).
+
+`MANUAL_ENQUEUE_FAILED`: the manual handler's skip-path re-enqueue threw (§19.5) — the same throwable trigger-creation API, guarded for the same reason. **Log-only**: a skipped run's result is never persisted or rendered. The failure stays honest without a carrier because manual pendingness is *derived* from the trigger list — the home card shows no run pending and the button invites a retry. The card action's own enqueue is deliberately unguarded: it fails synchronously in front of the user as the action's error response, which is the correct surface.
 
 `DIAGNOSTIC_SPEND_RECORD_FAILED`: the hourly diagnostic-spend write threw inside the engine's `finally`. The failure is caught and **logged** with this code rather than rethrown — an accounting error must not replace the run's already-built structured result or strand the user lock (Architecture §14.2). It cannot retroactively join that run's `warnings`: the result was assembled and persisted before the `finally` ran. The ceiling is protected from the other side instead — `diagnosticBudgetRemaining` **fails closed**, returning `0` when its own Properties read throws, so an outage that breaks spend *writes* (the same service) cannot simultaneously mint fresh allowances; at worst one run's spend goes unrecorded against a working counter.
 
@@ -2252,14 +2267,29 @@ function runManualReconciliation(e) {
   // contention is transient (locks release when the holding execution
   // ends), and dropping the run here would silently break the promise
   // the card made.
+  //
+  // Guarded like both 19.6 call sites: trigger creation is the same
+  // throwable API (per-user quota, transient ScriptApp error), and an
+  // escape here is an uncaught throw inside a trigger handler after the
+  // pending trigger was already deleted. Log-only -- a skipped run's
+  // result is never persisted or rendered -- and the failure is honest
+  // downstream: pendingness is DERIVED from the trigger list, so the
+  // home card shows no run pending and the button invites a retry, with
+  // the daily cycle as the backstop (REQ-TRIGGER-002).
   if (result.status === 'skipped') {
-    enqueueManualRun_();
+    try {
+      enqueueManualRun_();
+    } catch (enqueueError) {
+      logWarning('MANUAL_ENQUEUE_FAILED', enqueueError);
+    }
   }
   return result;
 }
 ```
 
 The home card reflects progress through the stored last-run record (§20.2) plus `manualRunPending_()`. "Synchronization started" is honest — the card does not pretend the work finished inside the callback.
+
+The **card action's own enqueue** needs no catch: it runs synchronously with the user present, so a trigger-creation throw surfaces as the action's error response — the user sees the failure instead of a false "started" toast, and can retry. The handler's re-enqueue is the site with nobody watching, which is why it logs `MANUAL_ENQUEUE_FAILED` (§18.2) instead of throwing.
 
 Like continuations, this depends on one-off trigger creation and is therefore **subject to Prototype Spike 1**. If the spike finds one-off triggers unavailable to Marketplace add-ons, the fallback is an inline run with the per-run route ceiling lowered far enough to fit the callback budget, ending `partial` and relying on the daily cycle for the remainder — a worse experience that must be called out in the spike report rather than silently adopted.
 
@@ -2382,6 +2412,8 @@ Dry runs never write this record (§17.5). Only runs that actually applied a dif
 ### 20.3 Event diagnostic mode
 
 The current-event card invokes a dry-run reconcile scoped by `eventIdFilter` **with `reason: "event-diagnostic"`** — the engine rejects either half without the other, in both directions (§17.1): budgeting keys on the reason, so a scoped run without it would draw the ordinary per-run budget on every card open unrecorded, while the reason on an unscoped run would drain the shared hourly allowance with a full reconcile — and renders `ReconciliationResult.eventDiagnostics` (§17.6), the defined carrier for the per-event fields below, which are otherwise planning-loop locals the card could not reach without reimplementing planning.
+
+Rendering is **exhaustive over the statuses a scoped run can return**, in the precedence order §17.1 states: `eventDiagnostics` when present — the planned, ineligible, disabled (`DISABLED_GLOBALLY`, synthesized by the disabled gate), and not-found cases all carry it; otherwise `skipped` (lock contention) renders "synchronization in progress — reopen shortly", the REQ-UI-012 exception, because no eligibility answer exists while another run holds the lock; otherwise `failed` renders the result's errors (the §5.3 validation list for `INVALID_SETTINGS`, the §18.3 message for a boundary failure). A blank card is never an outcome.
 
 The card flow also checks **which calendar the event was opened from, before invoking the engine**: the `eventOpen` trigger fires for events on secondary and shared calendars too, while the MVP manages only the primary calendar (REQ-INSTALL-004). An unchecked pass-through would look the opened id up in the primary calendar and report `EVENT_NOT_FOUND` for an event the user is looking at. The comparison is against the **resolved primary-calendar id** — the user's own calendar id (their email address), obtained once, e.g. via `CalendarApp.getDefaultCalendar().getId()` — **never the literal string `"primary"`**: that alias is request-side sugar the trigger payload does not contain, so a literal comparison would classify the user's own primary calendar as foreign and break every card open. When `e.calendar.calendarId` differs from the resolved id, the card renders an explicit **unsupported-calendar** explanation directly — the payload synthesized by `buildUnresolvedEventDiagnostics(eventId, "UNSUPPORTED_CALENDAR")`, the same card-side synthesizer as the not-found reasons — with no engine run, no budget spend, and no misleading not-found diagnosis.
 

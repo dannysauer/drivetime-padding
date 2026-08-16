@@ -1011,6 +1011,8 @@ Settings validation errors shall be shown near the relevant control or in a clea
 
 When an event is opened, the add-on shall show whether the event is eligible.
 
+**Exception:** while another reconciliation holds the user lock, no eligibility answer exists to show; the card shall state that a synchronization is in progress and invite reopening, never render blank. The same never-blank rule applies to failed runs, which render their errors.
+
 ### REQ-UI-013: Ineligibility reason
 
 For ineligible events, the add-on shall show the reason.
@@ -1212,11 +1214,15 @@ Route results shall be cached as derived state alongside the generated event the
 
 A cached result shall be reused when the route input hash is unchanged and the entry is less than 24 hours old. Reconciliation shall not refresh a route more than once per day per direction.
 
+**Exception:** a route **direction** whose padding is zero produces no companion for that role (REQ-GEN-001 exception), so no durable carrier exists for that direction's cache entry — whether or not the opposite direction's companion exists, since each companion caches only its own direction. Such results are retained in the ephemeral tier, and their refresh frequency is governed by the ephemeral tier's behavior rather than the 24-hour rule: bounded by the ephemeral TTL in the expected case, and — because that tier is best-effort and may evict early — hard-bounded only by the per-run route ceiling (REQ-PERF-010). A deliberate trade documented in the technical design's zero-padding rule, accepted because a companion-less durable store would need its own pruning machinery for a case that requires a drive quantizing to zero with a zero buffer.
+
 The cache shall never be authoritative. Discarding it may increase broker calls but shall not change the resulting Calendar state.
 
 ### REQ-PERF-010: Bounded route spend
 
 Steady-state route consumption shall be bounded by the number of eligible events per day, not by trigger frequency.
+
+**Exception:** a route direction with no durable cache carrier (the REQ-PERF-009 zero-padding exception) relies on the best-effort ephemeral tier, so under early eviction its consumption can scale with trigger frequency, capped by the per-run ceiling below. The same trade, stated here so the two requirements carry it together.
 
 Each reconciliation run shall enforce a maximum number of broker calls. On reaching that ceiling the run shall report `partial`, leave remaining events unplanned, and preserve their existing generated events.
 

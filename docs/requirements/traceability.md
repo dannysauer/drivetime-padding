@@ -219,3 +219,12 @@ This matrix links requirement groups to architecture components, technical-desig
 | §19.6 (guarded enqueue) | Continuation trigger creation failures caught at both call sites; truthful partial result kept with `CONTINUATION_ENQUEUE_FAILED` warning; deferred work waits for the daily backstop | — §19.6 |
 | §5.4 (guarded parse) | Malformed stored JSON caught in `loadSettings` and reported as structural `INVALID_SETTINGS` with the reset path | AC-CONFIG-001 |
 | §15.2.7 (scoped skip) | Restoration pass skipped on scoped diagnostics — the targeted read already performed the same lookup | — §17.1 |
+
+## Requirements added in the eighteenth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| §19.5 (guarded re-enqueue) | Manual handler's skip-path re-enqueue caught; `MANUAL_ENQUEUE_FAILED` logged; trigger-list-derived pendingness keeps the card honest | — §19.5 |
+| §17.1 (disabled payload) | Scoped diagnostic against disabled automation returns a synthesized `DISABLED_GLOBALLY` payload; the card handles the `skipped` status explicitly, so no engine exit renders blank | — §20.3 card |
+| §11.5 (transient-first) | Bare or non-JSON 5xx classified `BROKER_UNAVAILABLE` before the unparseable-body fallback; broker code refines only when present | — §11.5 table |
+| REQ-PERF-009 (excepted) | Zero-padding routes have no durable carrier; ephemeral-TTL refresh bound stated as an explicit exception in requirement and design | AC-CACHE-013 |

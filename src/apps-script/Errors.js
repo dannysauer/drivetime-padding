@@ -53,4 +53,12 @@ const ERROR_CODES = {
   // reach nobody. Deferred work falls to the daily backstop
   // (REQ-TRIGGER-002).
   CONTINUATION_ENQUEUE_FAILED: 'CONTINUATION_ENQUEUE_FAILED',
+  // The manual handler's skip-path re-enqueue threw (19.5) -- same
+  // throwable trigger-creation API, guarded for the same reason.
+  // Log-only: skipped results are never persisted or rendered, and
+  // pendingness is derived from the trigger list, so the home card
+  // honestly shows no run pending and the button invites a retry. The
+  // card action's own enqueue stays unguarded on purpose -- it fails
+  // synchronously in front of the user as the action's error response.
+  MANUAL_ENQUEUE_FAILED: 'MANUAL_ENQUEUE_FAILED',
 };

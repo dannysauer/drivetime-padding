@@ -58,7 +58,10 @@ function runRemovalCleanup(e) {
  * lock -- then runs the shared engine with reason 'manual' (REQ-RECON-011).
  * On a lock-contention skip it re-enqueues: the user was told
  * "Synchronization started" and the pending trigger is already deleted --
- * dropping the run here silently breaks that promise.
+ * dropping the run here silently breaks that promise. The re-enqueue is
+ * GUARDED (trigger creation can throw on quota; the failure is logged as
+ * MANUAL_ENQUEUE_FAILED, the trigger-list-derived pendingness honestly
+ * shows no run pending, and the daily cycle backstops).
  * Technical Design section 19.5.
  */
 function runManualReconciliation(e) {

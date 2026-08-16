@@ -25,7 +25,14 @@ function buildHomeCard() {
  * with no engine run and no budget spend. Otherwise invokes a dry run
  * with eventIdFilter AND reason 'event-diagnostic' (the engine rejects
  * either half without the other -- budgeting keys on the reason) and
- * renders result.eventDiagnostics.
+ * renders EXHAUSTIVELY over the statuses a scoped run can return, in
+ * precedence order: result.eventDiagnostics when present (planned,
+ * ineligible, disabled, not-found all carry it); else 'skipped' (lock
+ * contention) renders "synchronization in progress, reopen shortly" --
+ * no eligibility answer exists while another run holds the lock, an
+ * exception REQ-UI-012 carries; else 'failed' renders the result's
+ * errors (the 5.3 validation list for INVALID_SETTINGS, the 18.3 message
+ * otherwise). A blank card is never acceptable.
  * Technical Design sections 17.1, 17.6, 20.3.
  */
 function buildEventCard(e) {
