@@ -96,6 +96,39 @@ function ownedFieldsMatch(observed, desired) {
 }
 
 /**
+ * The section 15.2.9 concluded-record test: observed end before the
+ * run's injected `now` AND observed times within the persisted anchor's
+ * companion span (undisplaced -- the 15.2.8 moved-test). A concluded
+ * record is a trip that happened; every absence-of-desire deletion path
+ * preserves it (comparator, 15.2.3 evaluation, 15.2.6 overlong lookup,
+ * 15.2.8 sweep), the fallback suppressedDeletes counter excludes it,
+ * and only in-window duplicate collapse among copies of one trip
+ * (13.5) and remove-all still delete one -- the 15.2.8
+ * stranded-duplicate rule passes over concluded candidates. This
+ * helper is the STRICT test (valid anchor required). The deletion
+ * paths additionally treat an ended ANCHORLESS companion as a record
+ * (conservative preserve -- a stray that persists beats erased
+ * history); the write-side rules (matched-branch freeze, 15.2.7
+ * lookup exclusion) use the strict test alone, so an anchorless match
+ * still restores normally, rewriting its metadata whole (15.2.9).
+ */
+function isConcludedRecord(observedEvent, now) {
+  throw new Error('Not implemented: Technical Design section 15.2.9');
+}
+
+/**
+ * The DELETION-side (lenient) test: isConcludedRecord OR ended with a
+ * missing/unparseable anchor. Every absence-of-desire deletion path
+ * filters through this -- an ended anchorless companion is preserved
+ * conservatively (displacement unprovable; a stray that persists beats
+ * erased history) even though the strict test above, which the
+ * write-side rules use, rejects it. Technical Design 15.2.9.
+ */
+function isPreservedRecord(observedEvent, now) {
+  throw new Error('Not implemented: Technical Design section 15.2.9');
+}
+
+/**
  * Upcoming events first, then in-progress and lookback events.
  * Plain ascending order would spend the execution budget on the past.
  * Technical Design section 23.2.
@@ -113,9 +146,27 @@ function orderForPlanning(events, now) {
  * proves only that an event was not reached. Presence-based operations
  * (update, metadata
  * patch, unchanged) proceed, because the events they touch were actually
- * read. Technical Design sections 15.2.3 and 15.2.4, REQ-RECON-013.
+ * read. A CONCLUDED record -- ended before the injected `now`,
+ * undisplaced from its persisted anchor -- is never deleted on any
+ * absence-of-desire path, and on matched branches splits on ANCHOR
+ * EQUALITY (route-free): the desired spec's source anchor equals the
+ * record's persisted anchor -> same occurrence -> `unchanged`, never
+ * update, replace, or metadata patch (a re-estimate or an edit to the
+ * ended source must not rewrite a past block; routing is
+ * short-circuited for the role); anchors differ -> the record matches
+ * NOTHING -- the key falls through to create when the desired span
+ * still lies ahead (a rescheduled occurrence gets fresh padding), and
+ * produces NO write at all when the desired span has already ended (an
+ * after-the-fact tidy-up cannot be padded; a past-dated create would
+ * be manufactured history) -- and the record stays (Technical Design
+ * 15.2.9); `now` is a parameter for those tests. Duplicate convergence
+ * collapses live same-key copies (and co-observed concluded copies of
+ * ONE trip -- same key and same anchor) but never a record against the
+ * new occurrence's block.
+ * Technical Design sections 15.2.3, 15.2.4, 15.2.9, REQ-RECON-013.
  */
-function compareDesiredAndObserved(desiredSpecs, observedEvents, planningOutcomes, scanComplete) {
+function compareDesiredAndObserved(desiredSpecs, observedEvents,
+                                   planningOutcomes, scanComplete, now) {
   throw new Error('Not implemented: Technical Design section 15');
 }
 
@@ -139,21 +190,37 @@ function routeCacheFor(observedByKey, parentEventId) {
  * Engine post-pass on the diff: one unbounded parent lookup per pending
  * create. A managed companion the user dragged beyond the observation
  * range is invisible to a complete scan; creating blindly would strand it
- * as a permanent duplicate. A same parent|role match converts the create
- * into an update -- restoration, the documented manual-move recovery.
+ * as a permanent duplicate. A same parent|role match restores the dragged
+ * companion, classified like an in-window match (Technical Design
+ * 15.2.5): an update ordinarily, a REPLACE when eventType differs (or a
+ * Spike-resolved unpatchable outOfOfficeProperties does, 16.5) -- the
+ * field is immutable, so an unconditional conversion to update would emit
+ * a patch Calendar rejects on every run.
  *
  * Restoration supersedes the shrink cleanup: a companion dragged into a
- * vacated range sits in cleanup.events AND matches a pending create. The
- * matched event is removed from diff.deletes and cleanup.events, or
- * applyDiff deletes the freshly restored event -- and deletedAll could
- * never be satisfied, freezing the high-water mark.
+ * vacated range sits in cleanup.events AND matches a pending create.
+ * Such colliding keys are resolved DIRECTLY against the in-memory
+ * stranded event, before any lookups -- the match is already in hand,
+ * so the budget guard can never leave it undecided. The matched event
+ * is removed from diff.deletes (or applyDiff would delete the freshly
+ * restored event) but STAYS in cleanup.events: the high-water gate
+ * checks resolvedAll -- deleted, or restoration write applied -- so a
+ * failed restoration holds the mark like a failed delete rather than
+ * letting it lower past an event still beyond the horizon.
  *
  * The comparator stays pure; it has no repository access.
  *
- * Checks shouldStop between lookups: one lookup per pending create
- * multiplies past what a single up-front gate can bound. When it fires,
- * the engine re-evaluates the budget and skips application -- a create
- * whose lookup never ran must not be applied blindly.
+ * Checks shouldStop -- the section 23.1 EVIDENCE threshold, a tier past
+ * the bulk-listing one, which a too-large calendar's window listing
+ * exhausts before this pass starts -- between lookups: one lookup per
+ * pending create multiplies past what a single up-front gate can bound.
+ * When it fires, the pass SUPPRESSES every unresolved create (out of
+ * diff.creates, counted in diagnostics.suppressedCreates): application
+ * legitimately proceeds with the headroom the evidence threshold
+ * leaves, and a create whose lookup never ran must not be applied
+ * blindly. Non-dry only -- a dry run applies nothing, so unresolved
+ * creates stay in the preview diff, counted as unverified; dryRun is a
+ * parameter for exactly this branch, like findStrandedCompanions'.
  *
  * SKIPPED on scoped diagnostic runs (eventIdFilter): the section 17.1
  * targeted read already performed this exact companion lookup for the one
@@ -162,7 +229,7 @@ function routeCacheFor(observedByKey, parentEventId) {
  * failure would fail an otherwise complete diagnosis.
  * Technical Design section 15.2.7.
  */
-function resolveOutOfWindowCompanions(diff, cleanup, shouldStop) {
+function resolveOutOfWindowCompanions(diff, cleanup, dryRun, shouldStop) {
   throw new Error('Not implemented: Technical Design section 15.2.7');
 }
 
@@ -171,14 +238,29 @@ function resolveOutOfWindowCompanions(diff, cleanup, shouldStop) {
  * 15.2.4): upgrades orphan deletion to per-event evidence. One
  * getEventById parent point read per unmatched observed companion --
  * absent or cancelled proves the orphan (the same rule the 15.2.8 sweep
- * trusts) and moves it into diff.deletes; a LIVE parent preserves the
- * companion this run, because a truncated scan cannot distinguish an
- * unread page from a moved-out-of-range parent. Checks shouldStop
- * BETWEEN reads; companions whose read never ran stay preserved and
- * count in diagnostics.suppressedDeletes. This is what keeps cleanup
- * alive on calendars too large for any single-budget scan (7.2.1).
+ * trusts) and moves it into diff.deletes. A LIVE parent is evaluated in
+ * place through the route-free desired-state tests its own slice would
+ * apply (planning-range overlap against window; eligibility against
+ * settings, which the sweep never needs because its no-outcome parents
+ * all sit outside the PLANNING range -- some read but unplanned, in
+ * the observation margin -- where position alone carries deletion
+ * authority; a no-outcome parent HERE can sit inside the planning
+ * range on an unread page, where only eligibility can decide;
+ * directive-derived roles): no desired
+ * companion for the key deletes, whatever page the parent sat on -- a
+ * stale companion split from its live source by pagination must not
+ * survive on liveness alone -- while a still-desired key preserves
+ * this run (the parent's own slice restores it through the 15.2.7
+ * lookup). A PRESERVED record (15.2.9's deletion-side test: concluded,
+ * or ended with an unusable anchor) is spared without spending a read.
+ * Checks
+ * shouldStop BETWEEN reads; companions whose read never ran stay
+ * preserved and count in diagnostics.suppressedDeletes. This is what
+ * keeps cleanup alive on calendars too large for any single-budget
+ * scan (7.2.1).
  */
-function resolveUnmatchedCompanions(diff, planningOutcomes, shouldStop) {
+function resolveUnmatchedCompanions(diff, planningOutcomes, window,
+                                    settings, now, shouldStop) {
   throw new Error('Not implemented: Technical Design section 15.2.3');
 }
 
@@ -192,10 +274,16 @@ function resolveUnmatchedCompanions(diff, planningOutcomes, shouldStop) {
  * MAX_WINDOW_DAYS plus the duration cap, so a window shrink cannot hide
  * a stray and the lookback offset cannot reject a far-edge one --
  * then decides per parent
- * STATE via one point read: absent/cancelled, live-but-out-of-window,
- * and in-window ineligible parents delete; planned parents keep their
- * candidates unless an in-window event already satisfies the key; failed
- * parents preserve. Runs only on daily triggers with a COMPLETE window
+ * STATE via one point read: absent/cancelled parents delete (concluded
+ * records excepted, 15.2.9 -- deleting a past meeting does not
+ * un-happen the trip); live-but-out-of-window and in-window ineligible
+ * parents delete only DISPLACED candidates (observed outside the
+ * persisted anchor's companion span -- undisplaced candidates aged out
+ * naturally and stay as calendar history, however recently a patch
+ * bumped `updated`); planned parents keep their candidates unless an
+ * in-window event already satisfies the key AND the candidate is not a
+ * concluded record (a reschedule leaves the record sharing the key with
+ * the new block by design); failed parents preserve. Runs only on daily triggers with a COMPLETE window
  * scan; shouldStop is checked between pages AND between parent point
  * reads (a bulk move can yield many candidates). Returns { events,
  * sweepComplete }; the ENGINE records sweepComplete in diagnostics and
@@ -238,9 +326,11 @@ function buildFailureResult(errorOrValidation, options) {
  *
  * Returns { shrunk, events, scanComplete } -- a FINDER, not a deleter.
  * The engine lowers the mark only after applyDiff confirms every stranded
- * delete succeeded AND the scan itself was complete (and never on dry
- * run). A truncated scan could delete its one retrieved page, satisfy
- * deletedAll, and strand every later page outside all future scans.
+ * event RESOLVED -- deleted, or realigned inside the window by an applied
+ * write (resolvedAll, Technical Design 17.5) -- AND the scan itself was
+ * complete (and never on dry run). A truncated scan could delete its one
+ * retrieved page, satisfy the gate, and strand every later page outside
+ * all future scans.
  * Merging the events into the delete list and dropping the flags leaves
  * no path that ever lowers the mark, so every later run repeats the full
  * scan of the vacated range.

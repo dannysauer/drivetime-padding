@@ -459,7 +459,8 @@ Stamping the read time would let a duration live up to one ephemeral TTL longer 
 **And** reconciliation runs  
 **Then** the ownership-filtered cleanup pass reads the span between the new horizon and the previous high-water mark  
 **And** the companions 90 days out are deleted  
-**And** the high-water mark is lowered only after those deletions succeed.
+**And** a stranded companion the run also matched to a planned key (restoration, or co-observation under a pinned scan cursor) is realigned inside the window instead of deleted  
+**And** the high-water mark is lowered only after every stranded event is **resolved** — deleted, or realigned by an applied write; a failed or deferred realignment holds the mark exactly like a failed deletion.
 
 **Given** the same shrink but a cleanup pass that fails partway  
 **When** reconciliation runs again  
@@ -495,8 +496,9 @@ Patching only the duration and timestamp would leave the bad hash in place, so t
 **And** an observation scan that fails after reading the source but before reaching its return block  
 **When** reconciliation runs  
 **Then** the run records `scanComplete: false`  
-**And** the pending create for the seemingly missing return block is resolved through the unbounded per-parent companion lookup, which finds the existing block — it is **updated**, never duplicated  
-**And** orphan deletion proceeds only for unmatched companions whose parent a point read proves absent or cancelled; a live parent — on an unread page or moved away, indistinguishable here — preserves its companion this run  
+**And** the pending create for the seemingly missing return block is resolved through the unbounded per-parent companion lookup, which finds the existing block — it is **updated**, never duplicated (classified through the same update-versus-replace rules as an in-window match)  
+**And** creates the budget-cut lookup pass never resolved are withheld from application (`suppressedCreates`) while everything the pass did resolve still applies  
+**And** orphan deletion proceeds only for unmatched companions with per-parent evidence: a point read proving the parent absent or cancelled, or a fetched live parent evaluated to desire no companion for the key; a live parent still desiring the key preserves its companion this run  
 **And** updates and metadata patches for events that were read proceed normally  
 **And** the run reports `partial`.
 
@@ -509,8 +511,9 @@ Creates and deletes both act on absence, and a truncated scan proves only that a
 **Then** the truncated run persists the listing cursor pinned to its observation range  
 **And** the continuation resumes listing from that cursor instead of re-reading the same prefix  
 **And** successive passes plan, update, and — through the per-parent lookup — create for successive slices of the calendar  
-**And** unmatched companions in each slice are deleted only on a point read proving their parent absent or cancelled, and preserved otherwise  
+**And** unmatched companions in each slice are deleted only on per-parent evidence — a point read proving the parent absent or cancelled, or a fetched live parent evaluated to desire no companion for the key, so a stale companion split from its live source by a page boundary is still cleaned up — and preserved when the parent still desires the key or the read never ran  
 **And** a chain longer than one day's continuation allowance survives the episode boundary: the daily run resets the allowance and resumes the pending cursor  
+**And** when a chain is pending at daily time because its continuation could not be scheduled, the daily run resumes the chain rather than scanning fresh, and the deferred fresh-window pass completes within one daily cycle of the chain completing, in every case — two daily cycles *measured from the original deferral* when the resumed chain finishes within the day's allowance, the REQ-TRIGGER-002 carve-out for this compound failure (the daily sweep needs a complete scan, which a calendar this size never yields; its absence there is the design's accepted residual, not a failure of this bound)  
 **And** intervening calendar-trigger runs scan fresh without overwriting the chain's pending cursor  
 **And** a lost or expired cursor degrades to a fresh scan from the front, never to an error.
 
@@ -717,9 +720,9 @@ The ceiling bounds wire traffic. Counting logical calls instead would double the
 **When** the action runs  
 **Then** the card action returns within the callback budget, having **replaced the stored settings with the disabled tombstone** — the schema-complete defaults with `enabled: false`, removing configured origin addresses, under the lock, before any deletion work begins — removed the triggers, and enqueued the cleanup worker  
 **And** the worker deletes every managed event in budget-bounded passes, including events no window-bounded scan would read, re-enqueueing itself until the scan completes — never writing the settings document itself  
-**And** cumulative progress is persisted and shown by the home card while cleanup is running  
+**And** cumulative progress is persisted and shown by the home card while cleanup is running — including during an actively executing pass, whose own trigger is already consumed: the card reads the liveness stamp's freshness rather than misreporting a live pass as failed  
 **And** the origin addresses are therefore gone on **every** cleanup outcome — success, failure, or a worker that never wins the lock again  
-**And** the final record reports deleted and failed counts, with a retry offered when any deletion failed  
+**And** the final record reports cumulative deletions and the outstanding failures from the last complete walk — a truncated final pass leaves the prior count standing, marked possibly stale by `scanComplete: false`, and a transient failure a later complete pass retried successfully leaves no residue — with a retry offered when any remain or the scan never completed  
 **And** a later manual synchronization or trigger repair does not regenerate events or triggers.
 
 "All" must mean all: the ordinary scans are bounded by the rolling window, and a cleanup built on them silently misses history and stranded events. And the deletions cannot live in the card callback — its execution budget is fixed while the user's history is not, and a timeout mid-cleanup would leave events and personal settings behind at exactly the moment the user is preparing to uninstall.
@@ -733,12 +736,12 @@ The ceiling bounds wire traffic. Counting logical calls instead would double the
 **And** the moved managed event is located by ownership and parent metadata without time bounds  
 **And** it is updated back to the desired time.
 
-Duplicate convergence cannot help here: one copy is outside every range the ordinary read covers. The create path must look before it leaps.
+Duplicate convergence cannot help here: one copy is outside every range the ordinary read covers. The create path must look before it leaps. The restoration match is classified like an in-window match: when the desired `eventType` changed while the companion sat out of range, the match becomes a **replacement** rather than an update — an update patch on the immutable field would be rejected on every run.
 
 ## AC-RECOVERY-013: Execution cutoff does not orphan unplanned sources
 
 **Given** a run whose observation scan completed  
-**And** the execution-time threshold is reached partway through planning  
+**And** planning's time-tier boundary is reached partway through the planning loop  
 **When** the run stops planning and applies its diff  
 **Then** every unprocessed source carries a `failed` planning outcome (`EXECUTION_BUDGET_EXCEEDED`)  
 **And** none of their existing companions are deleted as orphans  
@@ -787,7 +790,24 @@ A window-scan-based diagnostic would return silence for exactly the events users
 
 **Given** instead the source still exists but was moved outside the planning range together with its companion  
 **When** the next daily maintenance run executes  
-**Then** the point read finds the live parent, sees it was not evaluated this run, and the companion is deleted — an out-of-window source's desired state is no companions, and they regenerate when it re-enters the window.
+**Then** the point read finds the live parent, sees it was not evaluated this run, and the **displaced** companion (observed outside its persisted anchor's companion span — it was moved) is deleted — an out-of-window source's desired state is no companions, and they regenerate when it re-enters the window.
+
+**Given** instead a companion whose trip has concluded, sitting exactly where its anchor placed it, its parent aged out of the planning range (or deleted after the fact)  
+**When** any reconciliation runs while the companion is still inside the observation range  
+**Then** the companion is preserved as a **record of the trip** — deletion authority stops at the past — and it ages out of the observation range untouched.
+
+**Given** instead a concluded companion whose parent still plans (inside the lookback), the desired specification still anchored to the recorded occurrence  
+**When** a location edit, buffer change, or refreshed route estimate would otherwise change the companion  
+**Then** the record classifies as `unchanged` — no route call is spent on it — rather than being patched to times that never applied.
+
+**Given** instead a concluded companion whose parent is rescheduled to a future occurrence  
+**When** reconciliation runs  
+**Then** the record matches nothing and the new occurrence gets fresh companions — the out-of-window lookup and duplicate convergence both pass over concluded records — while the record stays on the calendar as history  
+**And** an after-the-fact edit to an already-ended occurrence's times produces no write at all: a past trip cannot be padded, so no past-dated companion is manufactured.
+
+**Given** instead a companion that aged out of the observation range naturally, its `updated` bumped by a settings-change patch in its final in-window days, its parent live behind the planning range  
+**When** the next daily maintenance run executes  
+**Then** the sweep lists it as a candidate but the displacement test finds it exactly where its anchor put it, and it is **preserved as calendar history** — record-keeping must not depend on how recently an event happened to be patched.
 
 **Given** instead a companion dragged outside the observation range while the window was configured long, its parent's anchor far in the future  
 **And** the user then shrinks `windowDays` so that anchor lies beyond the new planning range  

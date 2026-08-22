@@ -2,7 +2,7 @@
 
 This file collects the principal function contracts from the technical design.
 
-`compareDesiredAndObserved` takes planning outcomes as well as specs: it may only delete generated events whose parent planned successfully or was ruled ineligible (§17.4), or whose parent is absent from a **complete** scan (§15.2.3).
+`compareDesiredAndObserved` takes planning outcomes as well as specs: it may only delete generated events whose parent planned successfully or was ruled ineligible (§17.4), or whose parent is absent from a **complete** scan (§15.2.3) — and never a concluded record (§15.2.9: ended before the run's injected `now`, undisplaced from its persisted anchor). On matched branches a concluded record splits on **anchor equality**, a route-free test: the desired spec's source anchor equals the record's persisted anchor → same occurrence → `unchanged` (a past block is never updated, replaced, or metadata-patched, and routing is short-circuited for the role); anchors differ → the record matches nothing: the key falls through to the create branch when the desired span still lies ahead, and produces no write at all when it has already ended (an after-the-fact tidy-up cannot be padded) — the record staying as history either way. The concluded tests are why the comparator takes `now`.
 
 Write operations take the observed event rather than an event ID, so the ownership marker and version can be verified at write time rather than trusted from read time (§16.5.1).
 
@@ -46,7 +46,12 @@ listWorkingLocationEvents(calendarId, start, end) -> RawCalendarEvent[]
 // Ownership-filtered (privateExtendedProperty=dtp=1), paginated until
 // done or shouldStop fires, completeness reported -- a truncated shrink
 // scan must not lower the high-water mark, and a large vacated range
-// must not spend the deadline inside one call (technical design 7.6)
+// must not spend the deadline inside one call. EXCLUDES cancelled
+// tombstones, like listCompanionsByParent below: a manually deleted
+// stranded companion would 404 its queued delete on every run --
+// resolvedAll never satisfiable, the mark frozen -- and the 15.2.7
+// direct collision resolution would update a deleted resource
+// (technical design 7.6)
 listGeneratedEventsBetween(calendarId, start, end, shouldStop)
   -> { events: ObservedGeneratedEvent[], scanComplete: boolean }
 // Ownership + parent filtered, no time bounds, EXCLUDES cancelled
@@ -135,12 +140,34 @@ overlapsPlanningRange(event, window) -> boolean   // intersection, not start-con
 findStrandedCompanions(window, settings, dryRun, shouldStop)
   -> { shrunk, events, scanComplete }                                  // 7.6
 // engine lowers the high-water mark only after applyDiff confirms every
-// stranded delete succeeded AND the cleanup scan was complete, never on
-// dry run
+// stranded event RESOLVED (resolvedAll: deleted, or realigned inside
+// the window by an applied restoration write -- 15.2.7/17.5) AND the
+// cleanup scan was complete, never on dry run
 loadHighWater() / saveHighWater(observeEnd)                           // 7.6
 
 // Comparison helpers
 ownedFieldsMatch(observedFields, desiredSpec) -> boolean
+// The 15.2.9 concluded-record test: observed end before `now` AND
+// observed times within the persisted anchor's companion span
+// (undisplaced, the 15.2.8 moved-test). The STRICT test -- a valid
+// anchor is required; the deletion paths additionally preserve an
+// ended ANCHORLESS companion conservatively (a stray that persists
+// beats erased history), while the write-side rules (matched-branch
+// anchor-equality freeze, 15.2.7 lookup exclusion) use the strict
+// test alone, so an anchorless match still restores normally. Shared
+// by the comparator (deletion exceptions, the anchor-equality matched
+// rule, and the pre-planning routing short-circuit for same-anchor
+// roles), the 15.2.3 pass, the 15.2.6, 15.2.7, and 15.2.8 exceptions,
+// and the engine's fallback suppressedDeletes counter; collapse of a
+// record against the new occurrence's live block never happens (13.5),
+// and remove-all ignores the test entirely
+isConcludedRecord(observedEvent, now) -> boolean
+// The DELETION-side lenient companion test: isConcludedRecord OR ended
+// with a missing/unparseable anchor. Every absence-of-desire deletion
+// path (comparator table, 15.2.3 pass, 15.2.6 merge, 15.2.8 sweep) and
+// the fallback suppressedDeletes counter filter through THIS one; the
+// write-side rules keep the strict test (15.2.9)
+isPreservedRecord(observedEvent, now) -> boolean
 // true when freshRoute.source !== 'durable' (11.1, 15.2.2)
 routeCacheNeedsPersisting(observed, freshRoute, now) -> boolean
 // Upcoming first, then in-progress and lookback -- API response order would
@@ -153,7 +180,8 @@ bothRolesObserved(observedByKey, parentEventId) -> boolean
 
 // Fingerprint and comparison
 fingerprintSpec(input) -> string
-compareDesiredAndObserved(desiredSpecs, observedEvents, planningOutcomes, scanComplete)
+compareDesiredAndObserved(desiredSpecs, observedEvents, planningOutcomes,
+                          scanComplete, now)
   -> ReconciliationDiff
 
 // Reconciliation
@@ -182,18 +210,43 @@ buildStatusOnlyResult(status, reason, options) -> ReconciliationResult
 // success path, the error boundary) so the guard cannot drift between
 // hand-rolled copies
 saveRunStatusGuarded(result) -> void
-// Execution-budget degradation (23.1): wall-clock check plus marking every
-// unprocessed source failed (EXECUTION_BUDGET_EXCEEDED) before the loop
-// stops -- a bare break orphans their companions
+// The full execution threshold (23.1): gates application and is
+// re-checked by applyDiff between operations. The planning loop broke
+// on this guard historically; it now breaks on
+// elapsedExceedsPlanningBudget below, which carries the
+// mark-unprocessed-sources-failed obligation with it
 elapsedExceedsExecutionBudget(runStartMs) -> boolean
-// Tighter guard for READ passes (window/shrink/sweep listings,
-// restoration and orphan lookups): fires at READ_BUDGET_FRACTION of the
-// execution threshold, reserving headroom to plan and APPLY what was
-// read -- a read guarded by the full threshold returns with that check
-// already true, and everything it retrieved is marked failed and never
-// applied; on a resumable scan the cursor would advance past a slice
-// nothing reconciled (23.1)
+// Tighter guard for BULK listings (window and shrink -- both run
+// BEFORE planning; the shrink listing goes first because it has no
+// cursor and progresses only through its applied deletions, while the
+// window scan -- which consumes the whole region on oversized
+// calendars -- resumes by cursor and loses nothing by running second):
+// fires at
+// READ_BUDGET_FRACTION of the execution threshold, reserving headroom
+// to plan and APPLY what was read -- a read guarded by the full
+// threshold returns with that check already true, and everything it
+// retrieved is marked failed and never applied; on a resumable scan the
+// cursor would advance past a slice nothing reconciled (23.1)
 elapsedExceedsReadBudget(runStartMs) -> boolean
+// Planning's tier: stops the loop STARTING new sources at
+// PLANNING_BUDGET_FRACTION (remainder marked EXECUTION_BUDGET_EXCEEDED
+// via markRemainingSourcesFailed) -- route calls run seconds each and a
+// full-threshold planning loop would burn straight through the evidence
+// tier below (23.1)
+elapsedExceedsPlanningBudget(runStartMs) -> boolean
+// Late tier for the absence-evidence passes, self-draining first:
+// 15.2.7 restoration lookups (their queue shrinks across runs as
+// resolved creates apply), then whichever of the 15.2.3 orphan point
+// reads and the 15.2.8 daily sweep the scan's completeness selects
+// (mutually exclusive per run) -- deferral behind a self-draining
+// predecessor is transient. Fires at EVIDENCE_BUDGET_FRACTION of the
+// execution threshold. No phase sits behind a same-threshold
+// predecessor that consumes its region every run --
+// the listing pages until the read threshold
+// fires and planning stops only at ITS mark, so a shared guard would
+// already be true at entry: zero lookups, every absence-gated operation
+// suppressed, on every slice, forever (23.1)
+elapsedExceedsEvidenceBudget(runStartMs) -> boolean
 markRemainingSourcesFailed(orderedSources, currentEvent, planningOutcomes) -> void
 // Resets the run-scoped warning buffer. The engine's FIRST statement,
 // before even the lock attempt -- every result builder (the
@@ -219,16 +272,43 @@ recordRunWarning(code, error) -> void
 // MISSING_DEFAULT_ORIGIN outcome (10.4)
 buildAppError(code, event) -> AppErrorRecord
 // Engine post-pass on the diff: one unbounded parent lookup per pending
-// create; a same-key match converts the create to an update -- a dragged
-// companion is restored, not duplicated. Restoration supersedes the shrink
-// cleanup: a matched event is removed from diff.deletes AND cleanup.events.
-// Checks shouldStop between lookups; when it fires the engine re-evaluates
-// the budget and skips application -- an unresolved create must never be
-// applied blindly (15.2.7). SKIPPED on scoped diagnostic runs: the 17.1
-// targeted read already performed this exact lookup for the one parent,
-// so re-querying is a redundant round trip whose failure would fail an
-// otherwise complete diagnosis
-resolveOutOfWindowCompanions(diff, cleanup, shouldStop) -> void
+// create; cancelled tombstones and PROVABLY concluded records among
+// the returns are passed over (15.2.7, 15.2.9 -- restoring a past
+// trip's record to a rescheduled occurrence would rewrite history; an
+// anchorless ended match still restores, rewriting its metadata); a
+// same-key match
+// restores the dragged companion, CLASSIFIED
+// like an in-window match (15.2.5) -- an update ordinarily, a REPLACE
+// when eventType (or Spike-resolved unpatchable outOfOfficeProperties)
+// differs, since an update patch on the immutable field is rejected on
+// every run. Restoration supersedes the shrink cleanup: a matched event
+// is removed from diff.deletes but STAYS in cleanup.events -- the
+// high-water gate checks resolvedAll (deleted OR restoration write
+// applied), so a failed restoration holds the mark like a failed
+// delete (in the replace case the event's deletion belongs to the
+// replace's delete half). Checks shouldStop
+// -- the 23.1 EVIDENCE threshold, its own tier past the bulk-listing
+// one the window listing may have exhausted -- between lookups; when
+// it fires the pass SUPPRESSES every unresolved create (out of
+// diff.creates, counted in
+// diff.diagnostics.suppressedCreates -- the diff it mutates carries the
+// diagnostics object, which is the pass's output path; creates
+// colliding with a shrink-cleanup delete were already resolved
+// DIRECTLY against the in-memory stranded event before any lookups, so
+// the GUARD can never suppress one -- a run that hits the full
+// deadline before the pass starts counts every pending create,
+// colliding included, since nothing of the pass ran, 15.2.7), because
+// application
+// legitimately proceeds with the headroom the evidence threshold
+// leaves and must never apply a create whose lookup did not run.
+// NON-DRY only: a dry run applies nothing, so unresolved creates stay
+// in the preview diff, counted in suppressedCreates as unverified --
+// the dryRun parameter exists for exactly this branch, like
+// findStrandedCompanions' (15.2.7). SKIPPED on scoped diagnostic runs:
+// the 17.1 targeted read already performed this exact
+// lookup for the one parent, so re-querying is a redundant round trip
+// whose failure would fail an otherwise complete diagnosis
+resolveOutOfWindowCompanions(diff, cleanup, dryRun, shouldStop) -> void
 // Daily-run ownership sweep (15.2.8): updatedMin-bounded listing (a
 // stray was necessarily moved, and moves bump `updated`; cancelled
 // tombstones excluded; stops early when shouldStop fires),
@@ -241,10 +321,17 @@ resolveOutOfWindowCompanions(diff, cleanup, shouldStop) -> void
 // one getEventById per
 // candidate parent -- shouldStop checked BETWEEN reads too, and a sweep
 // cut short anywhere never writes the watermark -- then a parent-STATE
-// decision: absent/cancelled,
-// live-but-out-of-window, and in-window ineligible all delete; planned
-// keeps its candidates (restoration owns them) unless the key is already
-// satisfied in-window (stranded duplicate); failed preserves --
+// decision: absent/cancelled delete (concluded records excepted,
+// 15.2.9); live-but-out-of-window and
+// in-window ineligible delete only DISPLACED candidates (observed
+// outside the persisted anchor's companion span -- the moved-test; an
+// undisplaced candidate aged out naturally and is preserved as history
+// however recently patched, 15.2.8/19.4); planned
+// keeps its candidates (restoration owns them) unless the key is
+// already satisfied in-window AND the candidate is not a concluded
+// record (a stranded duplicate must be displaced -- a reschedule
+// leaves the record sharing the key with the new block by design);
+// failed preserves --
 // restoration is create-driven and cannot reach a stray whose parent no
 // longer plans. Runs only on a COMPLETE window scan; takes the full
 // observed list, never the key index (the id test must see in-window
@@ -261,13 +348,30 @@ sweepOutOfWindowCompanions(observedGenerated, planningOutcomes, window,
 loadSweepWatermark() / saveSweepWatermark(now)                    // 15.2.8
 // Incomplete-scan orphan resolution (15.2.3, 15.2.4): reads its
 // candidates from diff.preserved -- only companions whose parent has NO
-// planningOutcomes entry (a failed parent's outcome is known; no read).
+// planningOutcomes entry (a failed parent's outcome is known; no read;
+// disjoint from the shrink queue by construction -- 7.6's merge
+// contributes only window-unobserved events while these are observed).
 // One parent point read per candidate, shouldStop checked BETWEEN reads
 // -- absent/cancelled parent proves the orphan and MOVES it from
-// preserved into diff.deletes; a LIVE parent preserves it this run
-// (unread page and moved-out-of-range are indistinguishable here); a
-// read the guard cut off preserves it and counts in suppressedDeletes
-resolveUnmatchedCompanions(diff, planningOutcomes, shouldStop) -> void
+// preserved into diff.deletes; a LIVE parent is evaluated in place
+// through the route-free desired-state tests (planning-range overlap
+// against `window`; 9.2 eligibility against `settings` -- needed here,
+// unlike the sweep, because a no-outcome parent HERE can sit inside the
+// planning range on an unread page, where position alone cannot decide,
+// while the sweep's no-outcome parents are all outside the PLANNING
+// range (some read but unplanned, in the observation margin), where
+// OUTSIDE_WINDOW alone carries deletion authority;
+// directive-derived roles): no desired companion for the key ->
+// delete, whatever page the parent sat on (a stale companion split
+// from its live source by pagination must not survive on liveness
+// alone); key still desired -> preserve this run, the parent's own
+// slice restores it through the 15.2.7 lookup; a PRESERVED record
+// (15.2.9's deletion-side test: concluded, or ended with an unusable
+// anchor) is spared without a read, which is why the signature carries
+// `now`; a read the guard cut
+// off preserves the candidate and counts in suppressedDeletes
+resolveUnmatchedCompanions(diff, planningOutcomes, window, settings,
+                           now, shouldStop) -> void
 // Window-scan cursor persistence (7.2.1) -- User Properties, engine
 // policy, stubs live beside the other Status persistence, NOT in
 // CalendarRepository. Saved when a truncated non-dry scan STARTS a
@@ -289,11 +393,17 @@ loadWindowScanCursor()
 saveWindowScanCursor(cursor) / clearWindowScanCursor()
 // Whether a partial run's remaining causes are ones another pass can
 // drain: deferred operations, an application skipped for time, an
-// exhausted route budget, or an unfinished scan chain. False when the
-// only cause is scan coverage after a FINISHED chain -- a fresh chain
-// would re-tile identical work (a pass justified by other causes may
-// re-tile as a side effect, bounded by the day's remaining allowance)
-// (19.6, 23.4)
+// exhausted route budget, an unfinished scan chain, or -- on a run
+// whose scan covered the CURRENT window -- restoration/orphan-pass
+// work suppressed at the evidence tier or planning cut short at its
+// tier (EXECUTION_BUDGET_EXCEEDED outcomes; a continuation re-reads
+// that window and retries them, while a chain slice's suppressed or
+// time-starved work instead waits for the slice's next fresh read --
+// 7.2.1's division of labor). A truncated SWEEP is never a cause: it
+// is daily-gated, so no continuation can re-run it (15.2.8). False
+// when the only cause is scan coverage after a FINISHED chain -- a fresh chain would re-tile
+// identical work (a pass justified by other causes may re-tile as a
+// side effect, bounded by the day's remaining allowance) (19.6, 23.4)
 continuationStillUseful(result, chainFinished) -> boolean
 // Hourly diagnostic allowance (20.3), RESERVE-then-REFUND: the reserve
 // writes the whole remaining allowance as used BEFORE any broker call
@@ -348,10 +458,23 @@ ensureTriggers() -> TriggerHealth
 removeAutomation() -> ActionResponse
 // Budget-bounded cleanup passes: pages and deletes interleaved (fetch a
 // page, delete it, re-fetch -- deletions shrink the set, so retries
-// resume with no persisted cursor), persists cumulative counts in
-// CleanupProgress (dtp.removalProgress), re-enqueues until the scan
-// completes (capped at MAX_REMOVAL_PASSES; contention retries bounded
-// separately). NEVER writes the settings document: the card action wrote
+// resume with no persisted cursor), persists progress in
+// CleanupProgress (dtp.removalProgress, written ONLY under the user
+// lock: deletions cumulative; failedDeletes per-pass OUTSTANDING --
+// counted fresh in memory, never zeroed at pass start, and REPLACED
+// only by a complete walk, so a retried deletion clears the failure it
+// supersedes while truncated or dying passes leave the previous count
+// visible) plus the LOCKLESS RemovalHeartbeat side key
+// (dtp.removalHeartbeat: `at` stamped at worker ENTRY before the lock
+// wait, contentionRetries incremented on contention re-enqueues, both
+// reset by a lock-winning pass -- kept off the record so no lockless
+// read-modify-write can clobber a fold or revert a terminal; the
+// card's liveness test reads the freshest stamp against
+// REMOVAL_STALE_AFTER_MS; the retries count only LABELS a
+// staleness-derived failure as contention, never overrides a fresh
+// stamp), re-enqueues until the scan completes (capped at
+// MAX_REMOVAL_PASSES; contention retries bounded separately). NEVER
+// writes the settings document: the card action wrote
 // the disabled tombstone under its lock before the worker existed, so
 // REQ-PRIV-006 holds on every outcome including a worker that never
 // wins the lock again (19.4)

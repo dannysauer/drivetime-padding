@@ -43,12 +43,18 @@ function listWorkingLocationEvents(calendarId, start, end) {
  * server-side keeps that pass cheap.
  *
  * scanComplete matters here just like the main window read: a truncated
- * scan could delete its one retrieved page, satisfy deletedAll, and lower
- * the high-water mark with later pages stranded outside every future scan.
+ * scan could delete its one retrieved page, satisfy the high-water gate
+ * (resolvedAll, Technical Design 17.5), and lower the mark with later
+ * pages stranded outside every future scan.
  * Deadline-aware for the same reason as listWindowEvents: a large horizon
  * reduction can leave enough events in the vacated range to spend the
  * whole runtime inside this one call; early return with scanComplete
  * false retains the mark and the next run retries.
+ * EXCLUDES cancelled tombstones, like listCompanionsByParent: a manually
+ * deleted stranded companion would 404 its queued delete on every run
+ * (resolvedAll never satisfiable, the mark frozen forever), and the
+ * 15.2.7 direct collision resolution would convert a pending create into
+ * an update of a deleted resource, breaking restoration.
  * Technical Design section 7.6.
  */
 function listGeneratedEventsBetween(calendarId, start, end, shouldStop) {

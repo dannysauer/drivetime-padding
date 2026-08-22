@@ -866,6 +866,28 @@ function reconcile(options) {
     // events to read. The second is strictly wider (§21.2).
     const window = calculateWindow(settings.windowDays, now);
 
+    // Companions left beyond a shrunken horizon are invisible to the
+    // window read, so they need their own ownership-filtered pass
+    // (§21.2, technical design §7.6). Runs FIRST among the bulk reads
+    // (§23.1 order): this read has no cursor -- it progresses only
+    // because its applied deletions shrink the next listing -- while
+    // the window listing below deliberately consumes the whole read
+    // region on oversized calendars and RESUMES by cursor, losing
+    // nothing by running second. Ordered the other way, this
+    // unresumable read would start with the shared guard already true
+    // on every such run, list nothing, and freeze the high-water mark
+    // forever. (A large shrink backlog transiently starving the window
+    // scan is the accepted, self-draining converse -- REQ-TRIGGER-002.)
+    // Its results merge into the diff after the comparator.
+    // Skipped entirely on a filtered diagnostic: the scan of the vacated
+    // range costs real Calendar quota on the hot card-open path, a dry
+    // run can never lower the mark, and the card does not render cleanup
+    // results (technical design §17.1).
+    const cleanup = options.eventIdFilter
+      ? { shrunk: false, events: [], scanComplete: true }
+      : findStrandedCompanions(window, settings, options.dryRun,
+          () => elapsedExceedsReadBudget(runStart));
+
     // Diagnostics read narrowly: the opened event by id plus its managed
     // companions by parent metadata, never the full window scan. An event
     // beyond the observation range is invisible to the bounded listing --
@@ -908,13 +930,15 @@ function reconcile(options) {
       scanComplete = true;
     } else {
       // Deadline-aware, on the READ budget (technical design §23.1):
-      // every read pass stops at READ_BUDGET_FRACTION of the execution
-      // threshold, reserving headroom to plan and APPLY what it
+      // bulk listings stop at READ_BUDGET_FRACTION of the execution
+      // threshold, reserving headroom to plan and APPLY what was
       // retrieved -- a read guarded by the full threshold returns with
       // that check already true, everything it read is marked failed,
       // and on a resumable scan the cursor advances past a slice
-      // nothing reconciled. Truncation is a first-class state
-      // downstream (§15.2.4, §15.2.8, §7.6).
+      // nothing reconciled. (The per-event evidence passes below get
+      // their own later tier, EVIDENCE_BUDGET_FRACTION -- a listing
+      // that exhausts this one must not starve them.) Truncation is a
+      // first-class state downstream (§15.2.4, §15.2.8, §7.6).
       //
       // RESUMABLE (technical design §7.2.1): continuation AND daily
       // runs resume a truncated predecessor's listing from the persisted
@@ -1099,13 +1123,17 @@ function reconcile(options) {
       sourceEvents.map(normalizeCalendarEvent), now);
 
     for (const event of orderedSources) {
-      // Approaching the Apps Script execution deadline: stop planning,
-      // but FIRST give every unprocessed source a failed outcome
+      // Approaching planning's own tier boundary (technical design
+      // §23.1 -- PLANNING_BUDGET_FRACTION, ahead of the evidence tier:
+      // route calls at seconds each could otherwise burn straight
+      // through the evidence passes' slice of the deadline and starve
+      // the absence-gated work they license): stop planning, but FIRST
+      // give every unprocessed source a failed outcome
       // (EXECUTION_BUDGET_EXCEEDED). Absence from planningOutcomes plus a
       // complete scan reads as orphaned -- a bare break would hand
       // deletion authority over the remaining sources' companions to the
       // degradation path (technical design §23.1).
-      if (elapsedExceedsExecutionBudget(runStart)) {
+      if (elapsedExceedsPlanningBudget(runStart)) {
         markRemainingSourcesFailed(orderedSources, event, planningOutcomes);
         break;
       }
@@ -1248,42 +1276,58 @@ function reconcile(options) {
       desiredSpecs,
       observedGenerated,
       planningOutcomes,
-      scanComplete
+      scanComplete,
+      now  // the §15.2.9 concluded-record test: ended, undisplaced
+           // companions are preserved on every deletion path
     );
 
-    // Companions left beyond a shrunken horizon are invisible to the
-    // window read above, so they need their own ownership-filtered pass
-    // (§21.2, technical design §7.6). The cleanup state travels with the
-    // diff -- merging the events into deletes and discarding the rest
-    // would leave no path to ever lower the high-water mark, and every
-    // later run would repeat the full scan of the vacated range.
-    // Skipped entirely on a filtered diagnostic: the scan of the vacated
-    // range costs real Calendar quota on the hot card-open path, a dry
-    // run can never lower the mark, and the card does not render cleanup
-    // results (technical design §17.1).
-    const cleanup = options.eventIdFilter
-      ? { shrunk: false, events: [], scanComplete: true }
-      : findStrandedCompanions(window, settings, options.dryRun,
-          () => elapsedExceedsReadBudget(runStart));
-    diff.deletes.push(...cleanup.events);
+    // Merge the pre-planning shrink cleanup (above) into the diff,
+    // contributing ONLY events the window listing did not observe. A
+    // §7.2.1 cursor pinned to a pre-shrink observation range can
+    // co-observe an event this scan also found, and the comparator's
+    // classification of an observed event WINS: a companion matched to
+    // a still-planned key is queued as an update or replace -- §14.5's
+    // delete-first ordering would destroy the very event it is
+    // repairing -- while an ineligible parent's companion is already
+    // queued for deletion, and a second queued id 404s into a partial
+    // run (technical design §15.2.6, §7.6). A co-observed event STAYS
+    // in cleanup.events: the high-water gate's resolvedAll is satisfied
+    // by whatever applied write the classification produced. The
+    // cleanup state travels with the diff -- merging the events into
+    // deletes and discarding the rest would leave no path to ever lower
+    // the high-water mark, and every later run would repeat the full
+    // scan of the vacated range.
+    const observedGeneratedIds = new Set(
+      observedGenerated.map(event => event.id));
+    diff.deletes.push(
+      ...cleanup.events.filter(
+        event => !observedGeneratedIds.has(event.id))
+    );
 
-    // Deduplicate by event id before merging. An overlong source with one
-    // companion still observed already has that companion queued by the
-    // comparator (ineligible parent), and listCompanionsByParent returns
-    // both roles -- queuing the same id twice makes the second delete 404
-    // and marks an otherwise clean cleanup run partial (technical design
-    // §15.2.6).
+    // Deduplicate the overlong lookup's returns by id, excepting
+    // concluded records. An overlong source with one companion still
+    // observed already has that companion queued by the comparator
+    // (ineligible parent), and listCompanionsByParent returns both
+    // roles -- queuing the same id twice makes the second delete 404
+    // and marks an otherwise clean cleanup run partial. And an ended,
+    // undisplaced block is a trip that happened -- the source growing
+    // overlong afterward does not un-happen it (technical design
+    // §15.2.6, §15.2.9).
     const queuedDeleteIds = new Set(diff.deletes.map(event => event.id));
     diff.deletes.push(
-      ...strandedOverlong.filter(event => !queuedDeleteIds.has(event.id))
+      ...strandedOverlong.filter(event =>
+        !queuedDeleteIds.has(event.id) && !isPreservedRecord(event, now))
     );
 
     // A companion the user dragged beyond the observation range is
     // invisible to a complete scan; creating blindly would leave the moved
     // event stranded as a permanent duplicate. Each pending create's
     // parent gets one unbounded ownership lookup; a match with the same
-    // parent|role key converts the create into an update -- restoration,
-    // the documented recovery for a manual move (technical design §15.2.7).
+    // parent|role key restores the dragged companion, classified like an
+    // in-window match -- an update ordinarily, a REPLACE when eventType
+    // differs (the field is immutable, so a restoration folded into
+    // update would emit a patch Calendar rejects on every run --
+    // technical design §15.2.5, §15.2.7).
     //
     // §23.1: apply already-computed safe diffs only IF SUFFICIENT TIME
     // REMAINS. On a run already at the deadline, starting the restoration
@@ -1296,11 +1340,13 @@ function reconcile(options) {
     // Takes the cleanup state too: a companion dragged into a vacated
     // range beyond a shrunken horizon is in BOTH lists -- queued for
     // deletion by the shrink cleanup and wanted back by this pass.
-    // Restoration wins: the event is removed from diff.deletes AND from
-    // cleanup.events (it is not stranded; its desired position is inside
-    // the window), or applyDiff would delete the freshly restored event --
-    // and deletedAll(cleanup.events) could never be satisfied, freezing
-    // the high-water mark forever. Skipped when out of time on a write
+    // Restoration wins: the event is removed from diff.deletes (or
+    // applyDiff would delete the freshly restored event) but STAYS in
+    // cleanup.events -- the high-water gate below checks resolvedAll,
+    // satisfied by the applied restoration write, so a failed
+    // restoration holds the mark like a failed delete instead of
+    // stranding the event beyond the horizon (technical design
+    // §15.2.7, §17.5). Skipped when out of time on a write
     // run: its unbounded lookups only matter to an application that will
     // not happen.
     // Skipped for scoped diagnostics: the targeted read above already
@@ -1314,32 +1360,77 @@ function reconcile(options) {
     if (!options.eventIdFilter && (options.dryRun || !outOfTime)) {
       // Budget-aware INSIDE the pass, not just gated ahead of it: one
       // unbounded lookup per pending create can consume the remaining
-      // runtime on a large diff, and a hard kill here skips status
-      // persistence and the continuation. The guard stops further
-      // lookups; outOfTime is then re-evaluated so an application that
-      // would follow a truncated restoration is skipped -- unresolved
-      // creates must never be applied blindly (technical design
-      // §15.2.7).
-      resolveOutOfWindowCompanions(diff, cleanup,
-        () => elapsedExceedsReadBudget(runStart));
+      // runtime on a large diff. The guard is the EVIDENCE threshold --
+      // its own tier past the bulk-listing one, which a too-large
+      // calendar's window listing exhausts before this pass starts --
+      // and it fires with application headroom deliberately left: when
+      // it cuts the pass short, the pass SUPPRESSES every create it has
+      // not resolved (out of diff.creates, counted in
+      // suppressedCreates) and application proceeds with the rest --
+      // non-dry only: a dry run applies nothing, so unresolved creates
+      // stay in the preview diff, counted as unverified.
+      // Relying on the execution-budget re-check below to block them
+      // instead would let unresolved creates through: the evidence
+      // threshold fires long before that check turns true, and an
+      // unresolved create applied blindly is the duplicate this pass
+      // exists to prevent. Creates whose key collides with a
+      // shrink-cleanup delete are resolved DIRECTLY against the
+      // in-memory stranded event before any lookups -- the match is
+      // already in hand, so no colliding create can ever be suppressed
+      // and no delete needs withholding (technical design §15.2.7,
+      // §23.1).
+      resolveOutOfWindowCompanions(diff, cleanup, options.dryRun,
+        () => elapsedExceedsEvidenceBudget(runStart));
       outOfTime = elapsedExceedsExecutionBudget(runStart);
+    } else if (!options.eventIdFilter) {
+      // Out of time before the pass could start: every pending create
+      // is withheld for want of its lookup, and the §15.2.4 diagnostics
+      // contract (suppressed counts are RECORDED) plus the §19.6
+      // suppressed-work continuation cause must hold on this worst
+      // starvation path too. diff.creates itself stays intact --
+      // application is skipped wholesale below (technical design
+      // §15.2.7).
+      diff.diagnostics.suppressedCreates += diff.creates.length;
     }
 
     // On an INCOMPLETE scan, orphan deletion upgrades to per-event
     // evidence the same way creates do (technical design §15.2.3,
-    // §15.2.4): one parent point read per unmatched companion -- absent
-    // or cancelled proves the orphan and moves it into diff.deletes; a
-    // LIVE parent (unread page or moved out of range, indistinguishable
-    // here) preserves it this run; a read the guard cut off leaves it
-    // preserved and counted in suppressedDeletes. Without this pass, a
-    // deleted source's companions would survive every truncated run on
-    // a calendar too large for any single scan. Skipped on scoped
-    // diagnostics (nothing is applied) and when out of time.
+    // §15.2.4): one parent point read per unmatched companion. Absent
+    // or cancelled proves the orphan and moves it into diff.deletes. A
+    // LIVE parent is evaluated in place through the route-free
+    // desired-state tests its own slice would apply (planning-range
+    // overlap, eligibility, directive-derived roles): no desired
+    // companion for the candidate's key means delete, whatever page the
+    // parent sat on -- except a preserved record (technical design
+    // §15.2.9's deletion-side test: concluded, or ended with an
+    // unusable anchor -- spared on every path, no read spent); a still-desired key preserves it this run
+    // -- the parent's own slice restores it through the §15.2.7 lookup.
+    // A read the guard cut off leaves it preserved and counted in
+    // suppressedDeletes. Without this pass a deleted source's
+    // companions would survive every truncated run; without the
+    // live-parent evaluation, a source and stale companion split across
+    // pagination slices would be preserved on every chain -- the
+    // parent's slice never observes the companion, and mere liveness
+    // would wave it through here. Skipped on scoped diagnostics
+    // (nothing is applied) and when out of time.
     if (!options.eventIdFilter && !scanComplete &&
         (options.dryRun || !outOfTime)) {
-      resolveUnmatchedCompanions(diff, planningOutcomes,
-        () => elapsedExceedsReadBudget(runStart));
+      resolveUnmatchedCompanions(diff, planningOutcomes, window, settings,
+        now, () => elapsedExceedsEvidenceBudget(runStart));
       outOfTime = elapsedExceedsExecutionBudget(runStart);
+    } else if (!options.eventIdFilter && !scanComplete) {
+      // Same contract as the creates side above (§15.2.4): companions
+      // whose point read never ran -- here, because the run hit the
+      // full deadline before the pass could start -- are counted, so
+      // diagnostics tell "gave up" from "found nothing" on the worst
+      // starvation path too. Concluded records are excluded from the
+      // count exactly as the pass itself excludes them: they are
+      // preserved on evidence, not for want of it, and no retry will
+      // ever act on them (technical design §15.2.9). diff.preserved
+      // itself stays intact.
+      diff.diagnostics.suppressedDeletes += diff.preserved.filter(
+        event => !planningOutcomes.has(event.parentEventId) &&
+                 !isPreservedRecord(event, now)).length;
     }
 
     // Daily-only ownership sweep for companions moved outside the
@@ -1355,11 +1446,18 @@ function reconcile(options) {
     // largest configurable horizon and the duration cap, so a window
     // shrink cannot hide a stray -- and event id absent from the window
     // read) so history costs almost nothing; each candidate parent gets one point read and
-    // a STATE decision: absent/cancelled parent, live-but-out-of-window
-    // parent, and in-window INELIGIBLE parent all mean delete; a PLANNED
-    // parent keeps its candidates (restoration owns them) unless the key
-    // is already satisfied in-window (stranded duplicate); FAILED
-    // preserves. Deletes deduplicated by id like the overlong pass.
+    // a STATE decision: absent/cancelled parents delete (concluded
+    // records excepted -- deleting a past meeting does not un-happen
+    // the trip); live-but-out-of-window and in-window INELIGIBLE
+    // parents delete only DISPLACED candidates (observed outside the
+    // persisted anchor's companion span -- an undisplaced candidate
+    // aged out naturally and stays as history, technical design
+    // §15.2.8/§15.2.9); a PLANNED parent keeps its candidates
+    // (restoration owns them) unless the key is already satisfied
+    // in-window AND the candidate is not a concluded record (a
+    // reschedule leaves the record sharing the key with the new block
+    // by design); FAILED preserves. Deletes deduplicated by id like
+    // the overlong pass.
     //
     // Budget-aware on BOTH sides: gated on a fresh check (the restoration
     // lookups above may have consumed what the earlier check saw), the
@@ -1382,10 +1480,10 @@ function reconcile(options) {
     // incomplete sweeps.
     let sweep = null;
     if (options.reason === "daily-trigger" && scanComplete &&
-        !elapsedExceedsReadBudget(runStart)) {
+        !elapsedExceedsEvidenceBudget(runStart)) {
       sweep = sweepOutOfWindowCompanions(
         observedGenerated, planningOutcomes, window, now,
-        () => elapsedExceedsReadBudget(runStart));
+        () => elapsedExceedsEvidenceBudget(runStart));
       const queuedIds = new Set(diff.deletes.map(event => event.id));
       diff.deletes.push(
         ...sweep.events.filter(event => !queuedIds.has(event.id))
@@ -1405,11 +1503,15 @@ function reconcile(options) {
       // (technical design §17.5, §23.1). deferredOps > 0 reports partial.
       applied = applyDiff(diff, runStart);
 
-      // Lower the mark only when every stranded delete succeeded AND the
-      // cleanup scan was complete, and never on a dry run. A truncated
-      // scan could delete its one retrieved page, satisfy deletedAll, and
-      // strand every later page outside all future scans. A partial
-      // cleanup leaves the mark high so the next run retries.
+      // Lower the mark only when every stranded event was RESOLVED --
+      // deleted, or realigned by an applied restoration write (a
+      // superseded event stays in cleanup.events; a failed restoration
+      // must hold the mark like a failed delete, technical design
+      // §15.2.7/§17.5) -- AND the cleanup scan was complete, never on a
+      // dry run. A truncated scan could delete its one retrieved page,
+      // satisfy the check, and strand every later page outside all
+      // future scans. A partial cleanup leaves the mark high so the
+      // next run retries.
       //
       // GUARDED, like every post-apply bookkeeping write: Calendar has
       // already accepted this run's operations, and a Properties throw
@@ -1418,7 +1520,7 @@ function reconcile(options) {
       // construction: an unlowered mark means the next run re-scans the
       // vacated range and retries (technical design §18.2,
       // BOOKKEEPING_PERSIST_FAILED).
-      if (cleanup.shrunk && cleanup.scanComplete && applied.deletedAll(cleanup.events)) {
+      if (cleanup.shrunk && cleanup.scanComplete && applied.resolvedAll(cleanup.events)) {
         try {
           saveHighWater(window.observeEnd);
         } catch (persistError) {
@@ -1481,12 +1583,20 @@ function reconcile(options) {
       }
       // Re-enqueue only while a continuation can still HELP: deferred
       // operations, an application skipped for time, an exhausted route
-      // budget, or an unfinished scan chain. Scan coverage after a
-      // FINISHED chain never re-enqueues -- the next continuation would
-      // find no cursor, scan fresh, truncate, and start a new chain
-      // re-tiling identical work until the cap; the deletes still
-      // suppressed by partial coverage need one COMPLETE scan, which is
-      // the daily run's job (technical design §19.6, §23.4).
+      // budget, an unfinished scan chain, or -- on a run whose scan
+      // covered the current window -- restoration/orphan-pass work
+      // suppressed at the evidence tier or planning cut short at its
+      // tier (a continuation re-reads that window and retries them; a
+      // chain slice's suppressed or time-starved work instead waits for
+      // the slice's next fresh read -- technical design §7.2.1's
+      // division of labor; a truncated SWEEP is never a cause, being
+      // daily-gated -- no continuation can re-run it, §15.2.8).
+      // Scan coverage after a FINISHED chain never re-enqueues -- the
+      // next continuation would find no cursor, scan fresh, truncate,
+      // and start a new chain re-tiling identical work until the cap;
+      // the deletes still suppressed by partial coverage need one
+      // COMPLETE scan, which is the daily run's job (technical design
+      // §19.6, §23.4).
       if (result.status === "partial" &&
           continuationStillUseful(result, chainFinished)) {
         // {scheduled, capReached}: already-pending is fine (a pass is

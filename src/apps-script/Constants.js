@@ -55,14 +55,40 @@ const CONTINUATION_DELAY_MS = 5 * 60000;
 // release run even on a run that used its whole budget. Technical
 // Design 23.1.
 const EXECUTION_BUDGET_MS = 4.5 * 60000;
-// Read passes (window/shrink/sweep listings, restoration and orphan
-// lookups) stop at this fraction of EXECUTION_BUDGET_MS so planning and
-// application keep headroom -- a read guarded by the full threshold
-// returns with the same check already true, and everything it retrieved
-// is marked failed and never applied. Deliberately coarse: it only
-// guarantees application headroom; applyDiff's between-operations checks
-// handle a diff too large for the remainder. Technical Design 23.1.
+// Bulk listings (window and shrink) stop at this fraction of
+// EXECUTION_BUDGET_MS so planning and application keep headroom -- a
+// read guarded by the full threshold returns with the same check
+// already true, and everything it retrieved is marked failed and never
+// applied. Deliberately coarse: it only guarantees later-phase
+// headroom; applyDiff's between-operations checks handle a diff too
+// large for the remainder. Technical Design 23.1.
 const READ_BUDGET_FRACTION = 0.5;
+// Planning stops STARTING new sources at this fraction (the remainder
+// is marked EXECUTION_BUDGET_EXCEEDED, which preserves companions):
+// route calls run seconds each, and a planning loop on the full
+// threshold would burn straight through the evidence tier below.
+// Technical Design 23.1.
+const PLANNING_BUDGET_FRACTION = 0.75;
+// Absence-evidence passes (15.2.7 restoration lookups, 15.2.3 orphan
+// point reads, 15.2.8 daily sweep) stop at this later fraction. Each
+// earlier phase stops short of the next tier's mark, so no phase
+// starves its successors AS LONG AS PHASES RUN IN TIER ORDER -- and
+// phases sharing a tier need their own ordering argument: the bulk
+// reads run unresumable-but-self-draining first (the shrink listing,
+// which progresses only through its applied deletions, then the
+// region-consuming window scan, which resumes by cursor and loses
+// nothing by running second), the evidence passes self-draining first
+// (restoration lookups, whose queue shrinks across runs as resolved
+// creates apply, then whichever of the orphan point reads and the
+// daily sweep the scan's completeness selects -- mutually exclusive
+// per run -- deferral behind a self-draining predecessor is transient,
+// a starved bulk read's is not). A same-threshold guard behind a phase that
+// consumes the region every run is the failure mode throughout: zero
+// reads, every absence-gated operation suppressed, on every slice,
+// forever. Application keeps the final tenth plus applyDiff's
+// between-operations deferral and the margin below the platform's
+// hard kill. Technical Design 23.1.
+const EVIDENCE_BUDGET_FRACTION = 0.9;
 
 // Remove-all cleanup runs as budget-bounded worker passes, never inside the
 // card callback. Lock-contention retries are bounded separately from
@@ -71,6 +97,21 @@ const READ_BUDGET_FRACTION = 0.5;
 // Design section 19.4.
 const MAX_REMOVAL_PASSES = 20;
 const MAX_REMOVAL_CONTENTION_RETRIES = 10;
+// Liveness threshold for the cleanup status card: a `running` record
+// with no pending worker trigger is failed only when the FRESHEST
+// liveness stamp -- the record's updatedAt or the lockless heartbeat's
+// `at`, whichever is newer -- is older than this. The contention cap
+// surfaces through the same rule (a capped worker stops re-enqueueing
+// AND stamping, so staleness follows within minutes; the retained
+// retries count labels that failure as contention, never overrides a
+// fresh stamp -- the lockless count can be raced stale over a live
+// pass's reset). An EXECUTING pass has already deleted
+// its own trigger (collapse rule) and holds the user lock, so trigger
+// absence alone would misreport every live pass. The 6-minute platform
+// hard kill plus scheduling slack: a live pass re-stamps within one
+// budget; a dead one crosses this within minutes. Technical Design
+// section 19.4.
+const REMOVAL_STALE_AFTER_MS = 10 * 60000;
 
 // How far the daily orphan sweep's anchor band reaches behind planStart
 // (together with MAX_SOURCE_DURATION; the band's upper bound is now +
@@ -109,8 +150,18 @@ const CONTINUATION_COUNT_KEY = 'dtp.continuationCount';
 // the ceiling. Technical Design section 20.3.
 const DIAGNOSTIC_SPEND_KEY = 'dtp.diagnosticRouteSpend';
 // Remove-all cleanup progress: survives the worker's re-enqueues and feeds
-// the home card's status surface. Technical Design section 19.4.
+// the home card's status surface. Written ONLY under the user lock --
+// lockless writers use the heartbeat below, or a stale read-modify-write
+// could clobber a concurrent pass's fold or revert a terminal record.
+// Technical Design section 19.4.
 const REMOVAL_PROGRESS_KEY = 'dtp.removalProgress';
+// Lockless side channel { at, contentionRetries }: worker entry stamps
+// `at` before the lock wait, contention re-enqueues increment the
+// retries, a lock-winning pass resets both. The card's liveness rule
+// reads the freshest of this and the record's updatedAt, and derives
+// the contention-cap failure from the retries -- the lockless path
+// never writes state. Technical Design section 19.4.
+const REMOVAL_HEARTBEAT_KEY = 'dtp.removalHeartbeat';
 // Injected `now` of the last sweep whose listing and window scan were both
 // complete. Stretches the sweep's updatedMin bound and anchor band over
 // gaps of skipped or incomplete sweeps. Technical Design section 15.2.8.

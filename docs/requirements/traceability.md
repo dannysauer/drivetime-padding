@@ -75,7 +75,7 @@ This matrix links requirement groups to architecture components, technical-desig
 
 | Requirement | Covers | Scenario |
 |---|---|---|
-| REQ-RECON-013 | Absence-based writes require complete evidence (amended in the twentieth round: creates lookup-gated, deletions point-read-gated on incomplete scans) | AC-RECOVERY-009 |
+| REQ-RECON-013 | Absence-based writes require complete evidence (amended in the twentieth round: creates lookup-gated, deletions point-read-gated on incomplete scans; and in the twenty-second: a fetched live parent is evaluated in place, so a stale companion split from its live source by pagination is still removed) | AC-RECOVERY-009 |
 | REQ-PERF-017 | Schedule-only changes cost no broker calls | AC-CACHE-011 |
 | REQ-PERF-014 (extended) | Cache repair persists the full triplet including the hash | AC-CACHE-012 |
 | REQ-ROUTE-011 | Uniform typed endpoints in both directions | AC-ORIGIN-005 |
@@ -162,7 +162,7 @@ This matrix links requirement groups to architecture components, technical-desig
 |---|---|---|
 | §10.4 (carried) | Missing default origin becomes a per-event failed outcome in the diagnostic payload, not a run-wide throw | — §20.3 card |
 | §19.4 (resumable) | Cleanup pages and deletes interleaved; retries resume without a persisted cursor | AC-CONFIG-004 |
-| REQ-RECON-017 (state-keyed) | Sweep decides on parent state: out-of-window and ineligible live parents delete too | AC-RECOVERY-015 |
+| REQ-RECON-017 (state-keyed) | Sweep decides on parent state: out-of-window and ineligible live parents delete too (amended in the twenty-second round: only *displaced* candidates — undisplaced aged-out companions are preserved as history) | AC-RECOVERY-015 |
 | §17.5 (deferred) | `applyDiff` budget-aware between operations; remainder deferred, not failed | AC-RECOVERY-013 |
 | REQ-PRIV-006 (unconditional) | Origin addresses destroyed regardless of how cleanup later ends (tombstone placement finalized in the sixteenth round: written by the card action, never by the worker) | AC-CONFIG-004 |
 
@@ -244,15 +244,31 @@ This matrix links requirement groups to architecture components, technical-desig
 |---|---|---|
 | §20.3 (reserve-then-refund) | Diagnostic allowance reserved before any broker call and unspent remainder refunded; both failure directions land conservative — the ceiling is never exceeded by a lost write | AC-CACHE-004 |
 | §7.2.1 (resumable scan) | Truncated window scans persist a chain-owned cursor pinned to their range; continuation and daily runs resume it, fresh runs never overwrite it, and the daily run's counter reset is the episode boundary — passes tile a too-large calendar instead of re-reading the same prefix until the cap | AC-RECOVERY-017 |
-| REQ-RECON-013 (evidence-keyed) | Both absence operations upgrade to per-event evidence on incomplete scans: creates through the per-parent lookup, orphan deletions through a parent point read (absent/cancelled deletes, live preserves) | AC-RECOVERY-009 |
+| REQ-RECON-013 (evidence-keyed) | Both absence operations upgrade to per-event evidence on incomplete scans: creates through the per-parent lookup, orphan deletions through a parent point read (absent/cancelled deletes; a live parent — evaluated in place since the twenty-second round — deletes when it desires no companion for the key, preserves otherwise) | AC-RECOVERY-009 |
 
 ## Requirements added in the twenty-first review round
 
 | Requirement | Covers | Scenario |
 |---|---|---|
-| §23.1 (read budget) | Read passes stop at `READ_BUDGET_FRACTION` of the execution threshold, reserving headroom to plan and apply what they retrieved — a truncated slice, sweep, or shrink pass is productive, not wasted | AC-RECOVERY-013, AC-RECOVERY-017 |
+| §23.1 (read budget) | Bulk listings stop at `READ_BUDGET_FRACTION` of the execution threshold (the per-event evidence passes *and the sweep* at the later `EVIDENCE_BUDGET_FRACTION` tier, added in the twenty-second round), reserving headroom to plan and apply what was retrieved — a truncated slice, sweep, or shrink pass is productive, not wasted, each on its own tier | AC-RECOVERY-013, AC-RECOVERY-017 |
 | §15.2.8 / §7.6 (advancing truncation) | Applied deletions vanish from later listings, so truncated sweep and shrink retries reach past the applied prefix instead of re-retrieving it | AC-RECOVERY-015 |
 | §7.2.1 (dead cursor replaced) | A rejected resume token's cursor is replaced by the fallback's own token (or cleared when the fallback covers the span); offered-cursor runs never claim current-window scan credit | AC-RECOVERY-017 |
 | §20.2 (disabled persisted) | Non-dry disabled results persist through the guarded save; only the lock-contention skip is unpersisted | — §20.2 |
 | Architecture §14.2 (buffer init) | `beginRunWarnings()` creates the run's warning buffer before any warning site can fire | — §18.2 |
 | §16.1 (spec-driven transparency) | Ordinary-companion transparency built from `spec.transparency`; null omits the field and observed normalization maps default back to null | AC-ELIG-007 |
+
+## Requirements added in the twenty-second review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| §15.2.7 (suppressed creates) | A restoration pass cut short at the evidence threshold suppresses its unresolved creates instead of relying on the later execution-budget check — application proceeds with resolved work, never with an unresolved create; shrink-collision creates resolve directly against the in-memory stranded event, so the pass's guard can never suppress one (a run that hits the full deadline before the pass starts counts all pending creates, colliding included) | AC-RECOVERY-009 |
+| §15.2.3 (live-parent evaluation) | A live parent found by the point read is evaluated through route-free desired-state tests; a companion its source no longer desires is deleted even when pagination forever splits the pair | AC-RECOVERY-009, AC-RECOVERY-017 |
+| §15.2.5 / §15.2.7 (restoration classification) | Restoration matches classify through the same update-versus-replace rules as in-window matches — an `eventType` change while the companion sat out of range replaces instead of emitting a forever-rejected patch | AC-RECOVERY-012 |
+| REQ-TRIGGER-002 (chain carve-out) | The §7.2.1 daily-resume residual is normative: a chain pending at daily time defers that day's fresh-window pass until the chain completes — one further cycle after completion, two cycles total when the chain finishes within the day's allowance | AC-RECOVERY-017 |
+| §19.4 (liveness by freshness) | A `running` record with no pending worker trigger is failed only when the liveness stamp (freshest of `updatedAt` and the lockless heartbeat's `at`, stamped at worker entry) is stale past `REMOVAL_STALE_AFTER_MS` — an executing pass has already consumed its trigger and must not be misreported; the progress record itself is written only under the user lock | AC-CONFIG-004 |
+| §19.4 (outstanding failures) | `failedDeletes` counts unresolved failures, replaced only by a complete walk and never zeroed at pass start — a retried deletion clears the failure it supersedes, keeping the zero-failures terminal satisfiable without truncated or dying passes understating what remains | AC-CONFIG-004 |
+| §23.1 (planning tier) | Planning stops starting new sources at `PLANNING_BUDGET_FRACTION` (remainder marked `EXECUTION_BUDGET_EXCEEDED`), so route calls cannot burn through the evidence passes' region; time-starved planning joins the continuation causes on current-window runs | AC-RECOVERY-013 |
+| §23.1 (evidence tier) | Absence-evidence work (restoration lookups, orphan point reads, the daily sweep) gets its own budget tier past the bulk-listing one, so an earlier phase that exhausts its region cannot starve it on the very calendars that need it; same-tier passes order self-draining first | AC-RECOVERY-009, AC-RECOVERY-017 |
+| §7.6 / §17.5 (`resolvedAll`) | The shrink high-water gate counts a stranded event resolved by deletion or by an applied write that realigned it inside the window; the cleanup merge contributes only unobserved events, so a comparator classification of a co-observed event is never raced by a queued delete | AC-CONFIG-002, AC-RECOVERY-012 |
+| REQ-RECON-017 (displacement) | The sweep's live-parent deletion rules act only on candidates displaced from their persisted anchors — the moved-test; a naturally aged-out companion is preserved as history however recently a patch bumped its `updated` | AC-RECOVERY-015 |
+| REQ-RECON-009 (concluded records, §15.2.9) | Deletion authority stops at the past: an ended, undisplaced companion is a record of a trip, preserved by every reconciliation deletion path — without it the hours-long lookback against the day-long observation margin would erase every travel block within a day and nothing would ever age out as history | AC-RECOVERY-015 |

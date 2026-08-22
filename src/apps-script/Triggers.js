@@ -23,7 +23,29 @@ function ensureTriggers() {
  * written rather than a fragment healed by deep-merge at read time --
  * destroying origin addresses NOW,
  * unconditionally on later cleanup outcomes (REQ-PRIV-006), removes the
- * reconciliation triggers, initializes the progress record, and enqueues
+ * reconciliation triggers, initializes the progress record (carrying
+ * the outstanding failedDeletes of ANY prior record except `complete`
+ * forward -- failed, aborted, or a dead worker's `running`: the action
+ * is idempotence-guarded first, deriving liveness exactly as the card
+ * does (pending worker trigger, or fresh stamp on a record still
+ * `running` -- a fresh stamp on a terminal record is the final pass's
+ * own mark and must not block the retry the card is offering; a free
+ * lock proves nothing between a live chain's passes) and exiting as a
+ * duplicate
+ * click ONLY when the settings are already disabled too: liveness with
+ * settings enabled is a chain doomed by a mid-cleanup re-enable, so
+ * the click is a fresh removal and proceeds in full (the new worker's
+ * collapse absorbs the doomed trigger). A `running` record that
+ * reaches the init is a dead worker's or that doomed chain's; either
+ * way its outstanding count is a calendar fact -- and starting
+ * scanComplete at false -- outstanding failures belong to the calendar,
+ * not the attempt, and a zeroed record whose first pass dies before
+ * folding would render a misleadingly clean failure; completeness, by
+ * contrast, must be re-earned by this attempt's own walk) AND the
+ * removal heartbeat
+ * (a previous attempt's retained contentionRetries -- only the
+ * fully-successful terminal clears the key -- would otherwise mislabel
+ * a later staleness failure as lock contention), and enqueues
  * runRemovalCleanup. The unbounded scan-and-delete must NOT run here --
  * card callbacks share the short execution budget that forced manual sync
  * to enqueue, and this action's work grows with the user's entire
@@ -34,17 +56,32 @@ function removeAutomation() {
 }
 
 /**
- * One-off trigger handler behind remove-all cleanup. Collapses its pending
- * triggers, takes the user lock (re-enqueues on contention, bounded by
+ * One-off trigger handler behind remove-all cleanup. Stamps the LOCKLESS
+ * dtp.removalHeartbeat as its FIRST statement -- before even the trigger
+ * collapse, since the firing already emptied the trigger list and any
+ * unstamped interval reads as a dead worker (the card's liveness rule
+ * reads the freshest stamp against REMOVAL_STALE_AFTER_MS; the
+ * heartbeat, never the progress record, because a lockless
+ * read-modify-write of the record could clobber a concurrent fold) --
+ * then collapses its pending triggers, takes the user lock (re-enqueues on
+ * contention, bumping heartbeat.contentionRetries, bounded by
  * MAX_REMOVAL_CONTENTION_RETRIES -- contention does not burn working
- * passes), aborts if the user re-enabled between passes, then deletes
- * pages of scanned events until the execution budget nears -- paging and
- * deletion interleave, so a retry resumes with no persisted cursor --
- * folding counts into dtp.removalProgress and re-enqueueing until the
- * scan completes (capped at MAX_REMOVAL_PASSES). NEVER writes the
- * settings document: the card action wrote the disabled tombstone under
- * its lock before this worker existed, so REQ-PRIV-006 holds on every
- * outcome, including a worker that never wins the lock again.
+ * passes, and at the cap the worker just stops re-enqueueing: the card
+ * derives that failure), counts the pass's deletion failures fresh in
+ * memory and REPLACES the persisted failedDeletes only when a COMPLETE
+ * walk folds -- never zeroed at pass start and never replaced by a
+ * truncated pass, so dying or truncated passes leave the previous
+ * outstanding count visible while a successful retry still clears the
+ * failure it supersedes -- aborts if the user re-enabled
+ * between passes, then deletes pages of scanned events until the
+ * execution budget nears -- paging and deletion interleave, so a retry
+ * resumes with no persisted cursor -- folding counts into
+ * dtp.removalProgress (deletions accumulate; failures replace) and
+ * re-enqueueing until the scan completes (capped at MAX_REMOVAL_PASSES).
+ * NEVER writes the settings document: the card action wrote the
+ * disabled tombstone under its lock before this worker existed, so
+ * REQ-PRIV-006 holds on every outcome, including a worker that never
+ * wins the lock again.
  * Technical Design 19.4.
  */
 function runRemovalCleanup(e) {
