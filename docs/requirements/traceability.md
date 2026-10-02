@@ -50,7 +50,7 @@ This matrix links requirement groups to architecture components, technical-desig
 | REQ-PERF-012 | Duration quantization | AC-CACHE-001 |
 | REQ-TIME-011 | Reconciliation lookback | AC-OOO-007 |
 | REQ-TIME-012 | Maximum supported travel | AC-OOO-008 |
-| REQ-TIME-013 | Daily maintenance hour | — pending Spike 1 |
+| REQ-TIME-013 | Daily maintenance hour | AC-CONFIG-006 (realignment after a DST or time-zone change; `atHour` semantics themselves still pending Spike 1) |
 | REQ-SEC-002a | Scope selection as an architectural decision | — pending Spike 2 |
 
 ## Requirements added in the third review round
@@ -282,3 +282,9 @@ This matrix links requirement groups to architecture components, technical-desig
 | §15.2.10 (zero-emission lookup) | Roles §12.5 zeroed out of existence produce no pending create, so restoration never fires; a targeted per-parent lookup on incomplete scans, daily runs, and continuations deletes the stale block the route-free evaluation must preserve | AC-RECOVERY-017 |
 | §17.1 (budget diagnostic) | A scoped diagnostic whose planning-tier boundary fires before the target is planned synthesizes `EXECUTION_BUDGET_EXCEEDED` instead of misreporting `EVENT_NOT_FOUND` for an event the targeted read just returned | AC-RECOVERY-013 |
 | §8.1 / §14.2 (per-event containment) | The normalizer is total and a planning throw becomes that source's `failed` outcome (`UNEXPECTED_ERROR`, logged, capping the run at `partial`) — one poisoned event cannot fail the run, which application-gated cursor writes require lest a deterministic throw freeze the scan chain at its slice | AC-RECOVERY-013 |
+
+## Requirements added in the twenty-fourth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| REQ-TIME-013 / §19.2 / §19.3 (schedule realignment) | The daily handler re-derives the maintenance hour from the user's current Calendar time zone at the next firing's instant on every run, and trigger repair replaces a daily trigger whose persisted installed hour (`dtp.dailyTrigger`) no longer matches — so a daylight-saving transition or time-zone change converges within one cycle with no user action, where previously only a homepage open or settings save could notice | AC-CONFIG-006 |

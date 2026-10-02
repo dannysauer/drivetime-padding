@@ -76,4 +76,14 @@ const ERROR_CODES = {
   // card action's own enqueue stays unguarded on purpose -- it fails
   // synchronously in front of the user as the action's error response.
   MANUAL_ENQUEUE_FAILED: 'MANUAL_ENQUEUE_FAILED',
+  // The daily handler's post-run ensureTriggers(now) threw, or returned
+  // an unhealthy report that is not merely contended (19.2; authorization
+  // and policy failures are report fields, not throws, REQ-TRIGGER-007;
+  // contention is not a failure and logs nothing) -- the automatic repair
+  // path that realigns a daily trigger left stale by a DST transition
+  // or time-zone change. Log-only: the run's result is
+  // already persisted and must not be rewritten over a trigger-write
+  // failure; the next daily firing retries, and homepage open and
+  // settings save remain the manual repair paths (19.3).
+  TRIGGER_REPAIR_FAILED: 'TRIGGER_REPAIR_FAILED',
 };

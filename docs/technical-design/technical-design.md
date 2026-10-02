@@ -2242,6 +2242,7 @@ STATUS_PERSIST_FAILED
 BOOKKEEPING_PERSIST_FAILED
 CONTINUATION_ENQUEUE_FAILED
 MANUAL_ENQUEUE_FAILED
+TRIGGER_REPAIR_FAILED
 ```
 
 `DIRECTIVE_ORIGIN_UNCONFIGURED`: a directive named a `home` or `office` origin that is not configured, and resolution fell back to the default (§10.2). Recorded by the **engine** after `resolveOrigin` — the resolver stays a pure lookup — whenever `directives.origin` is set but the resolved origin's `name` differs from the requested one (never for an honored `origin=default`). Without a registered code the fallback §10.2 requires would have no carrier, and the event card could not explain that the user's explicit selection was ignored.
@@ -2253,6 +2254,8 @@ MANUAL_ENQUEUE_FAILED
 `CONTINUATION_ENQUEUE_FAILED`: `enqueueContinuation`'s trigger creation threw (per-user trigger quota, transient ScriptApp error). Emitted from **two call sites with different carriers** (§19.6): the engine's partial-run call joins the returned result's `warnings` — the run's applied operations are real, and rebuilding it as a failure would be a false record — while the handler's skip-path re-enqueue is **log-only**, because a lock-contention skip did no work and has no persisted result to carry the code. Either way the deferred work falls to the daily backstop (REQ-TRIGGER-002).
 
 `MANUAL_ENQUEUE_FAILED`: the manual handler's skip-path re-enqueue threw (§19.5) — the same throwable trigger-creation API, guarded for the same reason. **Log-only**: a skipped run's result is never persisted or rendered. The failure stays honest without a carrier because manual pendingness is *derived* from the trigger list — the home card shows no run pending and the button invites a retry. The card action's own enqueue is deliberately unguarded: it fails synchronously in front of the user as the action's error response, which is the correct surface.
+
+`TRIGGER_REPAIR_FAILED`: the daily handler's post-run `ensureTriggers(now)` threw, or returned a report that is not `healthy` **and not merely `contended`** — contention is not a failure, nothing is logged for it, and the next path to run repairs (§19.2 — logged under the same code, because authorization and policy failures are report fields rather than throws, REQ-TRIGGER-007, and on the automatic path nothing else would ever see them) — the automatic repair path that realigns a daily trigger left stale by a daylight-saving transition or a Calendar time-zone change (§19.3). **Log-only**: the run's result was built and persisted before the repair ran and must not be rewritten over a trigger-write failure (the same reasoning as `DIAGNOSTIC_SPEND_RECORD_FAILED`), the next daily firing retries — the stale trigger still fires, an hour off — and homepage open and settings save remain the manual repair paths, whose own failures surface through the health report (REQ-TRIGGER-007).
 
 `DIAGNOSTIC_SPEND_RECORD_FAILED`: the allowance **refund** threw inside the engine's `finally` (§20.3). The failure is caught and **logged** with this code rather than rethrown — an accounting error must not replace the run's already-built structured result or strand the user lock (Architecture §14.2). It cannot retroactively join that run's `warnings`: the result was assembled and persisted before the `finally` ran. And a lost refund is the *safe* side of the reserve-then-refund design: the reservation was written before the first broker call, so the hour under-grants until the bucket rolls over — the ceiling is never exceeded. (`reserveDiagnosticAllowance` fails closed on its own errors, granting `0`, so both failure directions land conservative.)
 
@@ -2272,7 +2275,8 @@ Internal details should be logged with opaque identifiers. UI messages should be
 
 ```javascript
 function onPrimaryCalendarChanged() {
-  return runReconciliation({ reason: 'calendar-trigger' });
+  const now = new Date();  // the handler is the clock boundary
+  return runReconciliation({ reason: 'calendar-trigger', now });
 }
 ```
 
@@ -2280,7 +2284,33 @@ function onPrimaryCalendarChanged() {
 
 ```javascript
 function runScheduledReconciliation() {
-  return runReconciliation({ reason: 'daily-trigger' });
+  const now = new Date();  // the handler is the clock boundary
+  const result = runReconciliation({ reason: 'daily-trigger', now });
+  if (result.status === 'skipped') {
+    // Another execution holds the user lock: the daily run itself waited
+    // for tomorrow, and so does its repair (§19.2's accepted residual).
+    return result;
+  }
+  // The AUTOMATIC trigger-repair path (§19.3): every daily firing
+  // re-derives the maintenance hour from the user's current Calendar
+  // time zone and replaces a daily trigger whose installed hour no
+  // longer matches. After the run, so a repair failure never costs the
+  // reconciliation; guarded, because ScriptApp trigger writes can throw
+  // (quota, transient error) and the run's result is already persisted.
+  // An unhealthy REPORT is logged too -- authorization and policy
+  // failures are report fields, not throws (REQ-TRIGGER-007), and on
+  // this path nothing else would ever see them -- but a merely
+  // CONTENDED report is not a failure: nothing broke, the next path to
+  // run repairs.
+  try {
+    const health = ensureTriggers(now);
+    if (!health.healthy && !health.contended) {
+      logWarning(ERROR_CODES.TRIGGER_REPAIR_FAILED, health);
+    }
+  } catch (repairError) {
+    logWarning(ERROR_CODES.TRIGGER_REPAIR_FAILED, repairError);
+  }
+  return result;
 }
 ```
 
@@ -2288,29 +2318,74 @@ function runScheduledReconciliation() {
 
 `ScriptApp` time-based triggers resolve `atHour()` against the **script project** timezone, not the user's. A manifest `timeZone` of `America/Chicago` would fire every user's daily reconciliation at 3am Central regardless of where they live.
 
-The manifest therefore declares `Etc/UTC`, and the daily hour is computed per user from their Calendar timezone at trigger-installation time:
+The manifest therefore declares `Etc/UTC`, and the daily hour is computed per user from their Calendar timezone (`Calendar.Settings.get('timezone')` — a user-settings read, not event data, that the full `calendar` scope covers but `calendar.events` would not; ADR 0013 records it as a Spike 2 input) — `DAILY_LOCAL_HOUR` (3am local, REQ-TIME-013) converted for the offset in effect at the **next firing's instant**:
 
 ```javascript
-function dailyHourUtc_(userTimeZone, desiredLocalHour) {
-  // Convert desiredLocalHour in userTimeZone into the equivalent UTC hour.
+function dailyHourUtc_(userTimeZone, desiredLocalHour, now) {
+  // The UTC hour of the NEXT instant strictly after `now` at which the
+  // wall clock in userTimeZone reads `desiredLocalHour`:00 -- the next
+  // firing's instant, at the offset in effect THEN. Deriving for today's
+  // local date instead would, in zones whose transition passes through
+  // the maintenance hour (EET -- Athens, Helsinki, Kyiv -- shifts
+  // 03:00 <-> 04:00), equal the stale installed hour on the transition
+  // day and cost a second cycle. A nonexistent wall time (the
+  // spring-forward gap) resolves to the first instant after the gap; an
+  // ambiguous one (the fall-back repeat) to its first occurrence. Zones
+  // on a half- or quarter-hour offset (Asia/Kolkata +05:30,
+  // Asia/Kathmandu +05:45, America/St_Johns -03:30, Australia/Adelaide
+  // +09:30/+10:30 with DST) put the instant off a UTC hour boundary:
+  // FLOOR to the hour containing it. The result is a BUCKET, not a
+  // minute -- atHour fires at an unspecified minute within the hour, so
+  // the run lands within roughly an hour either side of the intended
+  // local time.
 }
 ```
 
+The installed trigger is **persisted as a record** — `dtp.dailyTrigger = { utcHour, triggerUid }` (`DAILY_TRIGGER_KEY`) — because `ScriptApp` does not expose an installed trigger's hour: without the record, repair could not tell a correctly scheduled trigger from a stale one and would have to replace it on every pass. The unique id (`getUniqueId()`) is what lets repair tell the installed daily trigger from a stale or duplicate one — two daily triggers are otherwise indistinguishable (same handler, same event type). The user's time zone is read fresh at each derivation and not stored; nothing would consume a stored copy. The record is cleared wherever the daily trigger is deleted outside a replacement — repair's disabled branch and remove-all (§19.3, §19.4) — so a record pointing at a deleted trigger arises only from a crash mid-pass, which the next pass reads as an ordinary mismatch.
+
 Two caveats, both requiring prototype confirmation:
 
-- fixed-offset conversion drifts by an hour across daylight-saving transitions; the daily trigger should be re-evaluated during trigger repair rather than assumed stable;
-- if `atHour` semantics do not behave as documented under add-on authorization, fall back to an every-6-hours schedule, which makes local clock time irrelevant at the cost of extra runs.
+- fixed-offset conversion drifts by an hour across daylight-saving transitions, and the user can change their Calendar timezone outright. Neither has a user-visible symptom that would prompt a homepage open or a settings save, so the re-derivation **must run from an automatic path**: every daily firing recomputes the intended UTC hour from the current timezone and the next firing's offset and, where it differs from the persisted `utcHour`, `ensureTriggers(now)` replaces the daily trigger under §19.3's one mismatch rule. The schedule is therefore wrong by at most one hour for at most one daily cycle after a transition, with no user action. (The trigger that fires the repair is itself the stale one — it still fires, an hour off, which is exactly what makes the path automatic.) One **accepted side effect**: when the derived hour lies *later the same day* — a fall-back transition, or an eastward time-zone change — the replacement fires again that day, so the day sees two `daily-trigger` runs; the second is mostly cache hits, its sweep is idempotent, and its repeat of the continuation-counter reset is benign. Skipping the create when the hour is still ahead would instead leave the stale trigger to make the same decision every day and never converge. A second accepted residual: when the daily firing collides with another execution holding the user lock, the daily run is skipped (the lock-contention `skipped` exit, §17.2) and its repair with it — or the post-run repair finds the lock taken and reports `contended`; nothing failed, nothing is logged as a failure, and the realignment waits for the next firing — **two cycles in that rare collision**, the same collision that already defers the daily run's own work;
+- if `atHour` semantics do not behave as documented under add-on authorization, fall back to an every-6-hours schedule, which makes local clock time irrelevant at the cost of extra runs — and moots the realignment above.
 
 ### 19.3 Trigger repair
 
-`ensureTriggers()` must:
+`ensureTriggers(now)` must:
 
-- **create nothing when `settings.enabled` is false** — after the remove-all action persists the disabled state (§19.4), repair invoked from the homepage or a settings save must not resurrect the triggers the user just removed; it reports the disabled state instead. Re-enabling runs `ensureTriggers()` as part of the enable flow;
-- identify all project triggers for known handlers;
-- delete duplicates;
-- create missing triggers;
+- **manage the two standing triggers only** — the calendar trigger (`onPrimaryCalendarChanged`) and the daily trigger (`runScheduledReconciliation`). One-off handlers (manual sync, continuation, removal worker) are owned by their own enqueue-and-collapse rules (§19.4–§19.6) and are never touched here;
+- **mutate nothing when the settings document is structurally invalid** (`loadSettings` reports `INVALID_SETTINGS`, §5.3): a corrupt document must not read as "disabled" and have the automatic daily path delete the very triggers that are the eventual-consistency backstop. The report is unhealthy and carries the validation error, so the home card shows the §5.3 reset guidance;
+- **when the document is valid and `settings.enabled` is false, create nothing and delete any standing trigger it finds, clearing `dtp.dailyTrigger` with the daily trigger** — after the remove-all action persists the disabled state (§19.4), repair invoked from the homepage, a settings save, or a surviving daily firing must not resurrect the triggers the user removed, and a standing trigger that outlived a failed remove-all delete (the `ScriptApp` call threw) is an orphan that would otherwise fire forever; deleting it is what makes the disabled branch of `healthy` achievable. The report carries the disabled state. Re-enabling runs `ensureTriggers(now)` as part of the enable flow;
+- the **calendar trigger**: create it when missing; when several exist, keep one (the choice is arbitrary — they are identical) and delete the rest;
+- the **daily trigger — one rule**: *desired* is `dailyHourUtc_(currentCalendarTimeZone, DAILY_LOCAL_HOUR, now)`; *installed* is the daily-handler trigger whose `getUniqueId()` matches the persisted `dtp.dailyTrigger.triggerUid`, at the record's `utcHour`. A **missing trigger, a missing record, and a stale hour are one mismatch**, handled by one path: **create** the replacement at the desired hour, **persist** `{ utcHour, triggerUid }` for it, then **delete every other** daily-handler trigger — stale or duplicate, identified by uid, never by an attribute the new one shares. The order is the safety: a create failure or a hard kill leaves a transient duplicate for the next pass's uid-keyed cleanup, never *no* daily trigger with the automatic path having deleted itself, and the record never points at a trigger the pass just deleted. A **persist failure rolls the create back**: the pass deletes the trigger it just created and reports `error` — otherwise a chronic Properties failure would add one live daily trigger per pass, each running a full reconciliation, until the trigger quota stopped it; with the rollback it costs one failed create per pass and nothing accumulates (a rollback delete that itself fails leaves a single orphan, which the first pass after Properties recovers removes through the uid-keyed cleanup). When nothing mismatches, the uid-keyed cleanup still deletes any extra daily-handler trigger — the deterministic dedup an hour-blind trigger list could not otherwise provide. Only the hour is compared; the user's time zone is read fresh, not stored. `now` is **injected** by the caller — the handler or card callback reads the clock once at its boundary (§17.1's pattern) — so the transition-day derivation is testable. This is the daylight-saving and time-zone-change rule; it is what makes "re-evaluated during trigger repair" a guarantee rather than a hope, because repair runs from **three** paths — homepage open, settings save, and every daily firing (§19.2), the last being the automatic one;
+- run the mutating steps **under the user lock** with a bounded wait like the manual enqueue (§19.5, `MANUAL_ENQUEUE_LOCK_MS`): two concurrent repairs reading the same record would otherwise both replace, installing duplicates and racing the record write. On contention nothing is mutated and the report says so (`contended: true`) — not a failure: the daily handler does not log it, and the realignment waits for the next path to run (§19.2's accepted residual);
 - preserve unrelated project triggers;
-- return a health report.
+- return a health report:
+
+```typescript
+interface TriggerHealth {
+  /** The installed state matches what settings require: enabled -> both
+      standing triggers present, no extras, daily hour current;
+      disabled -> no standing triggers (achievable because the disabled
+      branch deletes orphans). False, unless merely contended, is what
+      the daily handler logs under TRIGGER_REPAIR_FAILED and what the
+      home card renders as needing attention (REQ-TRIGGER-005). */
+  healthy: boolean;
+  automationDisabled: boolean;
+  calendarTrigger: "installed" | "missing";
+  /** stale: a mismatch this pass could not repair (lock contention, or
+      the create failed) -- the card renders it as "scheduled hour out
+      of date (repairing)" and still offers Repair (Architecture 15.5). */
+  dailyTrigger: "installed" | "missing" | "stale";
+  /** From the persisted dtp.dailyTrigger record; null when missing. */
+  dailyHourUtc: number | null;
+  /** True when another execution held the user lock, so the report
+      describes state this pass could not change -- not a failure. */
+  contended: boolean;
+  /** A create or delete that failed, with the registry's retryability;
+      the REQ-TRIGGER-007 remediation message is built from its code. */
+  error: AppErrorRecord | null;
+}
+```
 
 ### 19.4 Uninstall considerations
 
@@ -2337,8 +2412,8 @@ The unbounded scan plus one conditional delete per historical companion **cannot
 
 **The card action** (`removeAutomation`, behind the confirmation) does only bounded work:
 
-1. **acquire the same user lock reconciliation uses** (§16 of the architecture), with a generous wait. If the lock cannot be acquired, report that a synchronization is in progress and ask the user to retry — the disable must not race a run. Under the lock, the action is **idempotence-guarded**: it first derives cleanup liveness exactly as the status card does (a pending `runRemovalCleanup` trigger, or a fresh liveness stamp **on a record still `running`** — a fresh stamp on a *terminal* record is just the final pass's own mark, and the card is already offering the retry this click is; the lock being free proves nothing, since a live chain holds it only *during* passes), **and checks that the settings are already disabled**. Liveness *with the tombstone in place* makes this click a duplicate: report removal-in-progress and exit without touching the record — re-initializing a live chain's record would zero its cumulative counts and enqueue a rival worker. Liveness with settings **enabled** is *not* a duplicate: the pending chain survived a mid-cleanup re-enable and is doomed (its next pass aborts at the step-3 `enabled` check), so this is a fresh removal request and the action proceeds in full — the new worker's step-1 collapse absorbs the doomed chain's trigger, and no pass can be executing (it would hold the lock this action holds);
-2. **replace the settings document with the disabled tombstone** — the §5.2 defaults with `enabled: false` — under the lock, not merely flip the flag. The tombstone is **schema-complete by construction**, so what later runs read is exactly what was written. A minimal `{ schemaVersion, enabled: false }` fragment would in fact *load* — §5's deep-merge fills missing fields from defaults before validation runs — but the disabled state the user just confirmed should not depend on read-time healing: the fragment's effective content would be computed against whatever defaults the *reading* version ships, and the engine validates structurally before it checks the disabled gate (Architecture §14.2), so the disabled report would rest on the merge always reconstructing a validatable document. Writing the complete defaults makes the stored document self-contained. They carry empty origin values, so replacing the document still destroys the configured addresses. Trigger removal alone is temporary: the engine's own first check is `settings.enabled`, `ensureTriggers()` is explicitly required to recreate missing triggers, and a later manual synchronization or trigger repair against an enabled settings object would regenerate everything the user just asked to remove; the persisted disabled state is what makes "disable automation" mean disabled, and what makes the enqueued cleanup safe to run outside this lock hold (any run starting after this point exits at the disabled gate). Writing the **tombstone** here rather than after cleanup is the REQ-PRIV-006 move: configured origins are personal data (home and office addresses), the user has just confirmed removal, and destroying them must not be conditional on Calendar accepting every later delete or on the worker ever winning the lock again — a user whose cleanup ends `failed` and who proceeds to uninstall must not leave their home address in User Properties indefinitely. Nothing downstream needs the addresses: the cleanup scan is ownership-filtered and deletion needs only the events themselves. The tombstone rather than full deletion is what keeps trigger repair gated on the disabled flag (§19.3): a deleted document reads back as fresh defaults with `enabled: true` (§5.2), resurrecting exactly the automation the user just removed. (A user who re-enables mid-cleanup re-enters their origins — the acceptable cost of having confirmed a destructive action;)
+1. **acquire the same user lock reconciliation uses** (§16 of the architecture), with a generous wait. If the lock cannot be acquired, report that a synchronization is in progress and ask the user to retry — the disable must not race a run. Under the lock, the action is **idempotence-guarded**: it first derives cleanup liveness exactly as the status card does (a pending `runRemovalCleanup` trigger, or a fresh liveness stamp **on a record still `running`** — a fresh stamp on a *terminal* record is just the final pass's own mark, and the card is already offering the retry this click is; the lock being free proves nothing, since a live chain holds it only *during* passes), **and checks that the settings are already disabled**. Liveness *with the tombstone in place* makes this click a duplicate: report removal-in-progress and exit without touching the record — re-initializing a live chain's record would zero its cumulative counts and enqueue a rival worker. Liveness with settings **enabled** is *not* a duplicate: the pending chain survived a mid-cleanup re-enable and is doomed (its next pass aborts at the step-3 `enabled` check), so this is a fresh removal request and the action proceeds in full — the new worker's step-1 collapse absorbs the doomed chain's trigger, and no pass can be executing (it would hold the lock this action holds); the daily trigger record `dtp.dailyTrigger` is cleared with the trigger, so no record points at a deleted trigger (§19.3);
+2. **replace the settings document with the disabled tombstone** — the §5.2 defaults with `enabled: false` — under the lock, not merely flip the flag. The tombstone is **schema-complete by construction**, so what later runs read is exactly what was written. A minimal `{ schemaVersion, enabled: false }` fragment would in fact *load* — §5's deep-merge fills missing fields from defaults before validation runs — but the disabled state the user just confirmed should not depend on read-time healing: the fragment's effective content would be computed against whatever defaults the *reading* version ships, and the engine validates structurally before it checks the disabled gate (Architecture §14.2), so the disabled report would rest on the merge always reconstructing a validatable document. Writing the complete defaults makes the stored document self-contained. They carry empty origin values, so replacing the document still destroys the configured addresses. Trigger removal alone is temporary: the engine's own first check is `settings.enabled`, `ensureTriggers(now)` is explicitly required to recreate missing triggers, and a later manual synchronization or trigger repair against an enabled settings object would regenerate everything the user just asked to remove; the persisted disabled state is what makes "disable automation" mean disabled, and what makes the enqueued cleanup safe to run outside this lock hold (any run starting after this point exits at the disabled gate). Writing the **tombstone** here rather than after cleanup is the REQ-PRIV-006 move: configured origins are personal data (home and office addresses), the user has just confirmed removal, and destroying them must not be conditional on Calendar accepting every later delete or on the worker ever winning the lock again — a user whose cleanup ends `failed` and who proceeds to uninstall must not leave their home address in User Properties indefinitely. Nothing downstream needs the addresses: the cleanup scan is ownership-filtered and deletion needs only the events themselves. The tombstone rather than full deletion is what keeps trigger repair gated on the disabled flag (§19.3): a deleted document reads back as fresh defaults with `enabled: true` (§5.2), resurrecting exactly the automation the user just removed. (A user who re-enables mid-cleanup re-enters their origins — the acceptable cost of having confirmed a destructive action;)
 3. **remove the add-on's reconciliation triggers**;
 4. **initialize the persisted progress record and the removal heartbeat** (below) — carrying the outstanding `failedDeletes` of **any prior record except `complete`** forward (with `scanComplete: false`) into the fresh record — `failed` and `aborted` records, and equally a record still reading `running`, which past the step-1 duplicate guard is either a dead worker's (no pending trigger, stale stamp — the state the card has been rendering as a derived failure) or a re-enable-doomed chain's (the enabled-settings path above); either way its outstanding count is a calendar fact that carries forward. Outstanding failures are a property of the *calendar*, not of the attempt: a zeroed fresh record whose first pass dies before folding would render a misleadingly clean failure over events that are still there — and **enqueue the cleanup worker** — a one-off trigger, same mechanism as §19.5 — then release the lock and return "Removal started". The card does not pretend the deletions happened inside the callback.
 

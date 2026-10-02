@@ -37,6 +37,14 @@ const MAX_ROUTE_CALLS_PER_RUN = 60;
 const MAX_CONSECUTIVE_CONTINUATIONS = 10;
 const DIAGNOSTIC_ROUTE_CALLS_PER_HOUR = 20;
 
+// The daily maintenance hour in the USER's Calendar time zone
+// (REQ-TIME-013). Converted to a UTC hour per user -- the project time
+// zone is Etc/UTC -- at install, and RE-DERIVED at every daily firing
+// for the NEXT firing's offset, so a daylight-saving transition or a Calendar
+// time-zone change realigns the trigger within one cycle without user
+// action. Technical Design section 19.2.
+const DAILY_LOCAL_HOUR = 3;
+
 // Manual sync enqueues a one-off trigger rather than running inline in the
 // card callback. Technical Design section 19.5.
 const MANUAL_RUN_DELAY_MS = 1000;
@@ -179,6 +187,14 @@ const SWEEP_COMPLETED_AT_KEY = 'dtp.sweepCompletedAt';
 // for one execution budget makes every continuation re-read the same
 // prefix until the cap. Technical Design section 7.2.1.
 const WINDOW_SCAN_CURSOR_KEY = 'dtp.windowScanCursor';
+// Installed daily trigger record: { utcHour, triggerUid }. ScriptApp
+// does not expose an installed trigger's hour, so without the record
+// repair could not tell a correctly scheduled daily trigger from one
+// left stale by a DST transition or time-zone change -- it would have
+// to replace it on every pass; the unique id is what tells the
+// installed trigger from a stale or duplicate one, which are otherwise
+// indistinguishable. Technical Design sections 19.2, 19.3.
+const DAILY_TRIGGER_KEY = 'dtp.dailyTrigger';
 const CURRENT_SETTINGS_SCHEMA = 1;
 
 // Generated-event metadata. ADR 0009 -- this property is the deletion-safety

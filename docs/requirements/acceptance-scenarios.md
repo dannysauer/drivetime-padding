@@ -791,6 +791,20 @@ Calendar rejects zero-length events; without this rule every reconciliation woul
 
 A window-scan-based diagnostic would return silence for exactly the events users most wonder about.
 
+## AC-CONFIG-006: Daily trigger realigns after a timezone-offset change
+
+**Given** a daily trigger installed at the UTC hour derived for the user's Calendar time zone  
+**And** a daylight-saving transition occurs, or the user changes their Calendar time zone  
+**When** the next daily trigger fires, at the now-stale hour  
+**Then** the reconciliation run completes normally  
+**And** the daily handler re-derives the UTC hour for the current time zone at the next firing's instant  
+**And** trigger repair creates the replacement at the derived hour first, persists the new record for it, then deletes the stale trigger by unique id, because the derived hour differs from the persisted `dtp.dailyTrigger` hour  
+**And** when the derived hour lies later the same day, the replacement also fires that day — an accepted second run — and from the next day on the daily run fires at the intended local hour only, with no homepage open or settings save by the user  
+**And** when the daily firing collides with another execution holding the user lock, the run and its repair are skipped together — nothing is logged as a failure — and the realignment completes on the next firing (two cycles, the accepted residual)  
+**And** a repair failure is logged as `TRIGGER_REPAIR_FAILED` without affecting the run's result, and the next daily firing retries.
+
+The trigger that fires the repair is the stale one — it still fires, an hour off — which is what makes the path automatic rather than dependent on the user noticing a schedule drift that has no visible symptom.
+
 ## AC-RECOVERY-015: Companion stranded by a deleted source is swept
 
 **Given** a managed companion dragged outside the observation range  

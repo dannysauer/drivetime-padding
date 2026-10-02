@@ -25,7 +25,7 @@ Questions:
 5. Do triggers survive add-on version updates and re-authorization?
 6. What is the per-user trigger quota?
 7. What happens to triggers on uninstall?
-8. Can `ensureTriggers()` reliably detect and repair missing or duplicate triggers?
+8. Can `ensureTriggers(now)` reliably detect and repair missing or duplicate triggers?
 
 **Exit:** a written finding for each question, and either confirmation of the current design or a redesign proposal.
 

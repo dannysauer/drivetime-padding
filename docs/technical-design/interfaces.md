@@ -570,8 +570,14 @@ reserveDiagnosticAllowance(now) -> number
 // call entirely when nothing was granted
 refundDiagnosticAllowance(unspentCount, now) -> void
 // Console/log-only diagnostic for failures that occur after the run's
-// result is built (e.g. the finally-block spend write) -- never throws
-logWarning(code, error) -> void
+// result is built (the finally-block spend write, the daily handler's
+// trigger repair) -- never throws, and still logs the code when the
+// detail cannot be described. detail: an Error, an AppErrorRecord, or
+// a TriggerHealth report; the line carries the record's [code],
+// message, and retryability, plus a report's own state fields (which
+// trigger was left unrepaired) -- on the daily path nothing else sees
+// them
+logWarning(code, detail) -> void
 // Assembles the per-event diagnostic payload (17.6) for eventIdFilter
 // runs; origin and outcome are null when eligibility already rejected;
 // routes copied from outcome.routes (17.4). effectiveBufferMinutes is
@@ -603,11 +609,45 @@ captureEventDiagnostics(event, eligibility, directives, origin, outcome,
 buildUnresolvedEventDiagnostics(eventId, reason) -> EventDiagnostics
 
 // Triggers
-ensureTriggers() -> TriggerHealth
+// Repair (19.3), standing triggers only (one-offs belong to their
+// enqueue/collapse rules). Structurally invalid settings: mutate
+// nothing, report unhealthy with the validation error. Valid and
+// disabled: create nothing, DELETE orphan standing triggers. Calendar
+// trigger: create when missing, keep one. Daily trigger, ONE RULE:
+// desired = dailyHourUtc_ for the current Calendar time zone at the
+// NEXT firing after `now`; installed = the daily-handler trigger whose
+// getUniqueId() matches the persisted dtp.dailyTrigger.triggerUid at
+// the record's utcHour; missing trigger, missing record, or stale hour
+// -> CREATE the replacement, PERSIST { utcHour, triggerUid }, DELETE
+// every other daily-handler trigger by uid (a mid-repair failure leaves
+// a transient duplicate, never no daily trigger; a persist failure
+// rolls the create back and reports error, so nothing accumulates).
+// Mutations under the user lock with a bounded wait
+// (MANUAL_ENQUEUE_LOCK_MS); on contention report-only (contended, not
+// a failure). `now` injected by the caller. Runs from homepage open,
+// settings save, AND every daily firing -- the automatic path that
+// realigns the schedule after a DST transition or time-zone change
+// within one cycle (19.2, REQ-TIME-013)
+ensureTriggers(now) -> TriggerHealth
+// The UTC hour of the NEXT instant after `now` at which userTimeZone's
+// wall clock reads desiredLocalHour:00 -- the next firing's instant at
+// the offset in effect then (today's date would cost a second cycle
+// where a transition crosses the maintenance hour); a nonexistent wall
+// time resolves to the first instant after the gap, an ambiguous one
+// to its first occurrence; half- and quarter-hour offset zones FLOOR
+// to the containing UTC hour -- a bucket, since atHour fires at an
+// unspecified minute within it (19.2)
+dailyHourUtc_(userTimeZone, desiredLocalHour, now) -> number
+// { utcHour, triggerUid } persisted beside the other Status keys; the
+// load never throws (absent/malformed -> null -> mismatch -> replace)
+// (19.3)
+loadDailyTriggerRecord() -> { utcHour, triggerUid } | null
+saveDailyTriggerRecord(record) -> void
 // Card action: bounded work only -- under the user lock it REPLACES the
 // settings document with the disabled tombstone (the 5.2 defaults with
 // enabled=false, destroying origin addresses -- REQ-PRIV-006), removes
-// triggers, initializes progress, and enqueues the cleanup worker; the
+// triggers (clearing dtp.dailyTrigger with the daily one, 19.3),
+// initializes progress, and enqueues the cleanup worker; the
 // unbounded scan-and-delete lives in the worker (19.4)
 removeAutomation() -> ActionResponse
 // Budget-bounded cleanup passes: pages and deletes interleaved (fetch a

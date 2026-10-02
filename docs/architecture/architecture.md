@@ -1947,6 +1947,7 @@ A daily time-based trigger:
 - recreates manually deleted generated events;
 - advances the far edge of the window;
 - drains work deferred by the per-run route ceiling (§21.3);
+- re-derives its own schedule: recomputes the maintenance hour for the user's *current* Calendar time zone and that day's offset, and repairs a daily trigger a daylight-saving transition or time-zone change left stale — the stale trigger still fires, an hour off, which is what makes the path automatic (technical design §19.2, §19.3);
 - applies future schema or behavior changes.
 
 This run is the system's **eventual-consistency guarantee**. Calendar triggers are best-effort and may be missed, coalesced, or interrupted mid-write; the daily run is what makes that acceptable. Any correct state not reached by an event-driven run is reached within one daily cycle without the user doing anything.
@@ -1967,7 +1968,10 @@ The add-on should expose a "Repair automation" action that:
 - removes duplicates;
 - creates missing Calendar trigger;
 - creates missing daily trigger;
+- replaces a daily trigger whose installed hour no longer matches the user's Calendar time zone (technical design §19.3);
 - records the result.
+
+The same repair runs automatically from every daily firing (technical design §19.2), so the stale-hour case converges within one cycle with no user action; the manual action remains for the missing-trigger and permission-failure cases a user is actually shown.
 
 ### 15.5 Trigger health UI
 
@@ -1979,6 +1983,8 @@ Daily trigger: Installed
 Last successful sync: Today at 9:42 AM
 Last result: 12 checked, 2 created, 0 updated, 0 deleted
 ```
+
+Each trigger line renders one of three states from the health report (technical design §19.3): `Installed`, `Missing`, or — daily trigger only — `Scheduled hour out of date (repairing)`, the `stale` state — observable only after a contended or failed repair, since a homepage open runs the repair itself before rendering and an uncontended open therefore shows `Installed`. The Repair action is offered for `Missing` and `stale` alike; it runs the same replacement rule the daily firing runs automatically.
 
 ---
 

@@ -497,6 +497,8 @@ Scheduled reconciliation shall occur at a time appropriate to the user's own Cal
 
 The script project time zone shall not determine when a user's daily reconciliation runs.
 
+The schedule shall re-derive itself after a daylight-saving transition or a change to the user's Calendar time zone **without user action**, converging on the intended local hour within one daily cycle — two when the daily firing collides with another execution holding the user lock, the same collision that already defers the daily run's own work: each daily run recomputes the hour and trigger repair replaces a daily trigger whose installed hour no longer matches.
+
 ---
 
 ## 12. Per-Event Directive Requirements
