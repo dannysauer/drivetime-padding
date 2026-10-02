@@ -10,7 +10,11 @@ config:
   MD013: false
 
   # Table column style. The docs use the compact `|---|---|` delimiter form
-  # consistently. Padding every delimiter row to column width is churn.
+  # consistently, and padding every delimiter row to column width is churn.
+  # FORWARD declaration: MD060 ships in markdownlint v0.39 (markdownlint-cli2
+  # v0.19); the pinned v0.18.1 does not evaluate it, so this key is inert
+  # until the rev is bumped -- at which point it keeps the bump from failing
+  # every table in the set. Not yet validated against the live rule.
   MD060: false
 
   # Allow inline HTML. Not currently used, but harmless and occasionally

@@ -620,7 +620,7 @@ Use the literal Calendar API calendar identifier:
 primary
 ```
 
-This is preferable to resolving an email address and is supported by Calendar API operations.
+This is preferable to resolving an email address and is supported by Calendar API operations — for **API calls**. The one place the literal must *not* be used is the eventOpen card's calendar check (§20.3): trigger payloads carry the calendar's real id, never the `primary` alias, so that comparison resolves the primary calendar's id (`CalendarApp.getDefaultCalendar().getId()`) — a literal comparison would classify the user's own calendar as foreign and render `UNSUPPORTED_CALENDAR` on every card open.
 
 ### 7.2 Window bounds
 
@@ -1245,7 +1245,7 @@ function quantizeDuration(seconds) {
 }
 ```
 
-The guard is defense in depth behind §11.3's broker validation and §13.3's parse-or-null cache triplets: a value that slipped past them would quantize to `NaN` or `-0`, pass §12.4's ceiling comparison (which `NaN` never fails), and produce event times Calendar rejects on every run as a write failure; throwing instead becomes that source's `failed` outcome through the per-event planning containment (§14.2 of the architecture), companions preserved.
+The guard is defense in depth behind §11.3's broker validation and §13.3's parse-or-null cache triplets. §12.4's ceiling comparison catches only the large side (`+Infinity` quantizes to `+Infinity` and trips it): `NaN` compares false and passes, while `-Infinity` and every negative input quantize to a negative bucket (or `-0`) below the ceiling and pass too, leaving a spec that is invalid or inverted — a negative outbound duration puts the block's start *after* the source's — which Calendar rejects on every run as a write failure; throwing instead becomes that source's `failed` outcome through the per-event planning containment (§14.2 of the architecture), companions preserved.
 
 The quantized value is what feeds event times **and** the fingerprint. This is what makes the daily cache refresh (§23.3) safe: traffic noise of a few seconds or minutes lands in the same bucket, produces an identical fingerprint, and causes no user-visible update — the refreshed cache triplet still lands via a metadata-only patch (§15.2.2), which is invisible to the user but is a Calendar write.
 
@@ -2840,7 +2840,7 @@ Duplicate generated events are converged to one canonical event.
 
 Track elapsed runtime inside the reconciliation loop.
 
-If nearing a conservative execution threshold:
+If nearing a conservative execution threshold (`EXECUTION_BUDGET_MS`, recommended 4.5 minutes — 270 000 ms — against the platform's 6-minute hard kill; the margin is what lets status persistence, continuation scheduling, and lock release still run on a run that used its whole budget):
 
 - stop planning new source events — at planning's **own tier boundary** (below), ahead of the full threshold — **but first mark every unprocessed source** with a planning outcome of `failed` (`EXECUTION_BUDGET_EXCEEDED`), so the comparator preserves their existing companions;
 - apply already-computed safe diffs if sufficient time remains — and the application itself re-checks the budget **between operations**, deferring the remainder (`ApplyResult.deferredOps`, §17.5) rather than trusting one pre-application check to cover an arbitrarily large diff;

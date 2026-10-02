@@ -88,10 +88,14 @@ function overlapsPlanningRange(event, window) {
  * state. A field written but not compared is one the user can change
  * permanently, because nothing else in the pipeline looks at it.
  *
+ * Takes the ObservedGeneratedEvent -- not its fields bag -- and reads
+ * observed.observedFields (4.9) against the spec, the same
+ * first-argument shape as the other observed-side helpers.
+ *
  * Technical Design section 15.2.1, REQ-GEN-014a, REQ-GEN-014b,
  * REQ-GEN-014c.
  */
-function ownedFieldsMatch(observed, desired) {
+function ownedFieldsMatch(observed, desiredSpec) {
   throw new Error('Not implemented: Technical Design section 15.2.1');
 }
 

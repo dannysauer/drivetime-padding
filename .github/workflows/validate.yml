@@ -5,6 +5,11 @@ on:
   push:
     branches: [main]
 
+# The job only checks out and runs pre-commit; a read-only token removes
+# write capability from third-party hook revisions pinned by tag.
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest

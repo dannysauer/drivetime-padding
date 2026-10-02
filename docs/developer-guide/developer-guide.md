@@ -118,7 +118,7 @@ CI runs `pre-commit run --all-files` and nothing else. The workflow holds no che
 
 Two rules for adding to it: put the check in `.pre-commit-config.yaml`, and never let a step pass unconditionally. An earlier version of this workflow ended its only real step with `|| true`, which made a green check meaningless.
 
-Add unit tests as soon as the first pure module lands. Markdown line-length (`MD013`) and table-column-style (`MD060`) are disabled deliberately — see the comments in `.markdownlint-cli2.yaml`.
+Add unit tests as soon as the first pure module lands. Markdown line-length (`MD013`) is disabled deliberately, and table-column-style (`MD060`) is pre-disabled ahead of the markdownlint version that introduces it — the pinned version does not evaluate it yet — see the comments in `.markdownlint-cli2.yaml`.
 
 ## Marketplace Release
 

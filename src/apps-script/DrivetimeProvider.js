@@ -62,12 +62,15 @@ function resolveOrigin(event, directives, settings, workingLocations) {
  * needs no block. Technical Design section 12.5.
  *
  * Domain guard, defense in depth behind 11.3's broker validation and
- * 13.3's parse-or-null cache triplets: a negative input would quantize
- * to -0 and a non-finite one to NaN, which the 12.4 ceiling comparison
- * cannot catch -- the spec's times would become Invalid Date and
- * Calendar would reject the write on every run. Throwing lands in the
- * engine's per-event containment instead: a failed outcome, companions
- * preserved (Architecture 14.2).
+ * 13.3's parse-or-null cache triplets. The 12.4 ceiling comparison
+ * catches only the large side (+Infinity quantizes to +Infinity and
+ * trips it): NaN compares false and passes, and -Infinity and every
+ * negative input quantize to a negative bucket (or -0) below the
+ * ceiling and pass too, leaving a spec that is invalid or inverted --
+ * a negative outbound duration puts the block's start AFTER the
+ * source's, a write Calendar rejects on every run. Throwing lands in
+ * the engine's per-event containment instead: a failed outcome,
+ * companions preserved (Architecture 14.2).
  */
 function quantizeDuration(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) {

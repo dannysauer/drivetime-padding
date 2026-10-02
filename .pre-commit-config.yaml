@@ -10,9 +10,9 @@
 #     pre-commit run --all-files
 #
 # The repository is at design stage: the Apps Script sources are documented
-# stubs, so the hooks are hygiene and Markdown checks plus two repo-specific
-# invariants (a syntax check over those stubs, and the manifest matching its
-# documented copy). When implementation starts, a JavaScript linter and
+# stubs, so the hooks are hygiene and Markdown checks plus three
+# repo-specific invariants (per-file and shared-scope syntax checks over those
+# stubs, and the manifest matching its documented copy). When implementation starts, a JavaScript linter and
 # formatter configured to Google's JavaScript style guide, and the test
 # suite test/README.md plans, will be added here.
 
@@ -53,6 +53,20 @@ repos:
         name: Apps Script syntax check
         entry: bash -c 'for f in "$@"; do node --check "$f" || exit 1; done' --
         language: system
+        files: ^src/apps-script/.*\.js$
+
+      # Apps Script loads every file into ONE global scope, so a `const` or
+      # `let` declared in two files is a load-time "Identifier has already
+      # been declared" that no per-file check can see -- and it takes down
+      # every trigger handler at once. Concatenating the sources reproduces
+      # that scope for node --check.
+      - id: apps-script-shared-scope
+        name: Apps Script shared-scope check
+        entry: >-
+          bash -c 'tmp="$(mktemp --suffix=.js)" && cat src/apps-script/*.js > "$tmp"
+          && node --check "$tmp"; rc=$?; rm -f "$tmp"; exit $rc'
+        language: system
+        pass_filenames: false
         files: ^src/apps-script/.*\.js$
 
       # docs/architecture/appsscript-manifest.example.json is referenced by the

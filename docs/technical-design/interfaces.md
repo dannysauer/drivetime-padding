@@ -215,7 +215,10 @@ findStrandedCompanions(window, settings, dryRun, shouldStop)
 loadHighWater() / saveHighWater(observeEnd)                           // 7.6
 
 // Comparison helpers
-ownedFieldsMatch(observedFields, desiredSpec) -> boolean
+// Takes the ObservedGeneratedEvent -- NOT its fields bag -- and reads
+// observed.observedFields against the spec's owned fields (15.2.1),
+// the same first-argument shape as every other observed-side helper
+ownedFieldsMatch(observed, desiredSpec) -> boolean
 // The 15.2.9 concluded-record test: observed end before `now` AND
 // observed times within the persisted anchor's companion span
 // (undisplaced, the 15.2.8 moved-test). The STRICT test -- a valid

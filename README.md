@@ -64,7 +64,7 @@ Architecture §25 defines the canonical implementation phase order.
 docs/                   Product, architecture, and decision documentation
 src/apps-script/        Google Apps Script add-on
 cloud/routing-broker/   Cloud Run routing service
-test/                   Unit and integration tests
+test/                   Test plan (suite not yet present; see test/README.md)
 .github/workflows/      CI
 ```
 
