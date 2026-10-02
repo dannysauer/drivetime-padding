@@ -418,7 +418,7 @@ Store the entire JSON document rather than independent properties. This ensures 
 ```javascript
 function defaultSettings_() {
   return {
-    schemaVersion: 1,
+    schemaVersion: CURRENT_SETTINGS_SCHEMA,  // 1 today; the migration chain advances it
     enabled: true,
     windowDays: 60,
     defaultBufferMinutes: 7,
@@ -1068,6 +1068,8 @@ The return shape is the canonical `RouteResult` **defined once in §4.7** — `d
 ### 11.2 Request timeout and retries
 
 Apps Script `UrlFetchApp` does not expose fine-grained retry middleware. The client should perform at most one immediate retry for clearly transient broker errors such as 502, 503, or 504.
+
+**The manifest must allowlist the broker before any versioned deployment.** Workspace Add-ons run `UrlFetchApp` from a published deployment only against URL prefixes declared in the manifest's `urlFetchWhitelist`; without the entry every fetch throws "URL not allowed", which §11.1's table maps to `BROKER_UNAVAILABLE` on every event — planning fails everywhere (companions preserved, nothing created) with no hint pointing at the manifest. The entry is added when the broker URL is chosen (§21.7, `docs/open-questions.md`); the `script.external_request` scope already declared is not speculative in ADR 0013's sense — the broker call *is* the product — but the allowlist is the half of the requirement a scope-focused checklist misses.
 
 **Retries spend the same budget as first attempts.** The per-run ceiling (`MAX_ROUTE_CALLS_PER_RUN`, §13.3) bounds **HTTP attempts**, not logical `getRouteDuration` calls: the shared budget counter travels in `RouteRequestContext.budget`, and the client decrements it for every request it puts on the wire, including the transient retry. Counting logical calls instead would let a run admitted for 60 misses issue 120 attempts — doubling the spend precisely during a broker outage, when the quota matters most. A budget exhausted mid-call yields `ROUTE_BUDGET_EXCEEDED`, an ordinary planning failure (§17.4).
 

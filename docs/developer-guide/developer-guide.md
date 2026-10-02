@@ -113,8 +113,9 @@ CI runs `pre-commit run --all-files` and nothing else. The workflow holds no che
 - file hygiene — trailing whitespace, end-of-file, line endings, merge conflicts, case conflicts, large files
 - JSON and YAML validity, with JSON reformatted to a canonical 2-space form
 - Markdown linting via `markdownlint-cli2`, configured in `.markdownlint-cli2.yaml`
-- `node --check` on every Apps Script source file, since there is no build step to catch a syntax error before deployment
+- `node --check` on every Apps Script source file, since there is no build step to catch a syntax error before deployment — and once more on the concatenated sources, because Apps Script loads every file into one global scope and a `const` declared in two files is a load-time error no per-file check can see
 - a diff asserting `src/apps-script/appsscript.json` matches the documented manifest example, so the architecture cannot become quietly wrong about the add-on's OAuth scopes
+- `tools/check_td_snippets.py`, asserting that the function bodies the technical design embeds verbatim (`defaultSettings_`, `calculateWindow`, `quantizeDuration`, the two `Code.js` handlers) match the sources — the same quietly-wrong hazard as the manifest copy
 
 Two rules for adding to it: put the check in `.pre-commit-config.yaml`, and never let a step pass unconditionally. An earlier version of this workflow ended its only real step with `|| true`, which made a green check meaningless.
 

@@ -10,9 +10,10 @@
 #     pre-commit run --all-files
 #
 # The repository is at design stage: the Apps Script sources are documented
-# stubs, so the hooks are hygiene and Markdown checks plus three
+# stubs, so the hooks are hygiene and Markdown checks plus four
 # repo-specific invariants (per-file and shared-scope syntax checks over those
-# stubs, and the manifest matching its documented copy). When implementation starts, a JavaScript linter and
+# stubs, the manifest matching its documented copy, and the technical
+# design's embedded function bodies matching the sources). When implementation starts, a JavaScript linter and
 # formatter configured to Google's JavaScript style guide, and the test
 # suite test/README.md plans, will be added here.
 
@@ -63,11 +64,23 @@ repos:
       - id: apps-script-shared-scope
         name: Apps Script shared-scope check
         entry: >-
-          bash -c 'tmp="$(mktemp --suffix=.js)" && cat src/apps-script/*.js > "$tmp"
-          && node --check "$tmp"; rc=$?; rm -f "$tmp"; exit $rc'
+          bash -c 'tmp="$(mktemp)" && cat src/apps-script/*.js > "$tmp.js"
+          && node --check "$tmp.js"; rc=$?; rm -f "$tmp" "$tmp.js"; exit $rc'
         language: system
         pass_filenames: false
         files: ^src/apps-script/.*\.js$
+
+      # The technical design embeds a few function bodies verbatim and the
+      # sources carry the same bodies. Same hazard as the manifest copy: a
+      # fix landing in one place leaves the other quietly wrong, so the two
+      # are diffed (comments and whitespace ignored). tools/check_td_snippets.py
+      # lists the pairs.
+      - id: td-snippets-match-source
+        name: Technical design snippets match source
+        entry: python3 tools/check_td_snippets.py
+        language: system
+        pass_filenames: false
+        files: ^(src/apps-script/.*\.js|docs/technical-design/technical-design\.md|tools/check_td_snippets\.py)$
 
       # docs/architecture/appsscript-manifest.example.json is referenced by the
       # architecture as the manifest of record. If the two drift, the

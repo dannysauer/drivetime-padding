@@ -19,12 +19,12 @@ Review of PR #2 found the mirror-image bug at the other end of the window, which
 
 `Events.list` bounds `timeMin` on an event's **end** time but `timeMax` on its **start** time. A source event starting just before the window closes but running past it is returned, while its return block — starting at `source.end`, beyond `timeMax` — is not. Same unbounded duplicate creation as the near edge, same inability of duplicate convergence to catch it.
 
-Extending the window backward was therefore only half the fix. The decision is now stated in terms of **two ranges**:
+Extending the window backward was therefore only half the fix. The decision was restated in terms of **two ranges** — as first written here, with an asymmetric observation margin that Amendment 2 below **supersedes** (the current derivation is Technical Design §7.2: a symmetric `OBSERVE_MARGIN = MAX_SOURCE_DURATION + COMPANION_SPAN` at *both* ends, because a long source can reach backward past `planStart` just as it reaches forward past `planEnd`):
 
 ```text
 planStart    = now - COMPANION_SPAN
 planEnd      = now + windowDays
-observeStart = planStart - COMPANION_SPAN
+observeStart = planStart - COMPANION_SPAN          # superseded: see Amendment 2
 observeEnd   = planEnd + MAX_SOURCE_DURATION + COMPANION_SPAN
 ```
 

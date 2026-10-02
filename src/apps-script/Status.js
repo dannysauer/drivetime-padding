@@ -142,19 +142,9 @@ function saveDailyTriggerRecord(record) {
  */
 function logWarning(code, detail) {
   try {
-    let text;
-    try {
-      text = describeWarningDetail_(detail);
-    } catch (describeError) {
-      text = String(detail);
-    }
-    console.warn(code + ': ' + text);
-  } catch (ignored) {
-    try {
-      console.warn(code);
-    } catch (ignoredToo) {
-      // Nowhere further to go.
-    }
+    console.warn(code + ': ' + describeWarningDetail_(detail));
+  } catch (describeError) {
+    console.warn(code);  // the detail could not be described; the code still logs
   }
 }
 
