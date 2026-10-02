@@ -331,7 +331,7 @@ Settings are stored as a single JSON object in Apps Script User Properties.
   "eligibility": {
     "includeOutOfOffice": true,
     "titlePatternEnabled": false,
-    "titlePattern": "^OOO(?::|\\b)",
+    "titlePattern": "^OOO\\b",
     "caseSensitive": false
   },
   "origins": {
@@ -1406,12 +1406,12 @@ function reconcile(options) {
     // deletes and discarding the rest would leave no path to ever lower
     // the high-water mark, and every later run would repeat the full
     // scan of the vacated range.
-    const observedGeneratedIds = new Set(
+    const windowObservedIds = new Set(
       observedAll.map(event => event.id));  // keyless included: their
       // deletion is queued once, below, not via the cleanup merge
     diff.deletes.push(
       ...cleanup.events.filter(
-        event => !observedGeneratedIds.has(event.id))
+        event => !windowObservedIds.has(event.id))
     );
 
     // Unmanageable keyless events delete on ANY scan that observed

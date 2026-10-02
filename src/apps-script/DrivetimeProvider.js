@@ -60,7 +60,18 @@ function resolveOrigin(event, directives, settings, workingLocations) {
  * spec for a role whose quantized duration plus buffer is zero -- Calendar
  * rejects zero-length events, and a zero-minute drive with zero buffer
  * needs no block. Technical Design section 12.5.
+ *
+ * Domain guard, defense in depth behind 11.3's broker validation and
+ * 13.3's parse-or-null cache triplets: a negative input would quantize
+ * to -0 and a non-finite one to NaN, which the 12.4 ceiling comparison
+ * cannot catch -- the spec's times would become Invalid Date and
+ * Calendar would reject the write on every run. Throwing lands in the
+ * engine's per-event containment instead: a failed outcome, companions
+ * preserved (Architecture 14.2).
  */
 function quantizeDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    throw new RangeError('quantizeDuration: seconds must be a finite, non-negative number');
+  }
   return Math.ceil(seconds / ROUTE_GRANULARITY_SECONDS) * ROUTE_GRANULARITY_SECONDS;
 }

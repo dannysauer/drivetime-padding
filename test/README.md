@@ -2,6 +2,8 @@
 
 Test strategy is specified in Technical Design §24.
 
+**Status: planned, not yet present.** The repository is at design stage — `src/apps-script/*.js` are documented stubs — so none of the directories below exist yet and no hook or CI step runs tests. The first implementation PR creates the layout and wires a test step into `.pre-commit-config.yaml`; until then this file is the specification the suite is built to.
+
 ## Layout
 
 ```text

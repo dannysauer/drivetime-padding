@@ -24,7 +24,11 @@ parseDirectives(description) -> ParsedDirectives
 // Deadline-aware: checks shouldStop between pages and returns the
 // retrieved prefix with scanComplete false when it fires -- truncation
 // is a first-class state downstream (7.2.1). RESUMABLE: nextPageToken is
-// non-null exactly when the listing stopped early; the engine persists
+// non-null exactly when the listing stopped early AT A RESUMABLE POINT
+// -- after a fetched page, or the untouched token of a never-attempted
+// resume; a fresh listing stopped before its first page has no token
+// and returns null with scanComplete false (nothing listed, the retry
+// re-lists fresh). The engine persists
 // it (dtp.windowScanCursor, pinned to the range that produced it) and a
 // continuation passes it back as resumeToken so successive passes tile
 // the range instead of re-reading the same prefix until the cap. An

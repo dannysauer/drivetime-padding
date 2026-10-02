@@ -425,7 +425,7 @@ function defaultSettings_() {
     eligibility: {
       includeOutOfOffice: true,
       titlePatternEnabled: false,
-      titlePattern: '^OOO(?::|\\b)',
+      titlePattern: '^OOO\\b',
       caseSensitive: false,
     },
     origins: {
@@ -865,10 +865,12 @@ const cleanup = findStrandedCompanions(
   () => elapsedExceedsReadBudget(runStart));   // READ budget, 23.1
 // Only unobserved events merge into deletes (paragraph above); a
 // co-observed event stays in cleanup.events under its comparator
-// classification.
-const observedGeneratedIds = new Set(observedGenerated.map(e => e.id));
+// classification. Built from observedAll -- keyless corrupt events
+// included (§8.1): their deletion is queued once, separately, and a
+// keyed-only set would queue a co-observed one twice (404, partial).
+const windowObservedIds = new Set(observedAll.map(e => e.id));
 diff.deletes.push(
-  ...cleanup.events.filter(event => !observedGeneratedIds.has(event.id)));
+  ...cleanup.events.filter(event => !windowObservedIds.has(event.id)));
 
 if (!options.dryRun) {
   const applied = applyDiff(diff, runStart);
@@ -1236,9 +1238,14 @@ Raw broker durations are rounded **up** to a 5-minute granularity before any oth
 const ROUTE_GRANULARITY_SECONDS = 300;
 
 function quantizeDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    throw new RangeError('quantizeDuration: seconds must be a finite, non-negative number');
+  }
   return Math.ceil(seconds / ROUTE_GRANULARITY_SECONDS) * ROUTE_GRANULARITY_SECONDS;
 }
 ```
+
+The guard is defense in depth behind §11.3's broker validation and §13.3's parse-or-null cache triplets: a value that slipped past them would quantize to `NaN` or `-0`, pass §12.4's ceiling comparison (which `NaN` never fails), and produce event times Calendar rejects on every run as a write failure; throwing instead becomes that source's `failed` outcome through the per-event planning containment (§14.2 of the architecture), companions preserved.
 
 The quantized value is what feeds event times **and** the fingerprint. This is what makes the daily cache refresh (§23.3) safe: traffic noise of a few seconds or minutes lands in the same bucket, produces an identical fingerprint, and causes no user-visible update — the refreshed cache triplet still lands via a metadata-only patch (§15.2.2), which is invisible to the user but is a Calendar write.
 

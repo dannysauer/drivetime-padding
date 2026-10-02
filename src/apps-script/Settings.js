@@ -14,7 +14,7 @@ function defaultSettings_() {
     eligibility: {
       includeOutOfOffice: true,
       titlePatternEnabled: false,
-      titlePattern: '^OOO(?::|\\b)',
+      titlePattern: '^OOO\\b',
       caseSensitive: false,
     },
     origins: {

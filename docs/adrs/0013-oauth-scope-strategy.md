@@ -24,3 +24,5 @@ Neither claim has been verified against Google's current published list. That ve
 ## Constraint while open
 
 No scope may be added speculatively. `openid` must not appear in the manifest until broker authentication is chosen (Technical Design §21.7), because adding it would commit to one candidate mechanism.
+
+`https://www.googleapis.com/auth/calendar.addons.execute` is not speculative and is outside this decision: Google requires it of every Calendar add-on — the `eventOpenTrigger` and `currentEventAccess` declared in the manifest do not run without it — so the manifest carries it whatever data-access tier Spike 2 settles on. It is an add-on execution scope, not a Calendar data scope, and does not move the verification tier.

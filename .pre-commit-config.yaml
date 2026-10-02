@@ -9,10 +9,12 @@
 #
 #     pre-commit run --all-files
 #
-# The repository is documentation-only today, so the hooks are hygiene and
-# Markdown checks plus two repo-specific invariants. When implementation
-# starts, a JavaScript linter and formatter configured to Google's JavaScript
-# style guide will be added here.
+# The repository is at design stage: the Apps Script sources are documented
+# stubs, so the hooks are hygiene and Markdown checks plus two repo-specific
+# invariants (a syntax check over those stubs, and the manifest matching its
+# documented copy). When implementation starts, a JavaScript linter and
+# formatter configured to Google's JavaScript style guide, and the test
+# suite test/README.md plans, will be added here.
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
