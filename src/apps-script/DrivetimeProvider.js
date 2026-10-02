@@ -6,16 +6,33 @@
  */
 
 /**
- * context carries the observed companions' route cache entries and an
- * injected clock, not just the event and settings.
+ * context carries the RESOLVED observed companions per role
+ * (context.observedCompanions) and an injected clock, not just the
+ * event and settings.
  *
  * Without them the cache is unreachable: it lives on the observed generated
  * events, which the comparator matches to specs only AFTER planning. Every
  * run would call the broker and the cost bound in ADR 0011 would be
  * unimplementable. Technical Design section 12.1.1.
  *
- * The provider passes cache entries through and never inspects them --
- * staleness is decided in RoutingClient so there is one place for the policy.
+ * The whole companion, not just its cache triplet, because the provider
+ * applies the 15.2.9 FREEZE before routing: a strictly concluded record
+ * (valid anchor, ended, undisplaced) whose anchor equals the role's
+ * 14.1 source anchor is the same occurrence -- the role's routing is
+ * short-circuited, so no broker budget is spent re-estimating a trip
+ * that already happened. A frozen role's emission is PINNED (15.2.9):
+ * a spec carrying the 14.1 anchor and the record's observed fields
+ * verbatim, with no route resolved and the role omitted from
+ * outcome.routes. The copied fields are never consulted -- anchor
+ * equality classifies the pair unchanged before any field or
+ * fingerprint comparison -- the spec exists so the key stays desired
+ * (matched, never an orphan-path candidate) and spec-counting
+ * bookkeeping sees the role emitted. A
+ * triplet-only context could not recognize the record.
+ *
+ * The cache TRIPLETS are still passed through to the routing client
+ * uninspected -- staleness is decided in RoutingClient so there is one
+ * place for the policy.
  *
  * The outcome also reports every route it resolved (role, raw and quantized
  * seconds, provenance tier) on PlanningOutcome.routes -- the diagnostic

@@ -175,14 +175,34 @@ function compareDesiredAndObserved(desiredSpecs, observedEvents,
  *
  * Ordering is load-bearing, not an optimization: route cache entries live on
  * the observed companions, so unless they are resolved first the provider has
- * nothing to consult and every run calls the broker.
+ * nothing to consult and every run calls the broker -- and the anchors
+ * and observed fields feeding the 15.2.9 freeze live there too.
+ *
+ * THE INDEX makes the key-collision choice: a key shared by a concluded
+ * record and a live block (the post-reschedule overlap, 15.2.9)
+ * indexes the LIVE, non-concluded companion -- it owns the key's
+ * cache, and a live companion is never frozen; a record-only key
+ * indexes the record, which the freeze reads. A last-wins collapse
+ * could leave the record shadowing the live block, re-calling the
+ * broker every run for a role with a valid cache entry.
  * Technical Design section 12.1.1, REQ-PERF-015.
  */
 function indexByGeneratedKey(observedEvents) {
   throw new Error('Not implemented: Technical Design section 12.1.1');
 }
 
-function routeCacheFor(observedByKey, parentEventId) {
+/**
+ * The resolved observed companions per role for one source -- the whole
+ * ObservedGeneratedEvent, not just its cache triplet: the provider
+ * applies the 15.2.9 freeze (strictly concluded record + anchor
+ * equality -> unchanged, routing short-circuited) before routing, and a
+ * triplet-only context could not recognize the record. The triplets
+ * still ride inside, passed to the routing client uninspected. Reads
+ * the index's live-over-record key collapse (indexByGeneratedKey
+ * above) -- the choice is the INDEX's, made before any lookup here.
+ * Technical Design sections 12.1.1, 15.2.9.
+ */
+function companionsFor(observedByKey, parentEventId) {
   throw new Error('Not implemented: Technical Design section 12.1.1');
 }
 
@@ -265,6 +285,50 @@ function resolveUnmatchedCompanions(diff, planningOutcomes, window,
 }
 
 /**
+ * Zero-emission cleanup pass (Technical Design section 15.2.10). A role
+ * the 12.5 zero rule emptied -- routing itself removed the role, so
+ * quantized duration plus buffer is zero and no spec is emitted --
+ * produces no pending create (restoration never fires) and must be
+ * preserved by the route-free 15.2.3 evaluation, so a stale block the
+ * scan never observed (split pagination slice, or beyond the
+ * observation range) has no other deletion path.
+ *
+ * Population: for every PLANNED outcome, keys whose role is PRESENT in
+ * PlanningOutcome.routes but ABSENT from outcome.specs -- the pair is
+ * the test (a zero route with nonzero buffer still emits a spec; an
+ * unrouted role proves nothing) -- whatever the route's provenance (a
+ * provenance filter would hide previously-suppressed keys from their
+ * own retry), minus keys whose role already has a LIVE (non-record)
+ * observed companion -- the comparator owns those; a key observed only
+ * as a concluded record stays in the population, since the comparator
+ * preserves the record and cannot reach an unobserved stale block
+ * sharing the key (15.2.9), and the lookup's deletes except preserved
+ * records so the record itself is never touched. Keys grouped by parent, ONE
+ * listCompanionsByParent per PARENT -- the read returns both roles,
+ * and the canonical zero case (a meeting at the origin with zero
+ * buffer) zeroes both roles of one parent, so per-key lookups would
+ * double the reads; matches for the zeroed roles join diff.deletes,
+ * deduplicated by id against everything already queued, preserved
+ * records excepted (15.2.9). Planned-parent deletion authority (17.3): desired state
+ * provably contains no block for the role.
+ *
+ * Runs on incomplete scans, daily runs, AND continuations; LAST on the
+ * evidence tier, behind the sweep (23.1) -- its chronic population of
+ * standing zeroed keys never drains, so ahead of the sweep it would
+ * starve the sweep permanently, while its own deferred work drains
+ * through the sweep-less suppressed-work continuation. shouldStop is
+ * checked between lookups; keys cut off count in
+ * diagnostics.suppressedDeletes -- and the deadline-starved engine
+ * branch invokes this same pass with the guard already true (zero
+ * lookups, every pending key counted), so no second population
+ * computation exists to drift (15.2.4).
+ */
+function resolveZeroEmissionCompanions(
+    diff, planningOutcomes, observedByKey, now, shouldStop) {
+  throw new Error('Not implemented: Technical Design section 15.2.10');
+}
+
+/**
  * Daily orphan sweep (Technical Design section 15.2.8). Lists
  * ownership-filtered events updated since the sweep watermark (a stray
  * was necessarily moved, and moves bump `updated`; cancelled tombstones
@@ -283,8 +347,14 @@ function resolveUnmatchedCompanions(diff, planningOutcomes, window,
  * bumped `updated`); planned parents keep their candidates unless an
  * in-window event already satisfies the key AND the candidate is not a
  * concluded record (a reschedule leaves the record sharing the key with
- * the new block by design); failed parents preserve. Runs only on daily triggers with a COMPLETE window
- * scan; shouldStop is checked between pages AND between parent point
+ * the new block by design); failed parents preserve. Takes the FULL
+ * observed list (observedAll -- keyless corrupt events included, 8.1):
+ * the id test must not read a window-observed keyless event, whose
+ * deletion the engine already queued, as absent from the window.
+ * Candidate selection skips keyless LISTING returns like anchorless
+ * ones -- no parent to point-read, and the null-id read could throw,
+ * deterministically failing every sweep over the same event (8.1). Runs
+ * only on daily triggers with a COMPLETE window scan; shouldStop is checked between pages AND between parent point
  * reads (a bulk move can yield many candidates). Returns { events,
  * sweepComplete }; the ENGINE records sweepComplete in diagnostics and
  * writes the dtp.sweepCompletedAt watermark only after applyDiff
@@ -296,7 +366,7 @@ function resolveUnmatchedCompanions(diff, planningOutcomes, window,
  * over gaps of skipped or incomplete sweeps.
  */
 function sweepOutOfWindowCompanions(
-    observedGenerated, planningOutcomes, window, now, shouldStop) {
+    observedAll, planningOutcomes, window, now, shouldStop) {
   throw new Error('Not implemented: Technical Design section 15.2.8');
 }
 

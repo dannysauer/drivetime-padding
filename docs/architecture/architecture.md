@@ -736,6 +736,9 @@ function reconcile(options) {
   // pinned span: either way the chain's coverage work is done and the
   // cursor clears (§7.2.1, §19.6).
   let chainFinished = false;
+  // The cursor write DECIDED at listing time but PERSISTED post-apply
+  // (§7.2.1): { action: "clear" | "save" | "saveIfNone", cursor? }.
+  let pendingCursorWrite = null;
 
   try {
     // §17.1: eventIdFilter and reason "event-diagnostic" are one package,
@@ -898,6 +901,9 @@ function reconcile(options) {
     let allEvents;
     let scanComplete;
     let diagnosticRedirected = false;
+    // The id the scoped diagnostic actually planned (the redirect
+    // target) -- the post-loop synthesis looks its outcome up here.
+    let diagnosticTargetId = null;
     if (options.eventIdFilter) {
       let targetId = options.eventIdFilter;
       let target = getEventById("primary", targetId);
@@ -922,6 +928,7 @@ function reconcile(options) {
           : null;
         target = targetId ? getEventById("primary", targetId) : null;
       }
+      diagnosticTargetId = targetId;
 
       const companions =
         targetId ? listCompanionsByParent("primary", targetId) : [];
@@ -979,58 +986,77 @@ function reconcile(options) {
       // not that this run observed the current window. A rejected
       // token's cursor must not survive: leaving it stored would make
       // every later resume retry it, fall back, and re-read the same
-      // first-page prefix indefinitely; the fallback's own nextPageToken
-      // replaces it below, restarting the chain over the same span.
+      // first-page prefix indefinitely. Its CLEAR is eager, just below;
+      // the fallback's own nextPageToken then saves through the
+      // application-gated path when this run applies, restarting the
+      // chain over the same span.
       const offeredResume = Boolean(resume);
       chainFinished = offeredResume && scanComplete;
       if (offeredResume) {
         scanComplete = false;
       }
-      if (!options.dryRun) {
-        // Cursor OWNERSHIP (technical design §7.2.1): the pending cursor
-        // belongs to the chain. A resumed run advances it (truncated) or
-        // clears it (chain finished). A fresh run STARTS a chain only
-        // when none is stored -- a fresh truncated run must never
-        // overwrite a pending cursor, or every calendar-trigger edit on
-        // a busy calendar resets the chain to slice one and the tail is
-        // starved perpetually. A fresh COMPLETE scan clears any pending
-        // cursor: full coverage makes the chain moot. Guarded
-        // bookkeeping: a lost cursor restarts the scan from the front --
-        // wasteful, never wrong (technical design §18.2).
+      if (offeredResume && !resumed && !options.dryRun) {
+        // A rejected token must not survive even a failed run: left
+        // stored, every later resume would retry it, fall back, and
+        // re-read the same prefix -- and a pre-apply timeout would skip
+        // a deferred replacement indefinitely. The EAGER CLEAR is the
+        // one cursor write exempt from application-gating because it is
+        // skip-safe: clearing only restarts the chain, while an eager
+        // replace could advance past the fallback's own unprocessed
+        // pages. The post-apply write below then starts a fresh chain
+        // from the fallback's stop point when this run applies
+        // (technical design §7.2.1).
         try {
-          if (offeredResume) {
-            // Advance (honored, truncated), REPLACE (rejected, fallback
-            // truncated -- the dead token must not survive), or clear
-            // (either way the pinned span is fully covered).
-            if (chainFinished) {
-              clearWindowScanCursor();
-            } else if (nextPageToken) {
-              saveWindowScanCursor({
-                pageToken: nextPageToken,
-                observeStart: scanRange.observeStart,
-                observeEnd: scanRange.observeEnd
-              });
-            }
-          } else if (scanComplete) {
-            clearWindowScanCursor();
-          } else if (nextPageToken && !loadWindowScanCursor()) {
-            // A fresh truncated run STARTS a chain only when none is
-            // stored -- the chain owns a pending cursor.
-            saveWindowScanCursor({
-              pageToken: nextPageToken,
-              observeStart: scanRange.observeStart,
-              observeEnd: scanRange.observeEnd
-            });
-          }
+          clearWindowScanCursor();
         } catch (persistError) {
           recordRunWarning("BOOKKEEPING_PERSIST_FAILED", persistError);
         }
       }
+      // The cursor DECISION is made here -- Cursor OWNERSHIP (technical
+      // design §7.2.1): the pending cursor belongs to the chain; a
+      // resumed run advances it (truncated) or clears it (chain
+      // finished); a fresh run starts a chain only when none is stored
+      // (never overwriting a pending one) and a fresh COMPLETE scan
+      // clears any pending cursor. Its PERSISTENCE waits for the
+      // post-apply bookkeeping block below: a SAVE committed at listing
+      // time would survive a normalization, planning, or apply-time
+      // throw -- the catch builds a failed result with no continuation,
+      // and the next resume would skip a slice nothing processed -- so
+      // saves execute only after application ran; a failed or
+      // out-of-time run leaves the prior cursor and the retry re-reads
+      // the slice, wasteful, never wrong. CLEARS execute even when
+      // application is skipped for time: every clear decision is
+      // skip-safe (a finished chain's clear costs one fresh re-scan; a
+      // fresh complete scan supersedes the stale chain it clears), and
+      // a retained moot cursor would send the very continuation an
+      // out-of-time run schedules down the stale pinned span instead
+      // of the current window (technical design §7.2.1).
+      if (offeredResume) {
+        pendingCursorWrite = chainFinished
+          ? { action: "clear" }
+          : nextPageToken
+            ? { action: "save",
+                cursor: { pageToken: nextPageToken,
+                          observeStart: scanRange.observeStart,
+                          observeEnd: scanRange.observeEnd } }
+            : null;
+      } else if (scanComplete) {
+        pendingCursorWrite = { action: "clear" };
+      } else if (nextPageToken) {
+        // saveIfNone: the no-pending-cursor check runs at write time --
+        // a fresh truncated run STARTS a chain only when none is stored.
+        pendingCursorWrite =
+          { action: "saveIfNone",
+            cursor: { pageToken: nextPageToken,
+                      observeStart: scanRange.observeStart,
+                      observeEnd: scanRange.observeEnd } };
+      }
     }
 
     // Raw Calendar resources are flattened into the ObservedGeneratedEvent
-    // contract (key, parentEventId, fingerprint, observedFields, routeCache)
-    // before anything consumes them. The comparator and the cache lookup
+    // contract (key, parentEventId, anchor, fingerprint, observedFields,
+    // routeCache -- the anchor feeds the §15.2.9 freeze and displacement
+    // tests) before anything consumes them. The comparator and the cache lookup
     // both depend on that shape; raw resources would match nothing.
     //
     // Cancelled generated tombstones are excluded: showDeleted returns a
@@ -1038,10 +1064,26 @@ function reconcile(options) {
     // it as an existing companion would suppress the recreate the deletion
     // calls for -- deleted means absent (technical design §7.3). Source
     // tombstones still flow through eligibility.
-    const observedGenerated = allEvents
+    const observedAll = allEvents
       .filter(isGeneratedEvent)
       .filter(event => event.status !== "cancelled")
-      .map(normalizeObservedGeneratedEvent);
+      .map(normalizeObservedGeneratedEvent)
+      // null = id or ownership marker unrecoverable (§8.1): unsafe to
+      // delete (§15.3) or even address -- excluded with the warning the
+      // normalizer logged, left inert. Defense in depth: the
+      // ownership-filtered listing guarantees the marker, and Calendar
+      // resources always carry an id.
+      .filter(Boolean);
+    // KEYLESS survivors -- valid id and marker, unrecoverable
+    // parentEventId/role (§8.1): unmanageable. Nothing key-based can
+    // match, restore, or preserve them, so they leave the observed set
+    // and, unless the lenient §15.2.9 deletion-side test keeps them
+    // (isPreservedRecord -- possible history), queue for deletion below. Deleting is self-healing: a
+    // genuinely desired block is recreated with clean metadata by its
+    // parent's own planning.
+    const observedGenerated = observedAll.filter(event => event.key);
+    const unmanageableCorrupt = observedAll.filter(event =>
+      !event.key && !isPreservedRecord(event, now));
     const sourceEvents = allEvents.filter(event => !isGeneratedEvent(event));
 
     // Index observed companions by parentEventId|role BEFORE planning, so
@@ -1135,138 +1177,205 @@ function reconcile(options) {
       // degradation path (technical design §23.1).
       if (elapsedExceedsPlanningBudget(runStart)) {
         markRemainingSourcesFailed(orderedSources, event, planningOutcomes);
+        // A filtered target among the just-marked sources is handled by
+        // the single post-loop synthesis site, which reads its failed
+        // outcome from planningOutcomes (technical design §17.1).
         break;
       }
-      const directives = parseDirectives(event.description);
-      const eligibility = evaluateEligibility(event, directives, settings, window);
+      try {
+        const directives = parseDirectives(event.description);
+        const eligibility = evaluateEligibility(event, directives, settings, window);
 
-      // Computed in the engine because the diagnostic capture needs it
-      // even when planning never runs or fails before specs exist -- the
-      // card's effectiveBufferMinutes cannot be inferred from timestamps
-      // that were never produced (technical design §17.6).
-      const effectiveBuffer = directives.bufferMinutes != null
-        ? directives.bufferMinutes
-        : settings.defaultBufferMinutes;
+        // Computed in the engine because the diagnostic capture needs it
+        // even when planning never runs or fails before specs exist -- the
+        // card's effectiveBufferMinutes cannot be inferred from timestamps
+        // that were never produced (technical design §17.6).
+        const effectiveBuffer = directives.bufferMinutes != null
+          ? directives.bufferMinutes
+          : settings.defaultBufferMinutes;
 
-      if (!eligibility.eligible) {
-        planningOutcomes.set(event.id, {
-          state: "ineligible",
-          specs: [],
-          reason: eligibility.reason
-        });
+        if (!eligibility.eligible) {
+          planningOutcomes.set(event.id, {
+            state: "ineligible",
+            specs: [],
+            reason: eligibility.reason
+          });
+
+          if (options.eventIdFilter) {
+            eventDiagnostics = captureEventDiagnostics(
+              event, eligibility, directives, null, null, effectiveBuffer);
+          }
+
+          // A source edited past MAX_SOURCE_DURATION breaks the observability
+          // guarantee: it stays readable while its companions may sit behind
+          // observeStart, where the window read above cannot see them. Keyed
+          // on the duration, not the reason -- a multi-day all-day conversion
+          // strands companions the same way but classifies ALL_DAY_EVENT
+          // before the duration is ever tested (technical design §15.2.6).
+          // Skipped on filtered diagnostics: §17.1 skips the cleanup passes,
+          // and the targeted read already listed this parent's companions
+          // unbounded -- the comparator sees them without a second fetch.
+          if (!options.eventIdFilter &&
+              sourceExceedsDurationCap(event) &&
+              !bothRolesObserved(observedByKey, event.id)) {
+            strandedOverlong.push(
+              ...listCompanionsByParent("primary", event.id)
+            );
+          }
+          continue;
+        }
+
+        if (settings.workingLocation.enabled && options.eventIdFilter) {
+          // Dates, not the NormalizedEvent's ISO strings -- the unfiltered
+          // call above passes calculateWindow's Date outputs, and a mixed
+          // signature would make every diagnostic throw inside the safe
+          // wrapper and degrade the origin to default with a spurious
+          // WORKING_LOCATION_UNAVAILABLE warning.
+          workingLocations = fetchWorkingLocationsSafely(
+            new Date(event.start), new Date(event.end));
+        }
+
+        const origin = resolveOrigin(event, directives, settings, workingLocations);
+
+        // Null means every fallback bottomed out at a blank default origin
+        // (technical design §10.4). Reachable only on dry runs -- writeReady
+        // gates write mode on a configured default -- and it must become a
+        // per-event FAILED outcome here, in this explicit branch: the
+        // per-event containment below would catch a throw, but as a
+        // generic code with no in-loop capture, while §10.4 promises the
+        // diagnostic reports MISSING_DEFAULT_ORIGIN with its
+        // reset-the-origin guidance. The branch exists for reason-code
+        // fidelity and the capture, not to prevent silence. failed
+        // preserves existing companions like any other planning failure
+        // (§17.3).
+        if (!origin) {
+          const outcome = {
+            state: "failed",
+            specs: [],
+            error: buildAppError("MISSING_DEFAULT_ORIGIN", event)
+          };
+          planningOutcomes.set(event.id, outcome);
+          if (options.eventIdFilter) {
+            eventDiagnostics = captureEventDiagnostics(
+              event, eligibility, directives, null, outcome, effectiveBuffer);
+          }
+          continue;
+        }
+
+        // A directive that named an unconfigured home/office origin fell
+        // back to default -- the user's explicit selection was ignored, and
+        // §10.2 requires that to be visible, not silent (technical design
+        // §18.2, DIRECTIVE_ORIGIN_UNCONFIGURED). Compared by NAME, not by
+        // source: an honored `origin=default` directive must not warn, and
+        // the design does not pin which source value it reports.
+        if (directives.origin && origin.name !== directives.origin) {
+          recordRunWarning("DIRECTIVE_ORIGIN_UNCONFIGURED", null);
+        }
+
+        // eligibility.matchedBy travels with the context: the companion type
+        // follows the MATCH, not the source type -- an OOO source qualified
+        // through the title pattern gets ordinary companions (technical
+        // design §12.6, AC-ELIG-007), and only the match can tell those
+        // paths apart.
+        const context = buildProviderContext(
+          event,
+          directives,
+          settings,
+          origin,
+          eligibility.matchedBy,
+          window,
+          now,
+          routeBudget,
+          // The resolved companions themselves, not just their cache
+          // triplets: getGeneratedEventSpecs applies the §15.2.9 freeze
+          // (strictly concluded + anchor equality) before routing, and a
+          // triplet-only context could not recognize the record.
+          companionsFor(observedByKey, event.id)
+        );
+
+        // Global, not namespaced: Apps Script files share one namespace
+        // and the skeleton declares the bare function -- a qualified call
+        // would ReferenceError on the first eligible event.
+        const outcome = getGeneratedEventSpecs(context);
+        planningOutcomes.set(event.id, outcome);
 
         if (options.eventIdFilter) {
           eventDiagnostics = captureEventDiagnostics(
-            event, eligibility, directives, null, null, effectiveBuffer);
+            event, eligibility, directives, origin, outcome, effectiveBuffer);
         }
 
-        // A source edited past MAX_SOURCE_DURATION breaks the observability
-        // guarantee: it stays readable while its companions may sit behind
-        // observeStart, where the window read above cannot see them. Keyed
-        // on the duration, not the reason -- a multi-day all-day conversion
-        // strands companions the same way but classifies ALL_DAY_EVENT
-        // before the duration is ever tested (technical design §15.2.6).
-        // Skipped on filtered diagnostics: §17.1 skips the cleanup passes,
-        // and the targeted read already listed this parent's companions
-        // unbounded -- the comparator sees them without a second fetch.
-        if (!options.eventIdFilter &&
-            sourceExceedsDurationCap(event) &&
-            !bothRolesObserved(observedByKey, event.id)) {
-          strandedOverlong.push(
-            ...listCompanionsByParent("primary", event.id)
-          );
+        if (outcome.state === "planned") {
+          desiredSpecs.push(...outcome.specs);
         }
-        continue;
-      }
-
-      if (settings.workingLocation.enabled && options.eventIdFilter) {
-        // Dates, not the NormalizedEvent's ISO strings -- the unfiltered
-        // call above passes calculateWindow's Date outputs, and a mixed
-        // signature would make every diagnostic throw inside the safe
-        // wrapper and degrade the origin to default with a spurious
-        // WORKING_LOCATION_UNAVAILABLE warning.
-        workingLocations = fetchWorkingLocationsSafely(
-          new Date(event.start), new Date(event.end));
-      }
-
-      const origin = resolveOrigin(event, directives, settings, workingLocations);
-
-      // Null means every fallback bottomed out at a blank default origin
-      // (technical design §10.4). Reachable only on dry runs -- writeReady
-      // gates write mode on a configured default -- and it must become a
-      // per-event FAILED outcome here, not a throw into the run-wide
-      // catch: §10.4 promises the diagnostic continues and reports
-      // MISSING_DEFAULT_ORIGIN, and the catch fires before
-      // eventDiagnostics captures anything. failed preserves existing
-      // companions like any other planning failure (§17.3).
-      if (!origin) {
-        const outcome = {
+      } catch (eventError) {
+        // One poisoned source must not fail the run: with cursor writes
+        // application-gated (technical design §7.2.1), a run-wide throw
+        // from a deterministically malformed event would freeze the
+        // scan chain at its slice forever. failed preserves the
+        // source's companions like any planning failure (§17.3) and is
+        // NOT silent: buildRunResult folds the outcome's error into
+        // result.errors, and a RETRYABLE failed outcome -- this one
+        // always is: UNEXPECTED_ERROR is retryable by definition, and
+        // a preserved registry code carries its own flag -- caps a
+        // non-dry run at partial (§17.4), so the counter is never
+        // reset over unplanned work and the next run re-plans
+        // (transient throws retry naturally). The raw throw is logged here; the outcome carries
+        // the registry record. A throw already carrying an §18.2
+        // registry code KEEPS it -- the overlong branch's Calendar read
+        // can throw a transient CALENDAR_READ_FAILED, and blanket
+        // UNEXPECTED_ERROR would misclassify a routine API blip as an
+        // internal error, losing the registry's retryability; only
+        // unrecognized throws code UNEXPECTED_ERROR.
+        const failureCode =
+          registryCodeOf(eventError) || "UNEXPECTED_ERROR";
+        logWarning(failureCode, eventError);
+        planningOutcomes.set(event.id, {
           state: "failed",
           specs: [],
-          error: buildAppError("MISSING_DEFAULT_ORIGIN", event)
-        };
-        planningOutcomes.set(event.id, outcome);
-        if (options.eventIdFilter) {
-          eventDiagnostics = captureEventDiagnostics(
-            event, eligibility, directives, null, outcome, effectiveBuffer);
-        }
-        continue;
-      }
-
-      // A directive that named an unconfigured home/office origin fell
-      // back to default -- the user's explicit selection was ignored, and
-      // §10.2 requires that to be visible, not silent (technical design
-      // §18.2, DIRECTIVE_ORIGIN_UNCONFIGURED). Compared by NAME, not by
-      // source: an honored `origin=default` directive must not warn, and
-      // the design does not pin which source value it reports.
-      if (directives.origin && origin.name !== directives.origin) {
-        recordRunWarning("DIRECTIVE_ORIGIN_UNCONFIGURED", null);
-      }
-
-      // eligibility.matchedBy travels with the context: the companion type
-      // follows the MATCH, not the source type -- an OOO source qualified
-      // through the title pattern gets ordinary companions (technical
-      // design §12.6, AC-ELIG-007), and only the match can tell those
-      // paths apart.
-      const context = buildProviderContext(
-        event,
-        directives,
-        settings,
-        origin,
-        eligibility.matchedBy,
-        window,
-        now,
-        routeBudget,
-        routeCacheFor(observedByKey, event.id)
-      );
-
-      // Global, not namespaced: Apps Script files share one namespace
-      // and the skeleton declares the bare function -- a qualified call
-      // would ReferenceError on the first eligible event.
-      const outcome = getGeneratedEventSpecs(context);
-      planningOutcomes.set(event.id, outcome);
-
-      if (options.eventIdFilter) {
-        eventDiagnostics = captureEventDiagnostics(
-          event, eligibility, directives, origin, outcome, effectiveBuffer);
-      }
-
-      if (outcome.state === "planned") {
-        desiredSpecs.push(...outcome.specs);
+          error: buildAppError(failureCode, event)
+        });
+        // A filtered target is handled by the single post-loop
+        // synthesis site, which reads this failed outcome.
       }
     }
 
-    // Both loop branches capture, so a filtered run with no payload here
-    // means the targeted read resolved NO source event: the id is gone, or
-    // a companion's parent reference points at a purged event. Synthesize
-    // the not-found payload rather than return null -- silence is the
-    // failure mode the targeted read exists to eliminate, and an orphaned
-    // companion is exactly the event a user most needs explained
-    // (technical design §17.1).
+    // The SINGLE synthesis site for every way the target can lack a
+    // captured payload (technical design §17.1). Both loop branches
+    // capture, so a filtered run with no payload here means the loop
+    // never captured for the target: the id resolved no source event
+    // (gone, or a companion's parent reference points at a purged
+    // event), the planning-tier boundary marked it failed before its
+    // iteration ran, or its iteration threw into the per-event
+    // containment. Synthesize rather than return null -- silence is
+    // the failure mode the targeted read exists to eliminate -- and
+    // synthesize the TRUTH: a failed outcome's own error code
+    // (EXECUTION_BUDGET_EXCEEDED, UNEXPECTED_ERROR) for an event the
+    // targeted read just returned, never a not-found the user would
+    // read as "this event does not exist" (technical design §4.5).
     if (options.eventIdFilter && !eventDiagnostics) {
+      const targetOutcome = diagnosticTargetId
+        ? planningOutcomes.get(diagnosticTargetId)
+        : null;
+      // failed outcomes carry error by contract (technical design
+      // §17.4); the || is defense in depth, not license to omit it.
+      // CLAMPED to the §4.5 EligibilityReason enum: the containment
+      // catch deliberately preserves recognized registry codes in the
+      // outcome, but the card's reason rendering is exhaustive over
+      // §4.5, so a non-enum code renders as UNEXPECTED_ERROR here. The
+      // true code still lands in result.errors (the buildRunResult
+      // fold) and the log for diagnosis -- the card itself renders
+      // eventDiagnostics, not errors, on this path, and shows the
+      // clamped reason; reopening the card retries the whole scoped
+      // run anyway, which is all a transient code would invite.
+      const failedCode = targetOutcome && targetOutcome.state === "failed"
+        ? (targetOutcome.error || { code: "UNEXPECTED_ERROR" }).code
+        : null;
       eventDiagnostics = buildUnresolvedEventDiagnostics(
         options.eventIdFilter,
-        diagnosticRedirected ? "PARENT_NOT_FOUND" : "EVENT_NOT_FOUND");
+        failedCode
+          ? (failedCode === "EXECUTION_BUDGET_EXCEEDED"
+              ? failedCode : "UNEXPECTED_ERROR")
+          : diagnosticRedirected ? "PARENT_NOT_FOUND" : "EVENT_NOT_FOUND");
     }
 
     // A filtered diagnostic already read only the opened event's
@@ -1298,11 +1407,20 @@ function reconcile(options) {
     // the high-water mark, and every later run would repeat the full
     // scan of the vacated range.
     const observedGeneratedIds = new Set(
-      observedGenerated.map(event => event.id));
+      observedAll.map(event => event.id));  // keyless included: their
+      // deletion is queued once, below, not via the cleanup merge
     diff.deletes.push(
       ...cleanup.events.filter(
         event => !observedGeneratedIds.has(event.id))
     );
+
+    // Unmanageable keyless events delete on ANY scan that observed
+    // them, complete or truncated: the corruption is observed on the
+    // resource itself -- evidence in hand, no absence proof needed --
+    // and §15.3 is satisfied by the verified marker alone. An
+    // out-of-range keyless stray is the accepted §8.1 residual --
+    // remove-all still reaches it.
+    diff.deletes.push(...unmanageableCorrupt);
 
     // Deduplicate the overlong lookup's returns by id, excepting
     // concluded records. An overlong source with one companion still
@@ -1471,8 +1589,10 @@ function reconcile(options) {
     // truncated read an unretrieved in-window source has no outcome and
     // its healthy companion would look like an out-of-window stray
     // (technical design §15.2.8, same hazard as §15.2.4). Takes the FULL
-    // observed list, not the key index: candidates are identified by
-    // event id, and an in-window duplicate collapsed out of the index
+    // observed list (observedAll, keyless events included), not the key
+    // index: candidates are identified by event id, and an in-window
+    // duplicate collapsed out of the index -- or a window-observed
+    // keyless corrupt event, whose deletion is already queued above --
     // must not read as absent from the window.
     // Takes the injected clock: updatedMin and the anchor band must both
     // derive from the same `now`, and the sweep watermark
@@ -1482,7 +1602,7 @@ function reconcile(options) {
     if (options.reason === "daily-trigger" && scanComplete &&
         !elapsedExceedsEvidenceBudget(runStart)) {
       sweep = sweepOutOfWindowCompanions(
-        observedGenerated, planningOutcomes, window, now,
+        observedAll, planningOutcomes, window, now,
         () => elapsedExceedsEvidenceBudget(runStart));
       const queuedIds = new Set(diff.deletes.map(event => event.id));
       diff.deletes.push(
@@ -1492,6 +1612,45 @@ function reconcile(options) {
       // nothing" (technical design §15.2.8, §4.11).
       diff.diagnostics.sweepComplete = sweep.sweepComplete;
       outOfTime = elapsedExceedsExecutionBudget(runStart);
+    }
+
+    // Roles §12.5 zeroed out of existence produce no pending create,
+    // so neither restoration (create-driven) nor the route-free
+    // §15.2.3 evaluation can delete a stale block the scan never
+    // observed (technical design §15.2.10). Incomplete scans (the
+    // split-page hazard), daily runs (the out-of-observation
+    // backstop), and continuations (the drain path for zero-emission
+    // work deferred behind the sweep) perform the targeted per-parent
+    // lookup for
+    // zero-emission keys with no LIVE observed companion (a key
+    // observed only as a concluded record stays in the population --
+    // the comparator preserves the record and cannot reach an
+    // unobserved stale block sharing the key); complete
+    // calendar-trigger and manual scans skip it -- the comparator
+    // handled the observed case, and the rest can wait a day. Evidence tier, LAST
+    // on it -- after the sweep: this pass's chronic population (standing
+    // zero-emission keys with nothing to delete) is bounded but never
+    // drains, so placing it ahead of the sweep could starve the sweep
+    // permanently, while its own genuine work, if deferred behind the
+    // sweep, drains through the suppressed-work continuation (which
+    // runs no sweep). Preserved records are excepted from the
+    // resulting deletes.
+    const zeroEmissionEligible = !options.eventIdFilter &&
+      (!scanComplete || options.reason === "daily-trigger" ||
+       options.reason === "continuation");
+    if (zeroEmissionEligible && (options.dryRun || !outOfTime)) {
+      resolveZeroEmissionCompanions(diff, planningOutcomes, observedByKey,
+        now, () => elapsedExceedsEvidenceBudget(runStart));
+      outOfTime = elapsedExceedsExecutionBudget(runStart);
+    } else if (zeroEmissionEligible) {
+      // Deadline before the pass: run it with the guard already true
+      // -- zero lookups, every pending key counted into
+      // suppressedDeletes through the single population contract, so
+      // this starved branch cannot drift from the pass and the §15.2.4
+      // diagnostics contract and §19.6 continuation cause hold here
+      // too (§15.2.10).
+      resolveZeroEmissionCompanions(diff, planningOutcomes, observedByKey,
+        now, () => true);
     }
 
     let applied = null;
@@ -1544,6 +1703,43 @@ function reconcile(options) {
       }
     }
 
+    // Execute the cursor decision made at listing time (§7.2.1) --
+    // HERE, past application, so a run that threw between the listing
+    // and this point never persisted anything. SAVES only when
+    // application ran AND deferred nothing: an advanced cursor over an
+    // unapplied or mostly-deferred slice would postpone its operations
+    // until the slice's next fresh read, many chains away on exactly
+    // the calendars that chain. Holding the save is self-draining (the
+    // applied prefix persists, the retry plans a smaller diff on warm
+    // caches); write FAILURES do not hold it -- a persistently
+    // rejected write would freeze the chain forever, and failures
+    // retry whenever the slice is re-read.
+    // CLEARS on every non-dry run that reaches this point, an
+    // out-of-time skip included -- clearing is skip-safe in both clear
+    // cases, and a stale cursor retained across a fresh complete scan
+    // would capture the continuation this run's partial status
+    // schedules, resuming the moot pinned span instead of the current
+    // window. Guarded bookkeeping: a lost cursor restarts the scan
+    // from the front -- wasteful, never wrong (technical design §18.2).
+    if (!options.dryRun && pendingCursorWrite) {
+      try {
+        if (pendingCursorWrite.action === "clear") {
+          clearWindowScanCursor();
+        } else if (applied && applied.deferredOps === 0 &&
+                   pendingCursorWrite.action === "save") {
+          saveWindowScanCursor(pendingCursorWrite.cursor);
+        } else if (applied && applied.deferredOps === 0 &&
+                   pendingCursorWrite.action === "saveIfNone" &&
+                   !loadWindowScanCursor()) {
+          // saveIfNone: a fresh truncated run STARTS a chain only
+          // when none is stored -- the chain owns a pending cursor.
+          saveWindowScanCursor(pendingCursorWrite.cursor);
+        }
+      } catch (persistError) {
+        recordRunWarning("BOOKKEEPING_PERSIST_FAILED", persistError);
+      }
+    }
+
     // Status is built from what Calendar ACCEPTED, not from what the diff
     // proposed. applyDiff returns per-operation results (technical design
     // §17.5); a rejected create or delete must reach the saved counts and
@@ -1551,7 +1747,17 @@ function reconcile(options) {
     // silently failed (REQ-ERROR-006). A write-mode run with applied null
     // (out of time before application) reports `partial`, so the
     // continuation machinery below reschedules the deferred work.
-    const result = buildRunResult(diff, applied, options, eventDiagnostics);
+    // planningOutcomes travels in: failed outcomes fold into
+    // result.errors, aggregated per registry code (a budget-marked
+    // slice can hold hundreds of identical records), and any RETRYABLE
+    // failed outcome caps a non-dry run at partial (technical design
+    // §17.4; a non-retryable one -- ROUTE_TOO_LONG's benign steady
+    // state -- reports its error without barring success, which one
+    // standing over-cap meeting would otherwise make permanently
+    // unreachable) -- without the parameter, a per-event containment
+    // failure would be invisible to status and the counter reset.
+    const result = buildRunResult(
+      diff, applied, planningOutcomes, options, eventDiagnostics);
 
     // Dry runs return their proposal but never persist it — and never
     // touch continuation state or triggers. The stored last-run record is
@@ -1584,13 +1790,14 @@ function reconcile(options) {
       // Re-enqueue only while a continuation can still HELP: deferred
       // operations, an application skipped for time, an exhausted route
       // budget, an unfinished scan chain, or -- on a run whose scan
-      // covered the current window -- restoration/orphan-pass work
-      // suppressed at the evidence tier or planning cut short at its
-      // tier (a continuation re-reads that window and retries them; a
-      // chain slice's suppressed or time-starved work instead waits for
-      // the slice's next fresh read -- technical design §7.2.1's
-      // division of labor; a truncated SWEEP is never a cause, being
-      // daily-gated -- no continuation can re-run it, §15.2.8).
+      // covered the current window -- evidence-tier lookups cut short
+      // (restoration, orphan resolution, or zero-emission cleanup) or
+      // planning cut short at its tier (a continuation re-reads that
+      // window and retries them; a chain slice's suppressed or
+      // time-starved work instead waits for the slice's next fresh
+      // read -- technical design §7.2.1's division of labor; a
+      // truncated SWEEP is never a cause, being daily-gated -- no
+      // continuation can re-run it, §15.2.8).
       // Scan coverage after a FINISHED chain never re-enqueues -- the
       // next continuation would find no cursor, scan fresh, truncate,
       // and start a new chain re-tiling identical work until the cap;

@@ -49,10 +49,14 @@ const ERROR_CODES = {
   // by a generic persistence failure; guarding the boundary keeps its
   // return-a-result guarantee.
   STATUS_PERSIST_FAILED: 'STATUS_PERSIST_FAILED',
-  // A post-apply bookkeeping write threw: shrink high-water mark, sweep
-  // watermark, or continuation-counter reset. Guarded because Calendar
-  // already accepted the run's operations; losing each write is safe by
-  // construction (re-scan, wider sweep, one episode's allowance -- 18.2).
+  // A bookkeeping write threw: shrink high-water mark, sweep watermark,
+  // continuation-counter reset, or the window-scan cursor save/clear --
+  // saves post-apply (committed at listing time they would skip an
+  // unprocessed slice), clears also on an out-of-time skip and the
+  // rejected dead token's eagerly at listing time (7.2.1). Guarded
+  // because an escaping throw would falsify the run; losing each write
+  // is safe by construction (re-scan, wider sweep, one episode's
+  // allowance, a scan restarted from the front -- 18.2).
   BOOKKEEPING_PERSIST_FAILED: 'BOOKKEEPING_PERSIST_FAILED',
   // enqueueContinuation's trigger creation threw (per-user trigger quota,
   // transient ScriptApp error). Two guarded call sites, different

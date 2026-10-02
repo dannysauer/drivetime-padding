@@ -272,3 +272,13 @@ This matrix links requirement groups to architecture components, technical-desig
 | §7.6 / §17.5 (`resolvedAll`) | The shrink high-water gate counts a stranded event resolved by deletion or by an applied write that realigned it inside the window; the cleanup merge contributes only unobserved events, so a comparator classification of a co-observed event is never raced by a queued delete | AC-CONFIG-002, AC-RECOVERY-012 |
 | REQ-RECON-017 (displacement) | The sweep's live-parent deletion rules act only on candidates displaced from their persisted anchors — the moved-test; a naturally aged-out companion is preserved as history however recently a patch bumped its `updated` | AC-RECOVERY-015 |
 | REQ-RECON-009 (concluded records, §15.2.9) | Deletion authority stops at the past: an ended, undisplaced companion is a record of a trip, preserved by every reconciliation deletion path — without it the hours-long lookback against the day-long observation margin would erase every travel block within a day and nothing would ever age out as history | AC-RECOVERY-015 |
+
+## Requirements added in the twenty-third review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| §7.2.1 (application-gated cursor) | Window-scan cursor writes moved to the post-apply bookkeeping block — a run that throws or times out after its listing leaves the prior cursor, so the retry re-reads the slice instead of skipping it; the rejected dead token's clear stays eager at listing time, being skip-safe | AC-RECOVERY-017 |
+| §15.2.9 / §12.1.1 (freeze plumbing) | The planning context carries the resolved observed companion per role, so `getGeneratedEventSpecs` applies the concluded-record freeze before routing instead of spending broker budget on a role the comparator freezes anyway | AC-RECOVERY-015 |
+| §15.2.10 (zero-emission lookup) | Roles §12.5 zeroed out of existence produce no pending create, so restoration never fires; a targeted per-parent lookup on incomplete scans, daily runs, and continuations deletes the stale block the route-free evaluation must preserve | AC-RECOVERY-017 |
+| §17.1 (budget diagnostic) | A scoped diagnostic whose planning-tier boundary fires before the target is planned synthesizes `EXECUTION_BUDGET_EXCEEDED` instead of misreporting `EVENT_NOT_FOUND` for an event the targeted read just returned | AC-RECOVERY-013 |
+| §8.1 / §14.2 (per-event containment) | The normalizer is total and a planning throw becomes that source's `failed` outcome (`UNEXPECTED_ERROR`, logged, capping the run at `partial`) — one poisoned event cannot fail the run, which application-gated cursor writes require lest a deterministic throw freeze the scan chain at its slice | AC-RECOVERY-013 |

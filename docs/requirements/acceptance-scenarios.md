@@ -515,6 +515,8 @@ Creates and deletes both act on absence, and a truncated scan proves only that a
 **And** a chain longer than one day's continuation allowance survives the episode boundary: the daily run resets the allowance and resumes the pending cursor  
 **And** when a chain is pending at daily time because its continuation could not be scheduled, the daily run resumes the chain rather than scanning fresh, and the deferred fresh-window pass completes within one daily cycle of the chain completing, in every case — two daily cycles *measured from the original deferral* when the resumed chain finishes within the day's allowance, the REQ-TRIGGER-002 carve-out for this compound failure (the daily sweep needs a complete scan, which a calendar this size never yields; its absence there is the design's accepted residual, not a failure of this bound)  
 **And** intervening calendar-trigger runs scan fresh without overwriting the chain's pending cursor  
+**And** a run that throws or times out after its listing never advances the cursor past its unapplied slice — cursor saves are application-gated, so a failed run's slice is re-read rather than skipped — while the skip-safe clear decisions still execute on a timed-out run (and a rejected dead token's eagerly, at listing time), so a stale chain cursor never captures the continuation a fresh complete scan schedules  
+**And** a role the zero rule emptied (§12.5 — routing itself removed the role) has its stale split-slice companion removed through the targeted zero-emission lookup, which needs no pending create and no complete scan  
 **And** a lost or expired cursor degrades to a fresh scan from the front, never to an error.
 
 Without the cursor, every continuation re-issues the same query from the first page, retrieves the same prefix, and truncates at the same depth — the chain reaches the continuation cap having repeated itself, and every source past the truncation point stays unreconciled indefinitely.
@@ -748,6 +750,17 @@ Duplicate convergence cannot help here: one copy is outside every range the ordi
 **And** the run reports `partial`.
 
 Absence from `planningOutcomes` plus a complete scan means orphan. Sources skipped for time must be marked, or the degradation path deletes travel blocks because the run was slow.
+
+**Given** a scoped diagnostic run whose planning-tier boundary fires before the opened event's iteration runs  
+**When** the diagnostic completes  
+**Then** the card reports `EXECUTION_BUDGET_EXCEEDED` — the run gave up on the event — never `EVENT_NOT_FOUND` for an event the targeted read just returned.
+
+**Given** a source event whose planning deterministically throws (malformed data the provider cannot process)  
+**When** reconciliation runs  
+**Then** the throw is contained per event: that source carries a `failed` outcome (`UNEXPECTED_ERROR`), logged, with its `AppErrorRecord` folded into the run's errors  
+**And** its existing companions are preserved like any planning failure  
+**And** the rest of the run proceeds, reporting at best `partial` — never `success` over the unplanned source  
+**And** the window-scan chain is never frozen at the poisoned event's slice: the run completes and its application-gated cursor advances normally.
 
 ## AC-RECOVERY-014: A run-wide failure is recorded, not swallowed
 

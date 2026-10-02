@@ -34,14 +34,25 @@ listWindowEvents(calendarId, observeStart, observeEnd, shouldStop,
                  resumeToken)
   -> { events: RawCalendarEvent[], scanComplete: boolean,
        nextPageToken: string | null, resumed: boolean }
-// resumed reports whether the resumeToken was HONORED: false when none
-// was given or the token was expired/rejected and the call fell back to
-// listing the SAME requested range from page one. Any run that was
+// resumed reports whether the resumeToken was HONORED: false ONLY
+// when none was given or the token was ATTEMPTED and rejected, falling
+// back to the SAME requested range from page one -- the discriminator
+// the engine's offered-cursor semantics and eager dead-token clear
+// read. A token never attempted (shouldStop already true at entry,
+// zero pages fetched) is NOT a rejection: the call returns resumed
+// true with the untouched token as nextPageToken, or the eager clear
+// would delete a live chain cursor on a starved run. Nor is a
+// transient failure of the resumed fetch: fallback fires ONLY on
+// Calendar's specific invalid-page-token rejection; any other read
+// failure throws CALENDAR_READ_FAILED, cursor retained (7.2.1). Any run that was
 // OFFERED a cursor listed the chain's pinned -- possibly stale -- span,
 // so it never claims complete-scan credit for the current window,
-// honored or not; a rejected token's stored cursor is replaced by the
-// fallback's own nextPageToken (or cleared when the fallback walked off
-// the end -- the pinned span is then fully covered and the chain done)
+// honored or not; a rejected token's stored cursor is cleared EAGERLY
+// at listing time (clearing is skip-safe; an eager replace is not) and
+// the fallback's own nextPageToken saves through the application-gated
+// path, restarting the chain over the same span (or the completion
+// clear applies when the fallback walked off the end -- the pinned
+// span is then fully covered and the chain done) (7.2.1)
 listWorkingLocationEvents(calendarId, start, end) -> RawCalendarEvent[]
 // Ownership-filtered (privateExtendedProperty=dtp=1), paginated until
 // done or shouldStop fires, completeness reported -- a truncated shrink
@@ -52,6 +63,14 @@ listWorkingLocationEvents(calendarId, start, end) -> RawCalendarEvent[]
 // resolvedAll never satisfiable, the mark frozen -- and the 15.2.7
 // direct collision resolution would update a deleted resource
 // (technical design 7.6)
+// Every ObservedGeneratedEvent[] return below (this listing,
+// listCompanionsByParent, listGeneratedEventsUpdatedSince,
+// listGeneratedEventsPage) normalizes INSIDE the repository and
+// null-filters the 8.1 id/marker-unrecoverable exclusions with the
+// same logged warning -- no caller ever sees a null element. KEYLESS
+// entries (unrecoverable parent/role, valid id+marker) ARE returned:
+// real, addressable, deletable resources; key-matching consumers
+// simply never match them (8.1)
 listGeneratedEventsBetween(calendarId, start, end, shouldStop)
   -> { events: ObservedGeneratedEvent[], scanComplete: boolean }
 // Ownership + parent filtered, no time bounds, EXCLUDES cancelled
@@ -91,8 +110,24 @@ normalizeCalendarEvent(rawEvent) -> NormalizedEvent
 // Raw generated resources must be flattened before indexing or comparison;
 // the comparator and cache lookup consume this shape, not raw Calendar JSON.
 // routeSecs: numeric only when the raw string is non-empty and entirely
-// numeric; everything else maps to null, never 0 (technical design 13.3)
-normalizeObservedGeneratedEvent(rawEvent) -> ObservedGeneratedEvent
+// numeric; everything else maps to null, never 0 (technical design 13.3).
+// TOTAL, like normalizeCalendarEvent: never throws (8.1) -- a throwing
+// normalizer would fail the whole listing and, with cursor writes
+// application-gated, freeze the scan chain at the malformed resource's
+// slice. Content corruption degrades field-wise to null (the null
+// fingerprint forces a whole rewrite when the key is desired).
+// Identity corruption splits by what is lost (8.1): an unrecoverable
+// id or ownership marker returns null and the engine excludes the
+// resource with a logged warning (it cannot be safely deleted, 15.3 --
+// defense in depth, since the ownership-filtered listings guarantee
+// the marker); unrecoverable parentEventId/role with valid id+marker
+// normalizes KEYLESS (key null) -- unmanageable, so the engine removes
+// it from the observed set and queues its deletion on any scan
+// (evidence in hand; the marker satisfies 15.3; self-healing, since a
+// desired block is recreated cleanly by its parent's planning),
+// preserved only when the lenient 15.2.9 deletion-side test keeps it
+normalizeObservedGeneratedEvent(rawEvent)
+  -> ObservedGeneratedEvent | null
 evaluateEligibility(event, directives, settings, window) -> EligibilityResult
 // null when every fallback bottoms out at a blank default (10.4): the
 // engine records a per-event failed outcome (MISSING_DEFAULT_ORIGIN)
@@ -112,13 +147,38 @@ fetchWorkingLocationsSafely(start, end) -> RawCalendarEvent[]
 // 'durable' needs persisting (11.1). budget.remaining is decremented per
 // HTTP attempt, retries included (11.2).
 getRouteDuration(from, to, requestContext) -> RouteResult
+// context carries the RESOLVED observed companions per role
+// (context.observedCompanions, 12.1.1): the provider applies the
+// 15.2.9 freeze (strictly concluded record + anchor equality ->
+// unchanged, routing short-circuited) BEFORE routing -- a frozen role
+// emits a spec carrying the 14.1 anchor and the record's observed
+// fields verbatim, no route resolved and the role omitted from
+// outcome.routes (fields never consulted: anchor equality classifies
+// unchanged first; the spec exists so the key stays desired) -- and
+// still passes
+// the cache TRIPLETS through to the routing client uninspected --
+// staleness policy stays in one place (13.3)
 getGeneratedEventSpecs(context) -> PlanningOutcome
 
 // Context construction -- observed companions must be indexed before planning
-// so their route caches are reachable (technical design 12.1.1)
+// so their route caches, observed fields, and anchors (the latter two
+// for the 15.2.9 freeze) are reachable (technical design 12.1.1). THE
+// INDEX makes the key-collision choice: a key shared by a concluded
+// record and a live block (the ~40h post-reschedule overlap 15.2.9
+// creates by design) indexes the LIVE, non-concluded companion -- it
+// owns the key's cache (the record's triplet describes a trip already
+// taken), and a live companion is never frozen; a key observed only as
+// a record indexes the record, which is what the freeze reads. A
+// last-wins collapse could leave the record shadowing the live block,
+// re-calling the broker every run for a role with a valid cache
+// (ADR 0011, REQ-PERF-015)
 indexByGeneratedKey(observedEvents) -> Map<string, ObservedGeneratedEvent>
-routeCacheFor(observedByKey, parentEventId)
-  -> { outbound: RouteCacheEntry|null, return: RouteCacheEntry|null }
+// The resolved companions themselves, not just their cache triplets --
+// a triplet-only context could not recognize a concluded record
+// (12.1.1, 15.2.9); reads the index's live-over-record collapse above
+companionsFor(observedByKey, parentEventId)
+  -> { outbound: ObservedGeneratedEvent|null,
+       return: ObservedGeneratedEvent|null }
 
 // Route plan cache (derived state, stored on generated events)
 // Endpoints are { type, value } in BOTH directions; the return route swaps
@@ -143,6 +203,11 @@ findStrandedCompanions(window, settings, dryRun, shouldStop)
 // stranded event RESOLVED (resolvedAll: deleted, or realigned inside
 // the window by an applied restoration write -- 15.2.7/17.5) AND the
 // cleanup scan was complete, never on dry run
+// The load never throws; the CONSUMER hardens the value: an absent or
+// unparseable stored mark (Date.parse -> NaN) is treated as absent in
+// findStrandedCompanions' test, so the advance branch overwrites the
+// corrupt key with a valid mark -- self-healing, never a permanently
+// failing shrink classification (7.6)
 loadHighWater() / saveHighWater(observeEnd)                           // 7.6
 
 // Comparison helpers
@@ -195,8 +260,21 @@ applyDiff(diff, runStartMs) -> ApplyResult
 // eventIdFilter runs, where it becomes result.eventDiagnostics (17.6).
 // Summarizes the ApplyResult into result.applied (17.2) -- the
 // contract-defined path by which ACCEPTED counts reach saveRunStatus
-// and the 20.2 record; the diff alone is only the proposal
-buildRunResult(diff, applied, options, eventDiagnostics) -> ReconciliationResult
+// and the 20.2 record; the diff alone is only the proposal.
+// planningOutcomes is the failed-outcome fold (17.4): the failed
+// outcomes' AppErrorRecords merge into result.errors AGGREGATED PER
+// CODE (one record per code, its `occurrences` field (18.1) carrying
+// the count and sourceEventId the first aggregated source -- a
+// budget-marked slice can hold hundreds of identical
+// EXECUTION_BUDGET_EXCEEDED records), and any RETRYABLE failed
+// outcome caps a non-dry run at partial (a non-retryable one --
+// ROUTE_TOO_LONG's benign steady state -- reports its error without
+// barring success, 17.4) -- without it a
+// per-event containment failure or budget-marked remainder would be
+// invisible to status and reset the continuation counter over
+// unplanned work
+buildRunResult(diff, applied, planningOutcomes, options, eventDiagnostics)
+  -> ReconciliationResult
 // Top-level error boundary: a run-wide throw (settings, window read)
 // becomes a failed result and reaches the stored record (arch 14.2)
 buildFailureResult(error, options) -> ReconciliationResult
@@ -234,12 +312,16 @@ elapsedExceedsReadBudget(runStartMs) -> boolean
 // full-threshold planning loop would burn straight through the evidence
 // tier below (23.1)
 elapsedExceedsPlanningBudget(runStartMs) -> boolean
-// Late tier for the absence-evidence passes, self-draining first:
-// 15.2.7 restoration lookups (their queue shrinks across runs as
-// resolved creates apply), then whichever of the 15.2.3 orphan point
-// reads and the 15.2.8 daily sweep the scan's completeness selects
-// (mutually exclusive per run) -- deferral behind a self-draining
-// predecessor is transient. Fires at EVIDENCE_BUDGET_FRACTION of the
+// Late tier for the absence-evidence passes, self-draining first and
+// bounded-but-non-draining LAST: 15.2.7 restoration lookups (their
+// queue shrinks across runs as resolved creates apply), then whichever
+// of the 15.2.3 orphan point reads and the 15.2.8 daily sweep the
+// scan's completeness selects (mutually exclusive per run) -- deferral
+// behind a self-draining predecessor is transient -- and the 15.2.10
+// zero-emission lookups last of all: their chronic population never
+// drains, so ahead of the sweep they would starve it permanently,
+// while their own deferred work drains through the sweep-less
+// suppressed-work continuation. Fires at EVIDENCE_BUDGET_FRACTION of the
 // execution threshold. No phase sits behind a same-threshold
 // predecessor that consumes its region every run --
 // the listing pages until the read threshold
@@ -247,6 +329,10 @@ elapsedExceedsPlanningBudget(runStartMs) -> boolean
 // already be true at entry: zero lookups, every absence-gated operation
 // suppressed, on every slice, forever (23.1)
 elapsedExceedsEvidenceBudget(runStartMs) -> boolean
+// Every marked outcome carries an EXECUTION_BUDGET_EXCEEDED
+// AppErrorRecord -- failed outcomes MUST have error populated (17.4):
+// the buildRunResult fold and the 17.1 scoped-diagnostic synthesis
+// both read it
 markRemainingSourcesFailed(orderedSources, currentEvent, planningOutcomes) -> void
 // Resets the run-scoped warning buffer. The engine's FIRST statement,
 // before even the lock attempt -- every result builder (the
@@ -271,6 +357,12 @@ recordRunWarning(code, error) -> void
 // the event. Used by the engine's per-event failure paths, e.g. the
 // MISSING_DEFAULT_ORIGIN outcome (10.4)
 buildAppError(code, event) -> AppErrorRecord
+// Recognizes a throw that already carries an 18.2 registry code (a
+// repository read surfacing CALENDAR_READ_FAILED, say), so the
+// per-event planning containment preserves the registry's
+// transient-vs-permanent classification and retryability instead of
+// blanket UNEXPECTED_ERROR; null for unrecognized throws (arch 14.2)
+registryCodeOf(error) -> string | null
 // Engine post-pass on the diff: one unbounded parent lookup per pending
 // create; cancelled tombstones and PROVABLY concluded records among
 // the returns are passed over (15.2.7, 15.2.9 -- restoring a past
@@ -333,16 +425,22 @@ resolveOutOfWindowCompanions(diff, cleanup, dryRun, shouldStop) -> void
 // leaves the record sharing the key with the new block by design);
 // failed preserves --
 // restoration is create-driven and cannot reach a stray whose parent no
-// longer plans. Runs only on a COMPLETE window scan; takes the full
-// observed list, never the key index (the id test must see in-window
-// duplicates the index collapsed away) and the run's injected `now`
+// longer plans. Candidate selection skips keyless listing returns
+// (unrecoverable parent, 8.1) like anchorless ones -- no parent to
+// point-read; the null-id read could throw, deterministically failing
+// every sweep over the same event. Runs only on a COMPLETE window
+// scan; takes the full
+// observed list -- keyless corrupt events included, never the key
+// index: the id test must see in-window duplicates the index collapsed
+// away AND window-observed keyless events whose deletion is already
+// queued (8.1) -- and the run's injected `now`
 // (updatedMin, the anchor band, and the dtp.sweepCompletedAt watermark
 // all derive from it -- a wall-clock read would unpin them).
 // sweepComplete false = listing truncated or read loop cut short; the
 // engine records it as diagnostics.sweepComplete and writes the
 // watermark only after applyDiff confirms deletedAll(events) -- the
 // same application-gated rule as the shrink high-water mark
-sweepOutOfWindowCompanions(observedGenerated, planningOutcomes, window,
+sweepOutOfWindowCompanions(observedAll, planningOutcomes, window,
                            now, shouldStop)
   -> { events: ObservedGeneratedEvent[], sweepComplete: boolean }
 loadSweepWatermark() / saveSweepWatermark(now)                    // 15.2.8
@@ -372,17 +470,59 @@ loadSweepWatermark() / saveSweepWatermark(now)                    // 15.2.8
 // off preserves the candidate and counts in suppressedDeletes
 resolveUnmatchedCompanions(diff, planningOutcomes, window, settings,
                            now, shouldStop) -> void
+// Zero-emission cleanup (15.2.10): for every PLANNED outcome, keys
+// whose role is PRESENT in PlanningOutcome.routes but ABSENT from
+// outcome.specs (the pair is the test -- a zero route with nonzero
+// buffer still emits a spec; an unrouted role proves nothing) and has
+// no LIVE observed companion in the window read (a key observed only
+// as a concluded record stays in -- the comparator preserves the
+// record and cannot reach an unobserved stale block sharing the key),
+// WHATEVER the route's
+// provenance (a provenance filter would hide suppressed keys from
+// their own retry). Keys grouped by parent, ONE listCompanionsByParent
+// per PARENT -- the read returns both roles, and the canonical zero
+// case zeroes both roles of one parent, so per-key lookups would
+// double the reads; matches for
+// the zeroed roles join diff.deletes, deduplicated by id, preserved
+// records excepted (15.2.9). Planned-parent deletion authority (17.3)
+// -- routing itself zeroed the role out of existence, which the
+// route-free 15.2.3 evaluation must preserve through. Runs on
+// incomplete scans, daily runs, AND continuations; LAST on the
+// evidence tier, behind the sweep (23.1). shouldStop checked between
+// lookups; keys cut off count in suppressedDeletes -- the
+// deadline-starved engine branch invokes this same pass with the guard
+// already true (zero lookups, every pending key counted), so no second
+// population computation exists to drift (15.2.4, 15.2.10)
+resolveZeroEmissionCompanions(diff, planningOutcomes, observedByKey,
+                              now, shouldStop) -> void
 // Window-scan cursor persistence (7.2.1) -- User Properties, engine
 // policy, stubs live beside the other Status persistence, NOT in
 // CalendarRepository. Saved when a truncated non-dry scan STARTS a
 // chain (no cursor stored -- a fresh truncated run never overwrites a
 // pending cursor, the chain owns it), ADVANCES one (honored token,
-// truncated again), or REPLACES a dead one (token rejected, fallback
-// truncated -- leaving the dead token stored would loop every later
-// resume on the first page); resumed by continuation and daily runs;
+// truncated again), or RESTARTS one a rejected token's eager clear
+// emptied (the truncated fallback's own token, through the same gated
+// save -- there is no replace write); resumed by continuation and
+// daily runs;
 // cleared by chain completion (offered cursor, listing walked off the
 // end -- honored or fallback alike), by a fresh COMPLETE non-dry scan,
-// and by remove-all (19.4); dry runs never touch it. Every
+// and by remove-all (19.4); dry runs never touch it. SAVES are
+// APPLICATION-GATED: the decision is computed at listing time
+// (pendingCursorWrite) but persisted only after applyDiff ran with
+// NOTHING DEFERRED, so a run that throws or times out between listing
+// and application -- or defers mid-apply -- never advances past a
+// slice whose operations did not land (write failures do not hold the
+// save: they retry when the slice is re-read, while a persistent
+// rejection would freeze the chain). CLEARS execute at the same
+// post-application point but also when application was skipped for
+// time -- both clear decisions are skip-safe, and a moot cursor
+// retained across an out-of-time complete scan would capture that
+// run's continuation for the stale span -- and the rejected dead
+// token's clear is EAGER at listing time: clearing is skip-safe (a
+// lost cursor restarts the chain) where an eager replace could
+// advance past the fallback's unprocessed pages, and a token left for
+// the post-apply write would loop the dead token on every run that
+// dies before application (7.2.1). Every
 // cursor-OFFERED run is treated as scanComplete false downstream --
 // it listed the pinned, possibly stale span, not the current window.
 // The load NEVER THROWS and validates the stored shape: absent,
@@ -394,8 +534,9 @@ saveWindowScanCursor(cursor) / clearWindowScanCursor()
 // Whether a partial run's remaining causes are ones another pass can
 // drain: deferred operations, an application skipped for time, an
 // exhausted route budget, an unfinished scan chain, or -- on a run
-// whose scan covered the CURRENT window -- restoration/orphan-pass
-// work suppressed at the evidence tier or planning cut short at its
+// whose scan covered the CURRENT window -- evidence-tier lookups cut
+// short (restoration, orphan resolution, or zero-emission cleanup --
+// never the daily-gated sweep) or planning cut short at its
 // tier (EXECUTION_BUDGET_EXCEEDED outcomes; a continuation re-reads
 // that window and retries them, while a chain slice's suppressed or
 // time-starved work instead waits for the slice's next fresh read --
@@ -441,7 +582,13 @@ captureEventDiagnostics(event, eligibility, directives, origin, outcome,
 // Fallback payload when the diagnostic flow cannot evaluate the opened
 // event: a synthesized ineligible EligibilityResult with reason
 // EVENT_NOT_FOUND or PARENT_NOT_FOUND (engine-side, targeted read
-// resolved nothing, 17.1), DISABLED_GLOBALLY (engine-side, the disabled
+// resolved nothing, 17.1), EXECUTION_BUDGET_EXCEEDED or
+// UNEXPECTED_ERROR (engine-side, the single post-loop synthesis site
+// reads the target's FAILED outcome -- the planning-tier boundary
+// marked it, or its iteration threw into the per-event containment;
+// the truthful answer is "the run gave up on this event", never
+// "this event does not exist", 4.5/17.1), DISABLED_GLOBALLY
+// (engine-side, the disabled
 // gate precedes the targeted read on a scoped run, 17.1), or
 // UNSUPPORTED_CALENDAR (card-side, opened calendar differs from the
 // resolved primary id, BEFORE any engine run, 20.3) -- the card must

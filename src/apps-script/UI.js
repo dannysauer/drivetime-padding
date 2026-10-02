@@ -27,7 +27,9 @@ function buildHomeCard() {
  * either half without the other -- budgeting keys on the reason) and
  * renders EXHAUSTIVELY over the statuses a scoped run can return, in
  * precedence order: result.eventDiagnostics when present (planned,
- * ineligible, disabled, not-found all carry it); else 'skipped' (lock
+ * ineligible, disabled, not-found all carry it, as do the two
+ * synthesized give-up reasons, EXECUTION_BUDGET_EXCEEDED and
+ * UNEXPECTED_ERROR -- 4.5, 17.1); else 'skipped' (lock
  * contention) renders "synchronization in progress, reopen shortly" --
  * no eligibility answer exists while another run holds the lock, an
  * exception REQ-UI-012 carries; else 'failed' renders the result's

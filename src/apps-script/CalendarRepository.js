@@ -6,14 +6,36 @@
 /**
  * Lists every event in the observation range, following nextPageToken
  * until done OR shouldStop() fires, returning
- * { events, scanComplete, nextPageToken } -- nextPageToken non-null
- * exactly when the listing stopped early, so the ENGINE can persist it
- * and a continuation can resume the scan instead of re-reading the same
+ * { events, scanComplete, nextPageToken, resumed } -- nextPageToken
+ * non-null exactly when the listing stopped early AT A RESUMABLE
+ * POINT: after at least one fetched page (the token in hand), or the
+ * untouched resume token of a never-attempted resume (below). A FRESH
+ * listing stopped before its first page has no token in existence and
+ * returns null with scanComplete false -- nothing listed, nothing
+ * resumable, the retry re-lists fresh. The ENGINE persists the token
+ * so a continuation can resume the scan instead of re-reading the same
  * prefix forever on a calendar too large for one execution budget
- * (section 7.2.1). resumeToken, when provided, starts the listing there
- * -- valid only for the SAME query (the engine pins the stored
- * observation range); an expired or rejected token falls back to a
- * fresh scan from the first page, never a thrown run.
+ * (section 7.2.1). resumeToken, when provided, starts
+ * the listing there -- valid only for the SAME query (the engine pins
+ * the stored observation range); an expired or rejected token falls
+ * back to a fresh scan from the first page rather than a thrown run --
+ * keyed on Calendar's SPECIFIC invalid-page-token rejection ONLY. Any
+ * other failure of the resumed fetch (transient 5xx, timeout) throws
+ * CALENDAR_READ_FAILED like every listing failure: run-wide, cursor
+ * retained, the retry resumes the same token. The distinction is
+ * load-bearing -- the engine eagerly CLEARS the stored chain cursor on
+ * a rejection, so a transient blip mapped to "rejected" would
+ * destructively clear a live chain on every outage (section 7.2.1).
+ * `resumed` reports whether the token was HONORED (false ONLY on
+ * none-given and on an attempted-and-rejected token's fallback), the
+ * discriminator the engine's offered-cursor semantics and eager
+ * dead-token clear read: a rejected token's stored cursor is cleared
+ * eagerly at listing time, while every other cursor write is
+ * application-gated (section 7.2.1). A token never ATTEMPTED --
+ * shouldStop already true at entry, zero pages fetched -- is not a
+ * rejection: the call returns resumed true with the untouched token as
+ * nextPageToken, or the eager clear would delete a live chain cursor
+ * on a starved run.
  *
  * Pagination is not optional, and scanComplete is not decoration. Silent
  * truncation would make source events invisible while their companions remain

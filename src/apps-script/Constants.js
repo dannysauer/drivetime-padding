@@ -70,7 +70,8 @@ const READ_BUDGET_FRACTION = 0.5;
 // Technical Design 23.1.
 const PLANNING_BUDGET_FRACTION = 0.75;
 // Absence-evidence passes (15.2.7 restoration lookups, 15.2.3 orphan
-// point reads, 15.2.8 daily sweep) stop at this later fraction. Each
+// point reads, 15.2.8 daily sweep, 15.2.10 zero-emission lookups --
+// run order, zero-emission LAST) stop at this later fraction. Each
 // earlier phase stops short of the next tier's mark, so no phase
 // starves its successors AS LONG AS PHASES RUN IN TIER ORDER -- and
 // phases sharing a tier need their own ordering argument: the bulk
@@ -78,10 +79,13 @@ const PLANNING_BUDGET_FRACTION = 0.75;
 // which progresses only through its applied deletions, then the
 // region-consuming window scan, which resumes by cursor and loses
 // nothing by running second), the evidence passes self-draining first
-// (restoration lookups, whose queue shrinks across runs as resolved
-// creates apply, then whichever of the orphan point reads and the
-// daily sweep the scan's completeness selects -- mutually exclusive
-// per run -- deferral behind a self-draining predecessor is transient,
+// and bounded-but-non-draining last (restoration lookups, then the
+// orphan point reads on incomplete scans, then the daily sweep on
+// complete daily scans, then the zero-emission lookups LAST -- their
+// chronic population never drains and ahead of the sweep would starve
+// it permanently, while their own deferred work drains through the
+// sweep-less continuation; deferral behind a self-draining
+// predecessor is transient,
 // a starved bulk read's is not). A same-threshold guard behind a phase that
 // consumes the region every run is the failure mode throughout: zero
 // reads, every absence-gated operation suppressed, on every slice,

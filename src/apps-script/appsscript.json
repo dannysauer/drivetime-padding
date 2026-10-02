@@ -20,6 +20,7 @@
   "addOns": {
     "common": {
       "name": "Drivetime Padding",
+      "logoUrl": "https://www.gstatic.com/images/icons/material/system/1x/drive_eta_black_24dp.png",
       "useLocaleFromApp": false,
       "homepageTrigger": {
         "runFunction": "buildHomeCard"
