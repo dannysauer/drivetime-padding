@@ -270,7 +270,9 @@ Without this, a user who narrows the window sees generated events persist for as
 
 ### REQ-CONFIG-015: Pattern validation
 
-The add-on shall validate the configured pattern before saving or using it.
+The add-on shall validate the configured pattern before saving or using it: the pattern shall compile, and the cost of matching it shall be bounded regardless of the pattern's shape or the title's length — a pattern whose matching cost the add-on cannot bound shall be rejected like one that does not compile, with the reason named, and a title beyond the bound the add-on matches shall simply not match. The accepted pattern subset that establishes the bound is the Technical Design's (§9.3), defined as an allowlist so that unknown constructs are refused by construction; a disabled pattern is not consulted and not checked.
+
+The runtime offers no regex timeout and matching is synchronous, so a catastrophically backtracking pattern that merely compiles would occupy an execution until the platform killed it — ahead of every budget guard and of status persistence — and the same calendar input would kill every later run.
 
 ### REQ-CONFIG-016: Case sensitivity
 
@@ -298,7 +300,7 @@ A settings field that no evaluation step consults is not a setting; it is a cont
 
 ### REQ-ELIG-002: Pattern-based inclusion
 
-When optional title-pattern matching is enabled, an ordinary event whose summary matches the pattern shall be eligible when all other required conditions are met.
+When optional title-pattern matching is enabled, an ordinary event whose summary matches the pattern shall be eligible when all other required conditions are met. A summary longer than the bound REQ-CONFIG-015 places on matching shall not match — it is reported as too long, never truncated and matched — because a cut would manufacture anchors and word boundaries the real title lacks.
 
 "Ordinary" is enforced by a type gate ahead of pattern matching: only `default` and `outOfOffice` event types may reach pattern acceptance. Special Calendar types (`focusTime`, `workingLocation`, `birthday`, `fromGmail`) are rejected as `UNSUPPORTED_EVENT_TYPE` even when timed, located, and pattern-matching.
 

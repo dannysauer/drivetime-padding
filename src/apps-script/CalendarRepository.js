@@ -11,8 +11,24 @@
  * imminent appointments rather than Calendar's unspecified default
  * order; a single ascending query would front-load the margin behind
  * `now` instead (Technical Design 7.2.1, 23.2). pivot is the chain's
- * pinned `now`. Follows pagination until done OR shouldStop() fires,
- * returning { events, scanComplete, nextPageToken, resumed } --
+ * pinned `now`. The segments overlap on events spanning the pivot (Calendar
+ * filters timeMin against END and timeMax against START), so results
+ * are PARTITIONED by ownership: an event carrying an end.dateTime
+ * (presence-keyed -- never a parse of end.date) belongs to the forward
+ * segment iff its end is after the pivot, and backward pages are
+ * filtered to end <= pivot before being appended -- a pure function of
+ * event and pinned pivot, so it holds across slices with no id state.
+ * The end is read with the shared parseInstantOrNull (8.1) -- never a
+ * second parser, whose throw would retain the cursor and stall the
+ * chain. What the rule cannot place (no, unparseable, or date-only
+ * end) is kept where returned and deduplicated by id within the
+ * listing; Technical Design 7.2.1 is the one statement of why a
+ * cross-slice duplicate of those is harmless and of the two accepted
+ * residuals (an event edited across the pivot between slices, a
+ * zero-duration event at the pivot instant). This docblock states the
+ * rule, not the argument, so the two cannot drift.
+ * Follows pagination until done OR shouldStop() fires, returning
+ * { events, scanComplete, nextPageToken, resumed } --
  * nextPageToken an OPAQUE resume token this module encodes (segment
  * plus Calendar page token; the segment boundary is itself a
  * resumable point), non-null exactly when the listing stopped early

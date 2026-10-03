@@ -3,6 +3,17 @@
  *
  * ROUTE_TOO_LONG and ROUTE_BUDGET_EXCEEDED are planning failures, not
  * ineligibility: they must preserve existing generated events.
+ *
+ * Every registry entry -- registryEntry(code) below, the ONE place the
+ * flags live -- carries two ORTHOGONAL flags (18.1, 18.2):
+ * retryable (does the failure block success -- an unprocessed source
+ * is retryable by definition, 17.4) and continuable (could another
+ * pass in the same episode change it -- false for every deterministic
+ * per-event failure and every write code; continuationStillUseful
+ * reads it off each record instead of keeping a list of codes).
+ * CALENDAR_EVENT_INVALID has one meaning and ONE producer: the 8.2
+ * unreadable-timestamp branch. No repository throws it (a rejected
+ * write is CALENDAR_WRITE_FAILED); retryable, not continuable.
  */
 
 const ERROR_CODES = {
@@ -96,3 +107,15 @@ const ERROR_CODES = {
   // settings save remain the manual repair paths (19.3).
   TRIGGER_REPAIR_FAILED: 'TRIGGER_REPAIR_FAILED',
 };
+
+/**
+ * The registry entry for a code (Technical Design 18.1, 18.2):
+ * { message, retryable, continuable }. buildAppError copies all three
+ * onto the AppErrorRecord; continuationStillUseful reads `continuable`
+ * off each failure and failed outcome. ERROR_CODES above is the string
+ * map; this is where the per-code attributes live, so a flag changes
+ * in one place.
+ */
+function registryEntry(code) {
+  throw new Error('Not implemented: Technical Design section 18.2');
+}

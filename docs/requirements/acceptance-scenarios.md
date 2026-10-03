@@ -511,6 +511,7 @@ Creates and deletes both act on absence, and a truncated scan proves only that a
 **When** a run truncates its window scan and schedules a continuation  
 **Then** the truncated run persists the listing cursor pinned to its observation range and pivot  
 **And** the listing itself is ordered upcoming-first across pages — the forward segment from the pivot first, then the backward one, each by start time — so the truncated prefix holds the imminent appointments rather than an unspecified subset (§23.2)  
+**And** a timed event spanning the pivot is listed once — owned by the forward segment and filtered from the backward one — so no source is planned twice and no companion is indexed as two copies; an all-day or end-less return is listed at most once per slice, harmlessly  
 **And** the continuation resumes listing from that cursor instead of re-reading the same prefix  
 **And** successive passes plan, update, and — through the per-parent lookup — create for successive slices of the calendar  
 **And** unmatched companions in each slice are deleted only on per-parent evidence — a point read proving the parent absent or cancelled, or a fetched live parent evaluated to desire no companion for the key, so a stale companion split from its live source by a page boundary is still cleaned up — and preserved when the parent still desires the key or the read never ran  
@@ -919,3 +920,32 @@ The trigger handler's return value is discarded, so the stored record is the onl
 **And** the run reports `partial` with the failure counted.
 
 A 412 proves only that the event changed; reporting it as ownership loss would tell the user the add-on lost an event it still manages.
+
+## AC-CONFIG-007: A catastrophically backtracking title pattern is rejected
+
+**Given** title-pattern matching is enabled with the pattern `^(a+)+$`  
+**When** the settings are validated on save or on load  
+**Then** the pattern compiles but falls outside the §9.3 accepted subset — a quantified group whose body contains a quantifier  
+**And** the result is a structural validation error — field `eligibility.titlePattern`, code `INVALID_TITLE_PATTERN`, the message naming the construct and its position — inside an `INVALID_SETTINGS` run failure, exactly as a compile error would be  
+**And** no reconciliation runs against the pattern, dry runs included, and the settings UI shows the error  
+**And** the patterns `^OOO\b`, `\bOOO\b|\bout of office\b`, `(?:OOO|out of office)\b`, `.*?x`, `[(]a[+]` and `[\w\-]+` are accepted — escaped and class-contained metacharacters count toward no cap  
+**And** `^*` and `[z-a]` are refused by compilation, which runs before the subset scan, with the compile error as the message  
+**And** the check is an allowlist: `\\(a+)+`, `((a+)b)+`, `(a|ab)+` and `((a|ab)c)+` are refused (a quantified group holding a quantifier or an alternation), `(?<g>.+)\k<g>`, `(a)\1` and `\1` are refused (outside the grammar, whether or not a group exists), `(a|b)(a|b)(a|b)(a|b)` is refused (four alternation bars, more than three — short enough that only that rule fires), `.*.*.*x` is refused (three quantifiers, more than two), and `[^](a+)+]`, `[]a]`, `[\w-]` and `Team sync {` are refused because `[^]`, an empty or `]`-first class, a bare hyphen that is not a range, and a bare brace are not in the subset — V8 would compile all four, the first catastrophically  
+**And** a summary longer than `MAX_TITLE_PATTERN_SUBJECT_CHARS` UTF-16 code units does not match at all, reported `TITLE_TOO_LONG` rather than `TITLE_PATTERN_NO_MATCH` so the card names the bound (the evaluator is the bound's one owner and the matcher's only caller — it checks the bound before calling the bound-free matcher; a summary of exactly the bound is still matched; with the pattern disabled the reason stays `TITLE_PATTERN_DISABLED`) — it is never truncated and matched, so `\bOOO\b` cannot match an over-long title with `OOO` as its last three code units before the bound, and `OOO$` cannot be defeated silently  
+**And** the same pattern text with matching **disabled** is not checked and does not invalidate the settings  
+**And** a stored pattern saved before the rule existed fails the same way on load — a visible structural error, never a silent disable that would delete the pattern's companions  
+**And** the pattern is compiled once per run after validation and handed to every eligibility evaluation, never compiled per event.
+
+Apps Script has no regex timeout; a pattern that merely compiles can otherwise kill every run on the same calendar input.
+
+## AC-RECOVERY-020: An in-progress source is listed once on a fresh run
+
+**Given** a meeting that started before `now` and ends after it, with its two travel blocks on the calendar  
+**And** a fresh single-slice run whose window read fits one execution budget  
+**When** the repository lists the forward segment from the pivot and then the backward segment  
+**Then** the meeting — returned by both Calendar queries, since `timeMin` filters on end and `timeMax` on start — appears once in the listing, owned by the forward segment  
+**And** its return block, ending after the pivot, is owned by the forward segment, while its outbound block — ending at the source start, before the pivot — is owned by the backward one; each appears once  
+**And** the engine plans the source once, indexes one copy of each companion, and §13.5's duplicate convergence deletes nothing  
+**And** a zero-duration event at exactly the pivot instant is the one accepted gap — unobserved by that run's chain, listed by the next fresh run with a new pivot.
+
+The partition is not a chain-only concern: without it every ordinary run with a meeting underway would plan that meeting twice.

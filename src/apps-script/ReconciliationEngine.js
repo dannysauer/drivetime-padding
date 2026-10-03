@@ -257,6 +257,36 @@ function buildProviderContext(fields) {
 }
 
 /**
+ * The ONE shape of a failed planning outcome (Technical Design 17.4):
+ * { state: 'failed', specs: [], error: buildAppError(code, event,
+ * details) } -- details the optional offending-value bag (the
+ * unreadable start/end strings for CALENDAR_EVENT_INVALID), copied
+ * verbatim into AppErrorRecord.details (18.1), never special-cased by
+ * code.
+ * Every site that records one -- unreadable timestamps (8.2), missing
+ * default origin (10.4), the per-event containment catch, the
+ * planning-tier cut-off (markRemainingSourcesFailed below) -- builds it
+ * here, so the outcome contract is one statement, not several
+ * hand-written copies.
+ */
+function failedOutcome(code, event, details) {
+  throw new Error('Not implemented: Technical Design section 17.4');
+}
+
+/**
+ * Planning-tier cut-off (Technical Design 23.1): every source from
+ * currentEvent to the end of the planning order gets
+ * failedOutcome('EXECUTION_BUDGET_EXCEEDED', event) -- companions
+ * preserved (17.3), the outcome folded into result.errors and, for a
+ * filtered target, carried to the card by the 17.1 synthesis. Builds
+ * each record through failedOutcome, never by hand.
+ */
+function markRemainingSourcesFailed(orderedSources, currentEvent,
+                                    planningOutcomes) {
+  throw new Error('Not implemented: Technical Design section 23.1');
+}
+
+/**
  * Engine post-pass on the diff: one unbounded parent lookup per pending
  * create. A managed companion the user dragged beyond the observation
  * range is invisible to a complete scan; creating blindly would strand it
@@ -308,15 +338,21 @@ function resolveOutOfWindowCompanions(diff, cleanup, dryRun, shouldStop) {
  * upgrades orphan deletion to per-event evidence. One getEventById parent
  * point read per unmatched observed companion -- absent or cancelled proves
  * the orphan (the same rule the 15.2.8 sweep trusts) and moves it into
- * diff.deletes. A LIVE parent is evaluated in place through the route-free
+ * diff.deletes. A LIVE parent is NORMALIZED first (normalizeCalendarEvent,
+ * 8.1 -- the predicate and every test below read normalized fields,
+ * never the raw resource); one with unreadable timestamps
+ * (hasUnreadableTimestamps) preserves the candidate this run like a
+ * failed parent (17.3) -- never deletion on an unreadable instant (8.2).
+ * Otherwise it is evaluated in place through the route-free
  * desired-state tests its own slice would apply (planning-range overlap
  * against window; eligibility against settings, which the sweep never needs
  * because its no-outcome parents all sit outside the PLANNING range -- some
  * read but unplanned, in the observation margin -- where position alone
  * carries deletion authority; a no-outcome parent HERE can sit inside the
  * planning range on an unread page, where only eligibility can decide;
- * the desired role set -- evaluateEligibility on the fetched parent, then
- * routeFreeDesiredRoles, the same derivation the engine feeds the provider):
+ * the desired role set -- evaluateEligibility on the fetched parent, with
+ * the run's once-compiled titleMatcher (9.1), then routeFreeDesiredRoles,
+ * the same derivation the engine feeds the provider):
  * no desired companion for the key deletes, whatever page the
  * parent sat on -- a stale companion split from its live source by pagination
  * must not survive on liveness alone. For a desired role whose desired span
@@ -336,7 +372,8 @@ function resolveOutOfWindowCompanions(diff, cleanup, dryRun, shouldStop) {
  * single-budget scan (7.2.1).
  */
 function resolveUnmatchedCompanions(diff, planningOutcomes, window,
-                                    settings, now, shouldStop) {
+                                    settings, now, shouldStop,
+                                    titleMatcher) {
   throw new Error('Not implemented: Technical Design section 15.2.3');
 }
 

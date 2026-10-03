@@ -18,10 +18,14 @@
  * renders four distinct lines -- scheduled ("Finishing remaining work
  * shortly"), capReached and enqueueFailed (each "the daily run will
  * finish the remaining work" in its own words), and notUseful ("no
- * follow-up pass needed -- the next run picks up anything left": a
+ * follow-up pass scheduled -- the next run picks up what it can",
+ * followed by the record's errorCounts when any exist, so a
+ * cause that recurs until the user acts -- CALENDAR_EVENT_INVALID -- is
+ * NAMED from data the card actually holds (20.2), never alluded to: a
  * finished chain's gap is the daily run's, rejected writes any run's,
- * so it must not promise the daily run alone) -- so the card never
- * promises a continuation that will not fire. Null renders
+ * and the line promises neither the daily run alone nor a self-healing
+ * it cannot deliver) -- so the card never promises a continuation that
+ * will not fire. Null renders
  * nothing.
  */
 function buildHomeCard() {
@@ -42,16 +46,17 @@ function buildHomeCard() {
  * with no engine run and no budget spend. Otherwise invokes a dry run
  * with eventIdFilter AND reason 'event-diagnostic' (the engine rejects
  * either half without the other -- budgeting keys on the reason) and
- * renders EXHAUSTIVELY over the statuses a scoped run can return, in
- * precedence order: result.eventDiagnostics when present (planned,
- * ineligible, disabled, not-found all carry it, as do the two
- * synthesized give-up reasons, EXECUTION_BUDGET_EXCEEDED and
- * UNEXPECTED_ERROR -- 4.5, 17.1); else 'skipped' (lock
- * contention) renders "synchronization in progress, reopen shortly" --
- * no eligibility answer exists while another run holds the lock, an
- * exception REQ-UI-012 carries; else 'failed' renders the result's
- * errors (the 5.3 validation list for INVALID_SETTINGS, the 18.3 message
- * otherwise). A blank card is never acceptable.
+ * renders EXHAUSTIVELY over the statuses a scoped run can return, in precedence
+ * order: result.eventDiagnostics when present (planned, ineligible, disabled,
+ * not-found all carry it, as do the three synthesized give-up reasons,
+ * EXECUTION_BUDGET_EXCEEDED, CALENDAR_EVENT_INVALID and UNEXPECTED_ERROR --
+ * 4.5, 17.1; the reason table renders every member of ELIGIBILITY_REASONS,
+ * TITLE_TOO_LONG included, naming the length bound rather than a mismatch);
+ * else 'skipped' (lock contention) renders "synchronization in progress, reopen
+ * shortly" -- no eligibility answer exists while another run holds the lock, an
+ * exception REQ-UI-012 carries; else 'failed' renders the result's errors (the
+ * 5.3 validation list for INVALID_SETTINGS, the 18.3 message otherwise). A
+ * blank card is never acceptable.
  * Technical Design sections 17.1, 17.6, 20.3.
  */
 function buildEventCard(e) {

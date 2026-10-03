@@ -25,7 +25,15 @@ parseDirectives(description) -> ParsedDirectives
 // [pivot, observeEnd) is listed first, then a backward one
 // [observeStart, pivot), each orderBy startTime -- so a truncated
 // prefix holds the imminent appointments, not Calendar's unspecified
-// default page order; pivot is the chain's pinned `now`.
+// default page order; pivot is the chain's pinned `now`. The two
+// queries overlap on pivot-spanning events (timeMin filters END,
+// timeMax START), so results are partitioned by ownership -- end
+// after pivot belongs to the forward segment, backward pages are
+// filtered to end <= pivot, the end read with the normalizer's
+// parse-or-null (8.1) -- and whatever the rule cannot place (no or
+// unparseable end, all-day date-only ends) is kept where returned and
+// deduplicated by id within the listing: every timed event is listed
+// once, the rest harmlessly at most once per slice.
 // Deadline-aware: checks shouldStop between pages and returns the
 // retrieved prefix with scanComplete false when it fires -- truncation
 // is a first-class state downstream (7.2.1). RESUMABLE: nextPageToken is
@@ -155,7 +163,41 @@ normalizeCalendarEvent(rawEvent) -> NormalizedEvent
 // preserved only when the lenient 15.2.9 deletion-side test keeps it
 normalizeObservedGeneratedEvent(rawEvent)
   -> ObservedGeneratedEvent | null
-evaluateEligibility(event, directives, settings, window) -> EligibilityResult
+// The ONE instant parser (8.1): every instant string the add-on reads
+// -- raw Calendar timestamps, cursor instants, the high-water mark,
+// route-cache stamps, anchors -- goes through it, so a malformed value
+// degrades to null identically everywhere and no second parser can
+// throw; the normalizer runs it once and stores startMs/endMs (4.3)
+parseInstantOrNull(iso) -> number | null   // epoch ms, the *Ms unit
+// The one statement of 8.2's rule -- non-cancelled, NOT all-day (9.2
+// step 4 rejects all-day events on isAllDay alone), a null start or
+// end instant -- applied by the planning loop (a retryable
+// CALENDAR_EVENT_INVALID failed outcome, companions preserved) and by
+// the 15.2.3 live-parent evaluation (candidate preserved this run)
+hasUnreadableTimestamps(event) -> boolean
+// The title pattern compiled ONCE per run by the engine after
+// validateSettings passed it (9.3) -- { test(summary) -> boolean },
+// null when disabled. A bound-free regex test with ONE caller, 9.2
+// step 11, which checks the subject bound first (summary.length over
+// MAX_TITLE_PATTERN_SUBJECT_CHARS is TITLE_TOO_LONG, never truncated --
+// a cut manufactures anchors); the bound has one owner, not two
+compileTitleMatcher(settings) -> TitleMatcher | null
+// titleMatcher from compileTitleMatcher: evaluation never compiles and
+// never meets an unvalidated pattern (9.1). Enabledness is the SETTING,
+// never the matcher's nullness: titlePatternEnabled && !titleMatcher is
+// a programming error that THROWS -- into the planning loop's
+// per-event containment or 15.2.3's per-candidate one -- not a
+// disabled pattern (which would delete the pattern's companions)
+evaluateEligibility(event, directives, settings, window, titleMatcher)
+  -> EligibilityResult
+// The 4.5 EligibilityReason enum as DATA, verbatim and in order; the
+// card renders exhaustively over it
+ELIGIBILITY_REASONS: readonly string[]
+// The explicit, short list of planning-failure codes that double as
+// reasons; the 17.1 synthesis passes a failed outcome's code through
+// iff it is here, every other code clamping to UNEXPECTED_ERROR (a
+// registry code sharing a reason's name must not borrow its meaning)
+SYNTHESIS_REASONS: readonly string[]  // EXECUTION_BUDGET_EXCEEDED, CALENDAR_EVENT_INVALID
 // null when every fallback bottoms out at a blank default (10.4): the
 // engine records a per-event failed outcome (MISSING_DEFAULT_ORIGIN)
 // instead of routing -- reachable only on dry runs, since writeReady
@@ -202,6 +244,13 @@ indexByGeneratedKey(observedEvents) -> Map<string, ObservedGeneratedEvent[]>
 // positional list, which a new field would silently shift -- and
 // attaches the routing client
 buildProviderContext(fields) -> DrivetimeContext
+// The ONE shape of a failed planning outcome (17.4) -- { state:
+// "failed", specs: [], error: buildAppError(code, event, details) } --
+// used by every site that records one (unreadable timestamps, missing
+// default origin, the per-event catch, the planning-tier cut-off);
+// details is the optional offending-value bag (the unreadable
+// start/end strings for CALENDAR_EVENT_INVALID) -> AppErrorRecord.details
+failedOutcome(code, event, details) -> PlanningOutcome
 // The resolved companions themselves, not just their cache triplets --
 // a triplet-only context could not recognize a concluded record
 // (12.1.1, 15.2.9). Per role, in order: the UNDISPLACED same-anchor
@@ -246,7 +295,7 @@ findStrandedCompanions(window, settings, dryRun, shouldStop)
 // the window by an applied restoration write -- 15.2.7/17.5) AND the
 // cleanup scan was complete, never on dry run
 // The load never throws; the CONSUMER hardens the value: an absent or
-// unparseable stored mark (Date.parse -> NaN) is treated as absent in
+// unparseable stored mark (parseInstantOrNull -> null, 8.1) is treated as absent in
 // findStrandedCompanions' test, so the advance branch overwrites the
 // corrupt key with a valid mark -- self-healing, never a permanently
 // failing shrink classification (7.6)
@@ -319,7 +368,9 @@ routeCacheNeedsPersisting(observed, freshRoute, now) -> boolean
 // spend the route budget on the past (23.2); called before the planning loop
 orderForPlanning(normalizedEvents, now) -> NormalizedEvent[]
 // Overlong-source cleanup gate (technical design 15.2.6): duration-keyed,
-// reason-agnostic; fires when either companion role is unobserved
+// reason-agnostic; fires when either companion role is unobserved; an
+// all-day source with unreadable dates (null instants, 8.1) counts as
+// exceeding -- one conservative point read
 sourceExceedsDurationCap(event) -> boolean
 bothRolesObserved(observedByKey, parentEventId) -> boolean  // non-empty list per role
 
@@ -409,10 +460,10 @@ elapsedExceedsPlanningBudget(runStartMs) -> boolean
 // already be true at entry: zero lookups, every absence-gated operation
 // suppressed, on every slice, forever (23.1)
 elapsedExceedsEvidenceBudget(runStartMs) -> boolean
-// Every marked outcome carries an EXECUTION_BUDGET_EXCEEDED
-// AppErrorRecord -- failed outcomes MUST have error populated (17.4):
-// the buildRunResult fold and the 17.1 scoped-diagnostic synthesis
-// both read it
+// Every marked outcome is built through failedOutcome(
+// "EXECUTION_BUDGET_EXCEEDED", event) -- failed outcomes MUST have
+// error populated (17.4): the buildRunResult fold and the 17.1
+// scoped-diagnostic synthesis both read it
 markRemainingSourcesFailed(orderedSources, currentEvent, planningOutcomes) -> void
 // Resets the run-scoped warning buffer. The engine's FIRST statement,
 // before even the lock attempt -- every result builder (the
@@ -433,10 +484,14 @@ beginRunWarnings() -> void
 // append+log internally for STATUS_PERSIST_FAILED
 recordRunWarning(code, error) -> void
 // Constructs an AppErrorRecord (18.1) from a registry code (18.2):
-// message and retryability from the registry entry, sourceEventId from
-// the event. Used by the engine's per-event failure paths, e.g. the
-// MISSING_DEFAULT_ORIGIN outcome (10.4)
-buildAppError(code, event) -> AppErrorRecord
+// message, retryable and continuable from the registry entry (18.1,
+// 18.2), sourceEventId from the event, details copied verbatim when
+// given -- no per-code special casing. Used by the engine's per-event
+// failure paths, e.g. the MISSING_DEFAULT_ORIGIN outcome (10.4)
+buildAppError(code, event, details) -> AppErrorRecord
+// The ONE place a code's attributes live (18.1, 18.2); buildAppError
+// copies all three, continuationStillUseful reads continuable
+registryEntry(code) -> { message: string, retryable: boolean, continuable: boolean }
 // Recognizes a throw that already carries an 18.2 registry code (a
 // repository read surfacing CALENDAR_READ_FAILED, say), so the
 // per-event planning containment preserves the registry's
@@ -554,7 +609,17 @@ loadSweepWatermark() / saveSweepWatermark(now)                    // 15.2.8
 // `now`; a read the guard cut
 // off preserves the candidate and counts in suppressedDeletes
 resolveUnmatchedCompanions(diff, planningOutcomes, window, settings,
-                           now, shouldStop) -> void
+                           now, shouldStop, titleMatcher) -> void
+// titleMatcher is APPENDED, not inserted: a positional insertion would
+// silently shift now and shouldStop for any caller written to the old
+// order
+// titleMatcher: the run's once-compiled pattern (9.1), handed to the
+// live-parent evaluation so it never compiles or meets an unvalidated
+// one; each parent is evaluated inside a PER-CANDIDATE containment (a
+// throw preserves that candidate and logs UNEXPECTED_ERROR, never
+// fails the run); the fetched parent is NORMALIZED first (8.1), and a
+// live parent with unreadable timestamps (hasUnreadableTimestamps)
+// preserves the candidate this run like a failed parent (17.3)
 // Suppressed-role cleanup (15.2.10):
 // for every PLANNED outcome, keys whose role the provider recorded on
 // PlanningOutcome.suppressed -- reason "zero" OR "ended" (both mean no
@@ -623,8 +688,17 @@ resolveSuppressedRoleCompanions(diff, planningOutcomes, observedByKey,
 // The load NEVER THROWS and validates the stored shape: absent,
 // malformed, or unreadable cursors return null, degrading to a fresh
 // scan -- never a failed run (AC-RECOVERY-017)
+// The three instants come back as Dates, rehydrated through
+// parseInstantOrNull (8.1): Properties round-trips strings, and a
+// string pivot against a Date end coerces to NaN and silently empties
+// the backward segment; unparseable or out-of-order instants (anything
+// but observeStart < pivot < observeEnd) make the cursor malformed
 loadWindowScanCursor()
   -> { pageToken, observeStart, observeEnd, pivot } | null  // pageToken opaque
+// Instants are saved as ISO strings (Date#toISOString) -- the one
+// on-disk unit the load's parseInstantOrNull rehydration expects; epoch
+// numbers would read as malformed on every load and re-scan from page
+// one, the spin the cursor exists to prevent
 saveWindowScanCursor(cursor) / clearWindowScanCursor()
 // Whether a partial run's remaining causes are ones another pass can
 // drain: deferred operations, an application skipped for time, an
@@ -643,7 +717,13 @@ saveWindowScanCursor(cursor) / clearWindowScanCursor()
 // allowance) -- and false when the only cause is REJECTED WRITES
 // (failures alone, OWNERSHIP_LOST and CONCURRENT_EDIT included): the
 // next run of any kind re-plans them against a fresh read, so a pass
-// would drain nothing. Both record "notUseful" (4.11) (19.6, 23.4)
+// would drain nothing -- and false when the ONLY causes are failures
+// and failed outcomes carrying continuable: false from the registry
+// (18.2: CALENDAR_EVENT_INVALID, ROUTE_TOO_LONG, every write code...);
+// a deferred operation or a cut-off beside them still justifies the
+// pass. The flag is read off each record, never a list of codes kept
+// here. All
+// three record "notUseful" (4.11) (19.6, 23.4)
 continuationStillUseful(result, chainFinished) -> boolean
 // Hourly diagnostic allowance (20.3), RESERVE-then-REFUND: the reserve
 // writes the whole remaining allowance as used BEFORE any broker call

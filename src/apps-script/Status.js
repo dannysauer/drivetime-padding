@@ -6,18 +6,20 @@
  */
 
 /**
- * Persists the compact 20.2 record: status, timestamps, reason, the
- * seven APPLIED counts (zero when result.applied is null -- never
- * dereferenced), the error count, and the partial run's continuation
- * DISPOSITION copied from diagnostics.continuation, which the engine
- * sets at the enqueue site ("scheduled", "capReached", "enqueueFailed",
- * "notUseful"), COALESCED TO NULL when absent -- 4.11 leaves the field
- * undefined on non-partial runs, and JSON serialization would drop the
- * key where 20.2 promises an explicit null. It must
- * survive here because the trigger handler's return value is discarded,
- * and a bare boolean -- or a disposition derived from one at persist
- * time -- would have the home card promise a continuation that will
- * never fire (19.6, 20.2). Called only through saveRunStatusGuarded
+ * Persists the compact 20.2 record: status, timestamps, reason, the seven
+ * APPLIED counts (zero when result.applied is null -- never dereferenced), the
+ * error count, the per-code error counts (errorCounts -- distinct codes with
+ * their occurrences, bounded by the registry, so the card can name what a
+ * notUseful partial waits on), and the partial run's continuation DISPOSITION
+ * copied from diagnostics.continuation, which the engine sets at the enqueue
+ * site ("scheduled", "capReached", "enqueueFailed", "notUseful"), COALESCED TO
+ * NULL when absent -- 4.11 leaves the field undefined on non-partial runs, and
+ * JSON serialization would drop the key where 20.2 promises an explicit null.
+ * It must survive here because the trigger handler's return value is discarded,
+ * and a bare boolean -- or a disposition derived from one at persist time --
+ * would have the home card promise a continuation that will never fire (19.6,
+ * 20.2).
+ * Called only through saveRunStatusGuarded
  * (18.2).
  */
 function saveRunStatus(result) {
@@ -64,14 +66,14 @@ function refundDiagnosticAllowance(unspentCount, now) {
 }
 
 /**
- * Shrink high-water mark (OBSERVE_HIGH_WATER_KEY): the furthest
- * observeEnd ever used. User Properties, engine policy -- NOT in
- * CalendarRepository, so repository fakes carry no Properties state.
- * The load never throws; the CONSUMER hardens the value --
- * findStrandedCompanions treats an absent or unparseable mark as
- * absent, so its advance branch overwrites a corrupt key with a valid
- * one. The engine lowers the mark only after applyDiff confirms every
- * stranded event resolved on a complete, non-dry cleanup scan.
+ * Shrink high-water mark (OBSERVE_HIGH_WATER_KEY): the furthest observeEnd ever
+ * used. User Properties, engine policy -- NOT in CalendarRepository, so
+ * repository fakes carry no Properties state. The load never throws; the
+ * CONSUMER hardens the value -- findStrandedCompanions reads it through
+ * parseInstantOrNull (8.1) and treats an absent or unparseable mark as absent,
+ * so its advance branch overwrites a corrupt key with a valid one. The engine
+ * lowers the mark only after applyDiff confirms every stranded event resolved
+ * on a complete, non-dry cleanup scan.
  * Technical Design section 7.6.
  */
 function loadHighWater() {
@@ -98,12 +100,19 @@ function saveSweepWatermark(now) {
 }
 
 /**
- * Window-scan cursor (WINDOW_SCAN_CURSOR_KEY): { pageToken,
- * observeStart, observeEnd, pivot }, pinned to the range and segment
- * split that produced it; pageToken is the repository's opaque resume
- * token, never read here.
+ * Window-scan cursor (WINDOW_SCAN_CURSOR_KEY): { pageToken, observeStart,
+ * observeEnd, pivot }, pinned to the range and segment split that produced it;
+ * pageToken is the repository's opaque resume token, never read here; the three
+ * instants are SAVED as ISO strings (Date#toISOString -- epoch numbers would
+ * read as malformed on every load and re-scan from page one) and rehydrated as
+ * Dates (parseInstantOrNull, 8.1, then new Date(ms)) -- Properties round-trips
+ * strings, and a string pivot compared against a Date end would coerce to NaN
+ * and silently empty the backward segment.
  * The load NEVER THROWS and validates the stored shape -- absent,
- * malformed, or unreadable cursors return null, degrading to a fresh
+ * malformed (unparseable or out-of-order instants included -- anything
+ * but observeStart < pivot < observeEnd would pin the chain to a
+ * listing Calendar rejects, retained forever), or unreadable cursors
+ * return null, degrading to a fresh
  * scan, never a failed run (AC-RECOVERY-017). WHEN to save or clear is
  * engine policy (saves application-gated, clears also on an
  * out-of-time skip, the rejected dead token's clear eager at listing
@@ -169,7 +178,11 @@ function logWarning(code, detail) {
  * One-line description of a logWarning detail. A TriggerHealth report
  * nests its AppErrorRecord under `error`; an Error or AppErrorRecord IS
  * the record. Error's own properties are non-enumerable, so name,
- * message, and stack are read explicitly rather than serialized.
+ * message, and stack are read explicitly rather than serialized. Both
+ * 18.1 flags are rendered -- continuable is what decides a notUseful
+ * disposition, so a log that showed only retryable would mislead -- and
+ * `details` is serialized: it is the one place an offending value (an
+ * unreadable timestamp, 8.2) reaches a human, the card being reason-only.
  */
 function describeWarningDetail_(detail) {
   if (!detail || typeof detail !== 'object') {
@@ -184,6 +197,12 @@ function describeWarningDetail_(detail) {
   if (record.message) parts.push(record.message);
   if (typeof record.retryable === 'boolean') {
     parts.push('(retryable: ' + record.retryable + ')');
+  }
+  if (typeof record.continuable === 'boolean') {
+    parts.push('(continuable: ' + record.continuable + ')');
+  }
+  if (record.details && typeof record.details === 'object') {
+    parts.push('details=' + safeJson_(record.details));  // 18.1: the offending values
   }
   if (record !== detail) {
     const state = {};

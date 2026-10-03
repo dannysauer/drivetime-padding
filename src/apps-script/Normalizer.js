@@ -61,3 +61,30 @@ function normalizeCalendarEvent(rawEvent) {
 function normalizeObservedGeneratedEvent(rawEvent) {
   throw new Error('Not implemented: Technical Design section 4.9');
 }
+
+/**
+ * The ONE instant parser (Technical Design 8.1): every instant string
+ * the add-on reads goes through it, once per reader, and it never
+ * throws. Returns EPOCH MILLISECONDS or null (missing, non-string, or
+ * unparseable input). The normalizer stores its result in
+ * startMs/endMs beside the original strings; 8.1 carries the rules for
+ * all-day events (nominal UTC midnight), timed-ness, and the 7.2.1
+ * partition's presence-keyed use. This docblock states the contract,
+ * not the argument, so the two cannot drift.
+ */
+function parseInstantOrNull(iso) {
+  throw new Error('Not implemented: Technical Design section 8.1');
+}
+
+/**
+ * The one statement of Technical Design 8.2's rule: status !==
+ * 'cancelled' && !isAllDay && (startMs === null || endMs === null). The
+ * planning loop records a retryable, non-continuable
+ * CALENDAR_EVENT_INVALID failed outcome for it (companions preserved,
+ * 17.3) and 15.2.3's live-parent evaluation preserves the candidate;
+ * all-day events are excluded because 9.2 step 4 rejects them on
+ * isAllDay alone. The argument lives in 8.1 and 8.2.
+ */
+function hasUnreadableTimestamps(event) {
+  throw new Error('Not implemented: Technical Design section 8.2');
+}

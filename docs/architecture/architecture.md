@@ -364,7 +364,7 @@ Recommended constraints:
 - `windowDays`: 7 through 180;
 - `defaultBufferMinutes`: 0 through 120;
 - default origin: required before synchronization;
-- subject pattern: must compile successfully when enabled;
+- subject pattern: when enabled, must compile successfully and pass the backtracking-safety check (technical design §9.3 — the runtime has no regex timeout);
 - origin type: `address` or `placeId`.
 
 Invalid configuration should produce a visible error and prevent event writes.
@@ -780,7 +780,7 @@ function reconcile(options) {
     // user what is wrong (technical design §5.3) instead of a bare error.
     //
     // Two tiers (technical design §5.3): structural validity (types,
-    // ranges, regex) gates EVERY run; write-readiness (a configured
+    // ranges, regex compile and safety) gates EVERY run; write-readiness (a configured
     // default origin) gates writes only. A dry-run diagnostic proceeds
     // without a default origin and reports MISSING_DEFAULT_ORIGIN per
     // event (§10.4) -- blocking it here would hide exactly the
@@ -1169,6 +1169,12 @@ function reconcile(options) {
       : MAX_ROUTE_CALLS_PER_RUN;
     routeBudget = { remaining: initialBudget };
 
+    // The title pattern is compiled ONCE here, after validation passed
+    // it, and handed to every eligibility evaluation -- never compiled
+    // per event, never cached in module state, never an unvalidated
+    // pattern (technical design §9.1, §9.3). Null when disabled.
+    const titleMatcher = compileTitleMatcher(settings);
+
     // Upcoming events first, then in-progress and lookback events. The
     // listing arrives in API response order; without reordering, past
     // events can exhaust the route budget while the appointment the user
@@ -1196,8 +1202,32 @@ function reconcile(options) {
         break;
       }
       try {
+        // A non-cancelled TIMED event whose start or end instant could not
+        // be read (technical design §8.1, §8.2; an all-day event with an
+        // unreadable date falls to §9.2 step 4 instead) -- the shared predicate, which
+        // §15.2.3's live-parent evaluation applies too: a per-event FAILED
+        // outcome, companions preserved (§17.3), nothing deleted on the
+        // strength of an unreadable timestamp, and eligibility never sees
+        // a null-timed event that is not a tombstone. Retryable (the
+        // source went unprocessed, §17.4), folded into result.errors, and
+        // carried to the card by the §17.1 synthesis as the reason, so
+        // the card names the cause instead of UNEXPECTED_ERROR (the
+        // offending value itself is in the error detail, §4.5). Checked
+        // BEFORE the directive parse: nothing of such an event is read.
+        if (hasUnreadableTimestamps(event)) {
+          const invalid = failedOutcome("CALENDAR_EVENT_INVALID", event,
+            { start: event.start, end: event.end });  // §18.1 details
+          planningOutcomes.set(event.id, invalid);
+          logWarning("CALENDAR_EVENT_INVALID", invalid.error);  // the value's one path to the log
+          // No in-loop capture: there is no EligibilityResult to carry
+          // (EventDiagnostics.eligibility is non-nullable), so a filtered
+          // target is handled by the single post-loop synthesis site,
+          // which passes this code through to the card (§4.5, §17.1).
+          continue;
+        }
         const directives = parseDirectives(event.description);
-        const eligibility = evaluateEligibility(event, directives, settings, window);
+        const eligibility =
+          evaluateEligibility(event, directives, settings, window, titleMatcher);
 
         // Computed in the engine because the diagnostic capture needs it
         // even when planning never runs or fails before specs exist -- the
@@ -1243,7 +1273,7 @@ function reconcile(options) {
           // wrapper and degrade the origin to default with a spurious
           // WORKING_LOCATION_UNAVAILABLE warning.
           workingLocations = fetchWorkingLocationsSafely(
-            new Date(event.start), new Date(event.end));
+            new Date(event.startMs), new Date(event.endMs));  // parsed once, §8.1
         }
 
         const origin = resolveOrigin(event, directives, settings, workingLocations);
@@ -1260,11 +1290,7 @@ function reconcile(options) {
         // preserves existing companions like any other planning failure
         // (§17.3).
         if (!origin) {
-          const outcome = {
-            state: "failed",
-            specs: [],
-            error: buildAppError("MISSING_DEFAULT_ORIGIN", event)
-          };
+          const outcome = failedOutcome("MISSING_DEFAULT_ORIGIN", event);
           planningOutcomes.set(event.id, outcome);
           if (options.eventIdFilter) {
             eventDiagnostics = captureEventDiagnostics(
@@ -1347,11 +1373,7 @@ function reconcile(options) {
         const failureCode =
           registryCodeOf(eventError) || "UNEXPECTED_ERROR";
         logWarning(failureCode, eventError);
-        planningOutcomes.set(event.id, {
-          state: "failed",
-          specs: [],
-          error: buildAppError(failureCode, event)
-        });
+        planningOutcomes.set(event.id, failedOutcome(failureCode, event));
         // A filtered target is handled by the single post-loop
         // synthesis site, which reads this failed outcome.
       }
@@ -1363,12 +1385,13 @@ function reconcile(options) {
     // never captured for the target: the id resolved no source event
     // (gone, or a companion's parent reference points at a purged
     // event), the planning-tier boundary marked it failed before its
-    // iteration ran, or its iteration threw into the per-event
-    // containment. Synthesize rather than return null -- silence is
+    // iteration ran, its timestamps were unreadable (the §8.2 `continue`
+    // above), or its iteration threw into the per-event containment.
+    // Synthesize rather than return null -- silence is
     // the failure mode the targeted read exists to eliminate -- and
     // synthesize the TRUTH: a failed outcome's own error code
-    // (EXECUTION_BUDGET_EXCEEDED, UNEXPECTED_ERROR) for an event the
-    // targeted read just returned, never a not-found the user would
+    // (EXECUTION_BUDGET_EXCEEDED, CALENDAR_EVENT_INVALID, UNEXPECTED_ERROR)
+    // for an event the targeted read just returned, never a not-found the user would
     // read as "this event does not exist" (technical design §4.5).
     if (options.eventIdFilter && !eventDiagnostics) {
       const targetOutcome = diagnosticTargetId
@@ -1379,7 +1402,12 @@ function reconcile(options) {
       // CLAMPED to the §4.5 EligibilityReason enum: the containment
       // catch deliberately preserves recognized registry codes in the
       // outcome, but the card's reason rendering is exhaustive over
-      // §4.5, so a non-enum code renders as UNEXPECTED_ERROR here. The
+      // §4.5, so a non-synthesis code renders as UNEXPECTED_ERROR here.
+      // Membership in SYNTHESIS_REASONS -- the explicit, short list of
+      // planning-failure codes that double as reasons -- is the test,
+      // never the whole enum: a registry code that merely shares a
+      // reason's name must not reach the card with the reason's meaning.
+      // The
       // true code still lands in result.errors (the buildRunResult
       // fold) and the log for diagnosis -- the card itself renders
       // eventDiagnostics, not errors, on this path, and shows the
@@ -1391,7 +1419,7 @@ function reconcile(options) {
       eventDiagnostics = buildUnresolvedEventDiagnostics(
         options.eventIdFilter,
         failedCode
-          ? (failedCode === "EXECUTION_BUDGET_EXCEEDED"
+          ? (SYNTHESIS_REASONS.includes(failedCode)
               ? failedCode : "UNEXPECTED_ERROR")
           : diagnosticRedirected ? "PARENT_NOT_FOUND" : "EVENT_NOT_FOUND");
     }
@@ -1560,7 +1588,7 @@ function reconcile(options) {
     if (!options.eventIdFilter && !scanComplete &&
         (options.dryRun || !outOfTime)) {
       resolveUnmatchedCompanions(diff, planningOutcomes, window, settings,
-        now, () => elapsedExceedsEvidenceBudget(runStart));
+        now, () => elapsedExceedsEvidenceBudget(runStart), titleMatcher);
       outOfTime = elapsedExceedsExecutionBudget(runStart);
     } else if (!options.eventIdFilter && !scanComplete) {
       // Same contract as the creates side above (§15.2.4): companions
@@ -1820,7 +1848,10 @@ function reconcile(options) {
       }
       // Re-enqueue only while a continuation can still HELP -- never
       // for rejected writes alone, which the next run of any kind
-      // re-plans against a fresh read (technical design §23.4): deferred
+      // re-plans against a fresh read, nor for failed outcomes whose
+      // registry entry is continuable: false (CALENDAR_EVENT_INVALID, a
+      // bad address -- the flag is read off each record, technical
+      // design §18.2, §23.4): deferred
       // operations, an application skipped for time, an exhausted route
       // budget, an unfinished scan chain, or -- on a run whose scan
       // covered the current window -- evidence-tier lookups cut short
@@ -1865,8 +1896,10 @@ function reconcile(options) {
             result.diagnostics.continuation = "enqueueFailed";
           }
         } else {
-          // A finished chain's remaining coverage is the daily run's job
-          // (§19.6); the card must say so rather than promise a pass.
+          // Nothing a pass could drain: a finished chain's remaining
+          // coverage (the daily run's job, §19.6), or only failures the
+          // registry marks continuable: false (§18.2, §23.4); the card
+          // must say so rather than promise a pass.
           result.diagnostics.continuation = "notUseful";
         }
       }
@@ -2027,7 +2060,7 @@ Last successful sync: Today at 9:42 AM
 Last result: 12 checked, 2 created, 0 updated, 0 deleted
 ```
 
-The card also renders the persisted continuation **disposition** (technical design §20.2): `scheduled` — "Finishing remaining work shortly"; `capReached` — "Continuation limit reached — the daily run will finish the remaining work"; `enqueueFailed` — "Could not schedule the next pass — the daily run will finish the remaining work"; `notUseful` — "No follow-up pass needed — the next run picks up anything left" (a finished chain's coverage gap is the daily run's job; rejected writes are re-planned by the next run of any kind, so the line must not promise the daily run alone). A single boolean could not tell the last three from the first.
+The card also renders the persisted continuation **disposition** (technical design §20.2): `scheduled` — "Finishing remaining work shortly"; `capReached` — "Continuation limit reached — the daily run will finish the remaining work"; `enqueueFailed` — "Could not schedule the next pass — the daily run will finish the remaining work"; `notUseful` — "No follow-up pass scheduled — the next run picks up what it can", followed by the record's `errorCounts` when any exist (`CALENDAR_EVENT_INVALID (3)`), so a cause that recurs until the user acts is *named* on the card rather than alluded to (a finished chain's coverage gap is the daily run's job; rejected writes are re-planned by the next run of any kind; the line promises neither the daily run alone nor a self-healing it cannot deliver). A single boolean could not tell the last three from the first.
 
 Each trigger line renders one of three states from the health report (technical design §19.3): `Installed`, `Missing`, or — daily trigger only — `Scheduled hour out of date (repairing)`, the `stale` state — observable only after a contended or failed repair, since a homepage open runs the repair itself before rendering and an uncontended open therefore shows `Installed`. The Repair action is offered for `Missing` and `stale` alike; it runs the same replacement rule the daily firing runs automatically.
 

@@ -10,6 +10,17 @@ const MIN_WINDOW_DAYS = 7;
 const MAX_WINDOW_DAYS = 180;
 const MAX_BUFFER_MINUTES = 120;
 
+// Title-pattern backtracking safety (Technical Design 9.3, the one statement of
+// the rules: an allowlist grammar plus these caps). Apps Script has no regex
+// timeout and matching is synchronous, so a catastrophic pattern would kill
+// every run ahead of the budget guards; the bounds below keep matching cost
+// bounded for any pattern that passes validation and any title (a longer title
+// does not match).
+const MAX_TITLE_PATTERN_LENGTH = 200;
+const MAX_TITLE_PATTERN_QUANTIFIERS = 2;
+const MAX_TITLE_PATTERN_ALTERNATIONS = 3;
+const MAX_TITLE_PATTERN_SUBJECT_CHARS = 128;
+
 // Maximum supported one-way travel. ADR 0012, REQ-TIME-012.
 // Also bounds the observation range, so raising it widens every read.
 const MAX_TRAVEL_MINUTES = 360;

@@ -65,7 +65,21 @@ function saveSettings(settings) {
   throw new Error('Not implemented: Technical Design section 5.3');
 }
 
-/** Returns all errors, not just the first. Technical Design section 5.3. */
+/**
+ * Returns all errors, not just the first. Technical Design section 5.3. An
+ * ENABLED title pattern must pass the type check and the
+ * MAX_TITLE_PATTERN_LENGTH cap FIRST (a non-string is refused before
+ * anything reads .length -- validation never throws; the O(1) cap keeps
+ * a corrupt multi-kilobyte value away from new RegExp), then compile,
+ * then lie in the 9.3 accepted subset -- an allowlist grammar (the one
+ * statement of its rules), so unknown constructs fail closed -- the runtime has
+ * no regex timeout, so a catastrophic pattern that merely compiles would kill
+ * every run. A failing pattern is a structural INVALID_SETTINGS error naming
+ * the construct, like a compile error; a disabled pattern is validated for type
+ * only. Applies to STORED settings on load as to new ones on save (5.3) --
+ * blocking is the safe failure; a silent disable would delete the pattern's
+ * companions.
+ */
 function validateSettings(settings) {
   throw new Error('Not implemented: Technical Design section 5.3');
 }

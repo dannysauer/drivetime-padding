@@ -112,3 +112,4 @@ Recorded so they are not relitigated.
 | Whether to add `openid` to the manifest | Not until broker auth is chosen — ADR 0013 |
 | Seconds versus whole-minute timestamps | Resolved by 5-minute quantization — TD §12.3 |
 | Whether the Planner and Capability layers return | No — ADR 0007 |
+| Whether to replace the regex title pattern with a linear-time glob subset | Deferred, **revisit before the first release**: today an allowlist regex subset with caps, a subject bound and a cost argument (TD §9.3) — a glob or word matcher would remove all of that at the price of regex expressiveness, and the design predates any stored pattern, so the switch is still free |
