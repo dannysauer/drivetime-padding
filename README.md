@@ -15,7 +15,7 @@ The documentation set is normative and ready to build against, with two exceptio
 | Spike 1 | Can a Marketplace-installed add-on create installable Calendar triggers? |
 | Spike 2 | What is the minimum viable OAuth scope set, and its verification tier? |
 
-Broker authentication is also unresolved, but it blocks public release rather than implementation — phases 1 through 4 use a fixed travel duration and never call the broker.
+Broker authentication is also unresolved, but it blocks public release rather than implementation — phases 1 through 3 use a fixed travel duration and never call the broker, and Phase 4 is where the broker is deployed and the fixed duration replaced.
 
 See [`docs/open-questions.md`](docs/open-questions.md) for the full list.
 

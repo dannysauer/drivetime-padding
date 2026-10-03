@@ -699,7 +699,7 @@ flowchart TD
 ### 14.2 Pseudocode
 
 ```javascript
-function reconcile(options) {
+function runReconciliation(options) {  // the deployed entry point's name (17.1)
   // One warning buffer for the whole run, created before ANY result is
   // built -- the lock-contention skip below included, since every
   // result builder installs this same array by reference as
@@ -2415,8 +2415,12 @@ Store a compact last-run object in User Properties:
   "startedAt": "2026-07-30T14:00:00Z",
   "completedAt": "2026-07-30T14:00:04Z",
   "status": "success",
+  "reason": "calendar-trigger",
   "sourceEventsChecked": 18,
   "eligibleEvents": 4,
+  "plannedEvents": 4,
+  "ignoredEvents": 14,
+  "failedEvents": 0,
   "created": 2,
   "updated": 0,
   "deleted": 0,

@@ -403,7 +403,10 @@ applyDiff(diff, runStartMs) -> ApplyResult
 // barring success, 17.4) -- without it a
 // per-event containment failure or budget-marked remainder would be
 // invisible to status and reset the continuation counter over
-// unplanned work
+// unplanned work. Also derives result.summary (17.2, REQ-OBS-002) --
+// reason and the source/eligible/planned/ignored/failed counts -- from
+// the same outcomes before they are dropped, the one path by which
+// those counts reach saveRunStatus and the 20.2 record
 buildRunResult(diff, applied, planningOutcomes, options, eventDiagnostics)
   -> ReconciliationResult
 // Top-level error boundary: a run-wide throw (settings, window read)

@@ -9,8 +9,11 @@
  * retryable (does the failure block success -- an unprocessed source
  * is retryable by definition, 17.4) and continuable (could another
  * pass in the same episode change it -- false for every deterministic
- * per-event failure and every write code; continuationStillUseful
- * reads it off each record instead of keeping a list of codes).
+ * per-event failure, every write code, and the deployment-deterministic
+ * broker failures BROKER_AUTH_FAILED and BROKER_PROTOCOL_ERROR;
+ * BROKER_UNAVAILABLE and BROKER_RATE_LIMITED stay continuable;
+ * continuationStillUseful reads it off each record instead of keeping a
+ * list of codes).
  * CALENDAR_EVENT_INVALID has one meaning and ONE producer: the 8.2
  * unreadable-timestamp branch. No repository throws it (a rejected
  * write is CALENDAR_WRITE_FAILED); retryable, not continuable.

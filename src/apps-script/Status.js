@@ -6,7 +6,9 @@
  */
 
 /**
- * Persists the compact 20.2 record: status, timestamps, reason, the seven
+ * Persists the compact 20.2 record: status, timestamps, the run summary
+ * (result.summary, 17.2 -- reason and the source/eligible/planned/
+ * ignored/failed counts, REQ-OBS-002; zero counts when null), the seven
  * APPLIED counts (zero when result.applied is null -- never dereferenced), the
  * error count, the per-code error counts (errorCounts -- distinct codes with
  * their occurrences, bounded by the registry, so the card can name what a

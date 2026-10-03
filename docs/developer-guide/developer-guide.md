@@ -22,7 +22,7 @@ Before writing implementation code, read [`../open-questions.md`](../open-questi
 4. Enable the Calendar API.
 5. Copy `src/apps-script/appsscript.json` into the Apps Script project, or push with `clasp`.
 
-The broker setup below is only needed from implementation phase 5 onward — phases 1 through 4 use a fixed travel duration and never call the broker:
+The broker setup below is only needed from implementation phase 4 onward — phases 1 through 3 use a fixed travel duration and never call the broker; Phase 4 (Architecture §21) deploys and authenticates the broker and replaces the fixed duration:
 
 1. Deploy the Cloud Run routing broker.
 2. Configure Secret Manager for Maps credentials.

@@ -8,7 +8,7 @@ Full contract in Technical Design §21. Rationale in ADR 0002.
 
 Not implemented. **Authentication is unresolved and blocks public release** (Technical Design §21.7).
 
-Implementation phases 1 through 4 use a fixed travel duration and never call this service, so the engine can be built and proven while this stays open.
+Implementation phases 1 through 3 use a fixed travel duration and never call this service, so the engine can be built and proven while this stays open; Phase 4 deploys and authenticates it.
 
 ## API
 

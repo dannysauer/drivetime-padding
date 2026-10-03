@@ -1547,7 +1547,7 @@ Buffer changes do **not** appear in this list. The route input hash deliberately
 
 Required behavior:
 
-- settings writes that change any origin **mark the cache generation**, they do not eagerly clear it;
+- settings writes that change any origin do **not** clear or mark cache entries: the route input hash already includes the effective origin (§13.3), so every affected entry misses on its own at the next run and every unaffected one stays valid — there is no generation marker to carry or compare;
 - reconciliation honors the per-run route-call ceiling `MAX_ROUTE_CALLS_PER_RUN` (recommended 60);
 - when the ceiling is reached, remaining events are left unplanned for that run with status `partial`, and existing generated events for them are preserved (planning failure, not ineligibility);
 - a run that ends `partial` schedules a continuation rather than waiting for the next daily run (§23.4).
@@ -2110,6 +2110,21 @@ interface ReconciliationResult {
     failedWrites: number; deferredOps: number;
   } | null;
   errors: AppErrorRecord[];
+  /** Aggregate run counts (REQ-OBS-002) and the run's reason: the
+      contract-defined path by which they reach saveRunStatus and the
+      20.2 record, derived by buildRunResult from planningOutcomes and
+      options -- the outcomes are consumed there and not retained.
+      sourceEventsChecked is every source handed to planning (one
+      outcome each, cut-off outcomes included); ignoredEvents the
+      `ineligible` outcomes; failedEvents the `failed` ones;
+      plannedEvents the `planned` ones; eligibleEvents = checked -
+      ignored (every source eligibility did not reject). Null on
+      status-only and failure results, which never planned. */
+  summary: {
+    reason: "calendar-trigger" | "daily-trigger" | "manual" | "continuation";  // options.reason (17.1); dry runs never persist
+    sourceEventsChecked: number; eligibleEvents: number;
+    plannedEvents: number; ignoredEvents: number; failedEvents: number;
+  } | null;
 }
 ```
 
@@ -2313,7 +2328,7 @@ interface AppErrorRecord {
 
 ### 18.2 Stable codes
 
-Every registry entry — `registryEntry(code) -> { message, retryable, continuable }` (Errors.js), the one place both flags live and the source `buildAppError` reads — carries two orthogonal flags. `retryable` decides whether a failure blocks `success` (§17.4: an unprocessed source is retryable by definition). `continuable` decides whether another pass in the **same episode** could change the outcome — the question `continuationStillUseful` asks (§23.4) — and is `false` for every failure that is deterministic for the same input: `CALENDAR_EVENT_INVALID` (§8.2), `MISSING_DEFAULT_ORIGIN`, `ROUTE_TOO_LONG`, `INVALID_ORIGIN`, `INVALID_DESTINATION`, `NO_ROUTE`, every write-failure code (`CALENDAR_WRITE_FAILED`, `OWNERSHIP_LOST`, `CONCURRENT_EDIT` — the next run of any kind re-plans them against a fresh read), and `ROUTE_BUDGET_EXCEEDED` (exhaustion is detected from the run's `RouteBudget`, not from outcomes). It is `true` for `EXECUTION_BUDGET_EXCEEDED` and for the transient codes (`CALENDAR_READ_FAILED`, the `BROKER_*` family, `UNEXPECTED_ERROR` — unknown, so optimistic and cap-bounded). Without the attribute the design would hand-list codes at the continuation site and extend the list per code; with it, a single unroutable address no longer enqueues ten broker-calling passes per episode.
+Every registry entry — `registryEntry(code) -> { message, retryable, continuable }` (Errors.js), the one place both flags live and the source `buildAppError` reads — carries two orthogonal flags. `retryable` decides whether a failure blocks `success` (§17.4: an unprocessed source is retryable by definition). `continuable` decides whether another pass in the **same episode** could change the outcome — the question `continuationStillUseful` asks (§23.4) — and is `false` for every failure that is deterministic for the same input: `CALENDAR_EVENT_INVALID` (§8.2), `MISSING_DEFAULT_ORIGIN`, `ROUTE_TOO_LONG`, `INVALID_ORIGIN`, `INVALID_DESTINATION`, `NO_ROUTE`, every write-failure code (`CALENDAR_WRITE_FAILED`, `OWNERSHIP_LOST`, `CONCURRENT_EDIT` — the next run of any kind re-plans them against a fresh read), `ROUTE_BUDGET_EXCEEDED` (exhaustion is detected from the run's `RouteBudget`, not from outcomes), and the broker failures that are deterministic for the deployment, `BROKER_AUTH_FAILED` and `BROKER_PROTOCOL_ERROR` (§11.5 already marks them non-retryable; a pass five minutes later meets the same credential or the same malformed response). It is `true` for `EXECUTION_BUDGET_EXCEEDED` and for the transient codes (`CALENDAR_READ_FAILED`, `BROKER_UNAVAILABLE`, `BROKER_RATE_LIMITED`, `UNEXPECTED_ERROR` — unknown, so optimistic and cap-bounded). Without the attribute the design would hand-list codes at the continuation site and extend the list per code; with it, a single unroutable address no longer enqueues ten broker-calling passes per episode.
 
 Settings:
 
@@ -2806,7 +2821,9 @@ Store only compact operational data, not addresses or event titles.
   "reason": "calendar-trigger",
   "sourceEventsChecked": 18,
   "eligibleEvents": 4,
-  "plannedEvents": 8,
+  "plannedEvents": 4,
+  "ignoredEvents": 14,
+  "failedEvents": 0,
   "created": 2,
   "updated": 1,
   "metadataPatches": 1,
@@ -2824,7 +2841,7 @@ Store only compact operational data, not addresses or event titles.
 
 `continuation` is the **disposition of a partial run's follow-up**, copied verbatim from `diagnostics.continuation` (§4.11), which the engine sets at the enqueue site where the disposition is known (§19.6): `"scheduled"`, `"capReached"`, `"enqueueFailed"` (the trigger write threw; nothing will fire until the daily run), or `"notUseful"` (`continuationStillUseful` declined: nothing a pass could drain — a finished chain whose remaining coverage is the daily run's job; a partial caused by rejected writes alone, which the next run of any kind re-plans against a fresh read; or one caused only by `failed` outcomes the registry marks `continuable: false`, such as `CALENDAR_EVENT_INVALID` (§18.2, §23.4); the card must not promise the daily run for the last two); `null` on every non-partial run. A boolean would collapse the last three into "not capped" and have the home card promise a continuation that will never fire; a disposition *derived* at persist time from a boolean plus a warning search would do the same the first time a default changed. The disposition must be persisted because the trigger handler's return value is discarded — without it the card cannot tell a capped or failed episode waiting for the daily run from a continuation that is on its way, which is exactly the state §19.6 says the UI must show.
 
-The write counts are **applied** counts taken from the `ApplyResult` (§17.5) via `ReconciliationResult.applied` (§17.2), not proposal counts taken from the diff. `failedWrites` is the size of the failure list; any non-zero value forces `status` to `partial` or `failed`, so the home card can never display success over rejected writes. The record carries **all seven** of the carrier's counts: without `metadataPatches`, a run whose only accepted operations were cache-triplet patches would store all-zero write counts and read as a no-op; without `deferredOps`, a budget-bounded run with no failures would store `partial` with nothing in the record explaining why.
+`reason` and the five event counts are copied from `ReconciliationResult.summary` (§17.2, REQ-OBS-002) — `buildRunResult` derives them from the planning outcomes before those are dropped, so persistence has a contract-defined source and never re-derives them; a status-only or failure result carries `summary: null` and stores zero for the counts with its own `reason`. The write counts are **applied** counts taken from the `ApplyResult` (§17.5) via `ReconciliationResult.applied` (§17.2), not proposal counts taken from the diff. `failedWrites` is the size of the failure list; any non-zero value forces `status` to `partial` or `failed`, so the home card can never display success over rejected writes. The record carries **all seven** of the carrier's counts: without `metadataPatches`, a run whose only accepted operations were cache-triplet patches would store all-zero write counts and read as a no-op; without `deferredOps`, a budget-bounded run with no failures would store `partial` with nothing in the record explaining why.
 
 A persisted result can carry `applied: null` — a failure result from a validation gate or the boundary, or a write run whose budget expired *before* application (§17.5). The record then stores **zero for all seven counts**, and the status plus `errors` carry the story: `failed` with zero counts is a run that never applied anything, and `partial` with all-zero counts and no errors is precisely the computed-but-never-applied case — the diff was proposed, application was skipped for time, and the continuation reschedules it. `saveRunStatus` must handle the null without dereferencing it.
 
@@ -2834,7 +2851,7 @@ Dry runs never write this record (§17.5). Every **non-dry** run that acquired t
 
 The current-event card invokes a dry-run reconcile scoped by `eventIdFilter` **with `reason: "event-diagnostic"`** — the engine rejects either half without the other, in both directions (§17.1): budgeting keys on the reason, so a scoped run without it would draw the ordinary per-run budget on every card open unrecorded, while the reason on an unscoped run would drain the shared hourly allowance with a full reconcile — and renders `ReconciliationResult.eventDiagnostics` (§17.6), the defined carrier for the per-event fields below, which are otherwise planning-loop locals the card could not reach without reimplementing planning.
 
-Rendering is **exhaustive over the statuses a scoped run can return**, in the precedence order §17.1 states: `eventDiagnostics` when present — the planned, ineligible, disabled (`DISABLED_GLOBALLY`, synthesized by the disabled gate), and not-found cases all carry it, as do the two synthesized give-up reasons, `EXECUTION_BUDGET_EXCEEDED` and `UNEXPECTED_ERROR` (§4.5, §17.1); otherwise `skipped` (lock contention) renders "synchronization in progress — reopen shortly", the REQ-UI-012 exception, because no eligibility answer exists while another run holds the lock; otherwise `failed` renders the result's errors (the §5.3 validation list for `INVALID_SETTINGS`, the §18.3 message for a boundary failure). A blank card is never an outcome.
+Rendering is **exhaustive over the statuses a scoped run can return**, in the precedence order §17.1 states: `eventDiagnostics` when present — the planned, ineligible, disabled (`DISABLED_GLOBALLY`, synthesized by the disabled gate), and not-found cases all carry it, as do the three synthesized give-up reasons, `EXECUTION_BUDGET_EXCEEDED`, `CALENDAR_EVENT_INVALID` and `UNEXPECTED_ERROR` (§4.5, §17.1); otherwise `skipped` (lock contention) renders "synchronization in progress — reopen shortly", the REQ-UI-012 exception, because no eligibility answer exists while another run holds the lock; otherwise `failed` renders the result's errors (the §5.3 validation list for `INVALID_SETTINGS`, the §18.3 message for a boundary failure). A blank card is never an outcome.
 
 The card flow also checks **which calendar the event was opened from, before invoking the engine**: the `eventOpen` trigger fires for events on secondary and shared calendars too, while the MVP manages only the primary calendar (REQ-INSTALL-004). An unchecked pass-through would look the opened id up in the primary calendar and report `EVENT_NOT_FOUND` for an event the user is looking at. The comparison is against the **resolved primary-calendar id** — the user's own calendar id (their email address), obtained once, e.g. via `CalendarApp.getDefaultCalendar().getId()` — **never the literal string `"primary"`**: that alias is request-side sugar the trigger payload does not contain, so a literal comparison would classify the user's own primary calendar as foreign and break every card open. When `e.calendar.calendarId` differs from the resolved id, the card renders an explicit **unsupported-calendar** explanation directly — the payload synthesized by `buildUnresolvedEventDiagnostics(eventId, "UNSUPPORTED_CALENDAR")`, the same card-side synthesizer as the not-found reasons — with no engine run, no budget spend, and no misleading not-found diagnosis.
 
