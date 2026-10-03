@@ -13,6 +13,15 @@ const ERROR_CODES = {
   CALENDAR_READ_FAILED: 'CALENDAR_READ_FAILED',
   CALENDAR_WRITE_FAILED: 'CALENDAR_WRITE_FAILED',
   CALENDAR_EVENT_INVALID: 'CALENDAR_EVENT_INVALID',
+  // The re-read behind a conditional write found the marker gone: the
+  // event is the user's now (ADR 0009). Apply failure, NOT retryable. A
+  // VANISHED target is never this -- an ordinary CALENDAR_WRITE_FAILED
+  // the next run converges past. Full rule: 16.5.1.
+  OWNERSHIP_LOST: 'OWNERSHIP_LOST',
+  // A conditional write was rejected (412) but the re-read found the
+  // marker intact: stale snapshot of a block still managed. Apply
+  // failure, RETRYABLE. A 412 alone is never ownership loss (16.5.1).
+  CONCURRENT_EDIT: 'CONCURRENT_EDIT',
 
   INVALID_ORIGIN: 'INVALID_ORIGIN',
   INVALID_DESTINATION: 'INVALID_DESTINATION',

@@ -5,6 +5,21 @@
  * descriptions (ADR 0010).
  */
 
+/**
+ * Persists the compact 20.2 record: status, timestamps, reason, the
+ * seven APPLIED counts (zero when result.applied is null -- never
+ * dereferenced), the error count, and the partial run's continuation
+ * DISPOSITION copied from diagnostics.continuation, which the engine
+ * sets at the enqueue site ("scheduled", "capReached", "enqueueFailed",
+ * "notUseful"), COALESCED TO NULL when absent -- 4.11 leaves the field
+ * undefined on non-partial runs, and JSON serialization would drop the
+ * key where 20.2 promises an explicit null. It must
+ * survive here because the trigger handler's return value is discarded,
+ * and a bare boolean -- or a disposition derived from one at persist
+ * time -- would have the home card promise a continuation that will
+ * never fire (19.6, 20.2). Called only through saveRunStatusGuarded
+ * (18.2).
+ */
 function saveRunStatus(result) {
   throw new Error('Not implemented: Technical Design section 20.2');
 }
@@ -84,7 +99,9 @@ function saveSweepWatermark(now) {
 
 /**
  * Window-scan cursor (WINDOW_SCAN_CURSOR_KEY): { pageToken,
- * observeStart, observeEnd }, pinned to the range that produced it.
+ * observeStart, observeEnd, pivot }, pinned to the range and segment
+ * split that produced it; pageToken is the repository's opaque resume
+ * token, never read here.
  * The load NEVER THROWS and validates the stored shape -- absent,
  * malformed, or unreadable cursors return null, degrading to a fresh
  * scan, never a failed run (AC-RECOVERY-017). WHEN to save or clear is

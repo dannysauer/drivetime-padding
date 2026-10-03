@@ -78,8 +78,8 @@ const READ_BUDGET_FRACTION = 0.5;
 // Technical Design 23.1.
 const PLANNING_BUDGET_FRACTION = 0.75;
 // Absence-evidence passes (15.2.7 restoration lookups, 15.2.3 orphan
-// point reads, 15.2.8 daily sweep, 15.2.10 zero-emission lookups --
-// run order, zero-emission LAST) stop at this later fraction. Each
+// point reads, 15.2.8 daily sweep, 15.2.10 suppressed-role lookups --
+// run order, suppressed-role LAST) stop at this later fraction. Each
 // earlier phase stops short of the next tier's mark, so no phase
 // starves its successors AS LONG AS PHASES RUN IN TIER ORDER -- and
 // phases sharing a tier need their own ordering argument: the bulk
@@ -89,7 +89,7 @@ const PLANNING_BUDGET_FRACTION = 0.75;
 // nothing by running second), the evidence passes self-draining first
 // and bounded-but-non-draining last (restoration lookups, then the
 // orphan point reads on incomplete scans, then the daily sweep on
-// complete daily scans, then the zero-emission lookups LAST -- their
+// complete daily scans, then the suppressed-role lookups LAST -- their
 // chronic population never drains and ahead of the sweep would starve
 // it permanently, while their own deferred work drains through the
 // sweep-less continuation; deferral behind a self-draining
@@ -178,7 +178,10 @@ const REMOVAL_HEARTBEAT_KEY = 'dtp.removalHeartbeat';
 // complete. Stretches the sweep's updatedMin bound and anchor band over
 // gaps of skipped or incomplete sweeps. Technical Design section 15.2.8.
 const SWEEP_COMPLETED_AT_KEY = 'dtp.sweepCompletedAt';
-// Resumable window-scan cursor: { pageToken, observeStart, observeEnd }.
+// Resumable window-scan cursor: { pageToken, observeStart, observeEnd,
+// pivot } -- pageToken an opaque repository resume token (segment plus
+// Calendar page token), pivot the chain's `now`, where the ordered
+// forward and backward listing segments split (7.2.1).
 // Saved when a truncated non-dry scan STARTS or ADVANCES a chain (a
 // fresh truncated run never overwrites a pending cursor -- the chain
 // owns it); resumed by continuation AND daily runs, PINNED to the stored

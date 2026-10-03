@@ -2,7 +2,7 @@
 
 This file collects the principal function contracts from the technical design.
 
-`compareDesiredAndObserved` takes planning outcomes as well as specs: it may only delete generated events whose parent planned successfully or was ruled ineligible (§17.4), or whose parent is absent from a **complete** scan (§15.2.3) — and never a concluded record (§15.2.9: ended before the run's injected `now`, undisplaced from its persisted anchor). On matched branches a concluded record splits on **anchor equality**, a route-free test: the desired spec's source anchor equals the record's persisted anchor → same occurrence → `unchanged` (a past block is never updated, replaced, or metadata-patched, and routing is short-circuited for the role); anchors differ → the record matches nothing: the key falls through to the create branch when the desired span still lies ahead, and produces no write at all when it has already ended (an after-the-fact tidy-up cannot be padded) — the record staying as history either way. The concluded tests are why the comparator takes `now`.
+`compareDesiredAndObserved` takes planning outcomes as well as specs: it may only delete generated events whose parent planned successfully or was ruled ineligible (§17.4), or whose parent is absent from a **complete** scan (§15.2.3) — and never a concluded record (§15.2.9: ended before the run's injected `now`, undisplaced from its persisted anchor). On matched branches a concluded record splits on **anchor equality**, a route-free test: the desired spec's source anchor equals the record's persisted anchor → same occurrence → `unchanged` (a past block is never updated, replaced, or metadata-patched, and routing is short-circuited for the role); anchors differ → the record matches nothing: the key falls through to the create branch when the desired span still lies ahead — and when the desired span has already ended with no same-anchor companion observed, the provider emits no spec at all (§12.5's ended rule), so the comparator sees only different-anchor or anchorless companions of that role, stale and deleted subject to the lenient record test (a same-anchor non-record companion is observed by the provider too, which then emits the spec that restores it) — the record staying as history either way. The concluded tests are why the comparator takes `now`.
 
 Write operations take the observed event rather than an event ID, so the ownership marker and version can be verified at write time rather than trusted from read time (§16.5.1).
 
@@ -21,9 +21,16 @@ validateSettings(settings) -> ValidationResult
 parseDirectives(description) -> ParsedDirectives
 
 // Calendar
+// ORDERED upcoming-first across pages (7.2.1, 23.2): a forward segment
+// [pivot, observeEnd) is listed first, then a backward one
+// [observeStart, pivot), each orderBy startTime -- so a truncated
+// prefix holds the imminent appointments, not Calendar's unspecified
+// default page order; pivot is the chain's pinned `now`.
 // Deadline-aware: checks shouldStop between pages and returns the
 // retrieved prefix with scanComplete false when it fires -- truncation
 // is a first-class state downstream (7.2.1). RESUMABLE: nextPageToken is
+// an OPAQUE resume token (segment + Calendar page token, the segment
+// boundary itself a resumable point) the engine persists unread,
 // non-null exactly when the listing stopped early AT A RESUMABLE POINT
 // -- after a fetched page, or the untouched token of a never-attempted
 // resume; a fresh listing stopped before its first page has no token
@@ -34,8 +41,8 @@ parseDirectives(description) -> ParsedDirectives
 // the range instead of re-reading the same prefix until the cap. An
 // expired or rejected resumeToken falls back to a fresh scan, never a
 // thrown run
-listWindowEvents(calendarId, observeStart, observeEnd, shouldStop,
-                 resumeToken)
+listWindowEvents(calendarId, observeStart, observeEnd, pivot,
+                 shouldStop, resumeToken)
   -> { events: RawCalendarEvent[], scanComplete: boolean,
        nextPageToken: string | null, resumed: boolean }
 // resumed reports whether the resumeToken was HONORED: false ONLY
@@ -105,9 +112,25 @@ listGeneratedEventsPage(calendarId, pageToken)
 listGeneratedEventsUpdatedSince(calendarId, updatedMin, shouldStop)
   -> { events: ObservedGeneratedEvent[], scanComplete: boolean }
 createGeneratedEvent(spec) -> RawCalendarEvent
+// Every write against an observed event is CONDITIONAL (16.5.1):
+// If-Match on the observed ETag, or -- where the runtime cannot send
+// it -- an immediate marker re-read before the write. A 412 proves
+// only that the event changed, so the repository re-reads and splits:
+// marker gone -> OWNERSHIP_LOST (apply failure, not retried -- the
+// event is the user's now); marker intact -> CONCURRENT_EDIT (apply
+// failure, retryable -- stale snapshot, re-planned next run). A
+// pre-write re-read answering "marker gone" is OWNERSHIP_LOST; "no
+// event" (404 or cancelled tombstone) is the user's DELETION, never
+// ownership loss -- an ordinary CALENDAR_WRITE_FAILED that the next
+// run, no longer observing the block, converges past; any re-read
+// that THROWS is CALENDAR_READ_FAILED.
+// Either outcome on the
+// delete half of a replace aborts the replace. An unconditional update
+// or patch would re-stamp managed metadata onto an event the user just
+// un-managed (ADR 0009)
 updateGeneratedEvent(observed, spec) -> RawCalendarEvent
 patchGeneratedEventMetadata(observed, privateProperties) -> RawCalendarEvent
-deleteGeneratedEvent(observed) -> void   // conditional; see 16.5.1
+deleteGeneratedEvent(observed) -> void
 
 // Normalization and eligibility
 normalizeCalendarEvent(rawEvent) -> NormalizedEvent
@@ -158,7 +181,11 @@ getRouteDuration(from, to, requestContext) -> RouteResult
 // emits a spec carrying the 14.1 anchor and the record's observed
 // fields verbatim, no route resolved and the role omitted from
 // outcome.routes (fields never consulted: anchor equality classifies
-// unchanged first; the spec exists so the key stays desired) -- and
+// unchanged first; the spec exists so the key stays desired). Emits NO
+// spec for a role whose computed span has already ended (12.5's ended
+// rule -- outbound decided route-free, routing skipped; return needs
+// the route) nor for a zeroed one, recording each non-emission on
+// outcome.suppressed with its reason -- and
 // still passes
 // the cache TRIPLETS through to the routing client uninspected --
 // staleness policy stays in one place (13.3)
@@ -166,21 +193,32 @@ getGeneratedEventSpecs(context) -> PlanningOutcome
 
 // Context construction -- observed companions must be indexed before planning
 // so their route caches, observed fields, and anchors (the latter two
-// for the 15.2.9 freeze) are reachable (technical design 12.1.1). THE
-// INDEX makes the key-collision choice: a key shared by a concluded
-// record and a live block (the ~40h post-reschedule overlap 15.2.9
-// creates by design) indexes the LIVE, non-concluded companion -- it
-// owns the key's cache (the record's triplet describes a trip already
-// taken), and a live companion is never frozen; a key observed only as
-// a record indexes the record, which is what the freeze reads. A
-// last-wins collapse could leave the record shadowing the live block,
-// re-calling the broker every run for a role with a valid cache
-// (ADR 0011, REQ-PERF-015)
-indexByGeneratedKey(observedEvents) -> Map<string, ObservedGeneratedEvent>
+// for the 15.2.9 freeze) are reachable (technical design 12.1.1). The
+// index keeps EVERY companion of a key -- a collision is never
+// collapsed here, because the per-role choice needs the source's
+// anchors, which only companionsFor below has
+indexByGeneratedKey(observedEvents) -> Map<string, ObservedGeneratedEvent[]>
+// Assembles the DrivetimeContext (12.1) from NAMED fields -- never a
+// positional list, which a new field would silently shift -- and
+// attaches the routing client
+buildProviderContext(fields) -> DrivetimeContext
 // The resolved companions themselves, not just their cache triplets --
 // a triplet-only context could not recognize a concluded record
-// (12.1.1, 15.2.9); reads the index's live-over-record collapse above
-companionsFor(observedByKey, parentEventId)
+// (12.1.1, 15.2.9). Per role, in order: the UNDISPLACED same-anchor
+// companion -- persisted anchor equal to the role's 14.1 source anchor
+// AS AN INSTANT -- then any same-anchor one (co-observed copies of one
+// trip exist by design, 15.2.9; a displaced copy must not hide the
+// record), whatever its state: the trip's own block, the one 12.5's
+// ended rule and the freeze ask about (a different-anchor pick would
+// hide the block the spec exists to restore); with no same-anchor
+// companion, a LIVE
+// non-concluded one over a concluded record (the ~40h post-reschedule
+// overlap 15.2.9 creates by design -- the live block owns the key's
+// cache, and a record shadowing it would re-call the broker every run,
+// ADR 0011, REQ-PERF-015); a record only when nothing else carries the
+// key. Liveness is judged with the injected run clock `now`, the same
+// one the provider and comparator use
+companionsFor(observedByKey, event, now)
   -> { outbound: ObservedGeneratedEvent|null,
        return: ObservedGeneratedEvent|null }
 
@@ -214,19 +252,54 @@ findStrandedCompanions(window, settings, dryRun, shouldStop)
 // failing shrink classification (7.6)
 loadHighWater() / saveHighWater(observeEnd)                           // 7.6
 
+// The ONE desired-role derivation (12.5, 15.2.3): a pure function of an
+// ALREADY-COMPUTED EligibilityResult (overlap and 9.2 eligibility are
+// evaluated once, by the caller) -- which roles the source WANTS,
+// nothing about time of day. Both roles for every eligible source
+// today (the 6 grammar has no per-role directive); the one place such
+// a directive would land. The engine computes it and passes it as
+// DrivetimeContext.desiredRoles; the 15.2.3 evaluation computes it for
+// a fetched parent, so the two can never disagree about the role set
+routeFreeDesiredRoles(eligibility)
+  -> { outbound: boolean, return: boolean }
+// The directive override or the settings default (12.2) -- the one
+// place the effective buffer is derived; the planning loop and
+// endedSpanRouteFree both call it
+effectiveBufferMinutes(directives, settings) -> number
+// The time test of the 12.5 ended rule, shared by the provider and the
+// 15.2.3 evaluation: outbound "ended" iff source.start < now; return
+// "live" when source.end + buffer >= now, "ended" when source.end +
+// MAX_TRAVEL_MINUTES + buffer < now, "band" between (route needed) --
+// minutes converted to the implementation's time unit; buffer from
+// effectiveBufferMinutes
+endedSpanRouteFree(event, directives, settings, role, now)
+  -> "live" | "ended" | "band"
+
 // Comparison helpers
 // Takes the ObservedGeneratedEvent -- NOT its fields bag -- and reads
 // observed.observedFields against the spec's owned fields (15.2.1),
 // the same first-argument shape as every other observed-side helper
 ownedFieldsMatch(observed, desiredSpec) -> boolean
-// The 15.2.9 concluded-record test: observed end before `now` AND
-// observed times within the persisted anchor's companion span
-// (undisplaced, the 15.2.8 moved-test). The STRICT test -- a valid
-// anchor is required; the deletion paths additionally preserve an
-// ended ANCHORLESS companion conservatively (a stray that persists
-// beats erased history), while the write-side rules (matched-branch
-// anchor-equality freeze, 15.2.7 lookup exclusion) use the strict
-// test alone, so an anchorless match still restores normally. Shared
+// The 15.2.9 concluded-record test: observed end before `now`, the
+// persisted ANCHOR instant itself before `now` (a future meeting's
+// block dragged into the past is live state, not a record), AND
+// observed times within the anchor's companion span (undisplaced, the
+// 15.2.8 moved-test). PARENT-LESS -- companion and clock only, as the
+// deletion paths need -- so not by itself the write-side freeze, which
+// additionally requires the role NOT to be provably live
+// (endedSpanRouteFree anything but "live"; a just-ended meeting's
+// return block has a past anchor and a live span, and dragged into the
+// past it is a record here yet restored by the comparator). The STRICT test -- a valid anchor is required;
+// the deletion paths additionally preserve an ended ANCHORLESS
+// companion conservatively (a stray that persists beats erased
+// history), while the write-side rules (matched-branch anchor-equality
+// freeze, 15.2.7 lookup exclusion) use the strict test alone, so an
+// anchorless match follows the DESIRED span: a live desired span emits
+// the spec and the update restores it (however far into the past it
+// was dragged); an ended desired span with no undisplaced same-anchor
+// block emits none, and an ended anchorless block is simply left as
+// it is. Anchor
+// equality compares INSTANTS, never strings (15.2.9). Shared
 // by the comparator (deletion exceptions, the anchor-equality matched
 // rule, and the pre-planning routing short-circuit for same-anchor
 // roles), the 15.2.3 pass, the 15.2.6, 15.2.7, and 15.2.8 exceptions,
@@ -248,7 +321,7 @@ orderForPlanning(normalizedEvents, now) -> NormalizedEvent[]
 // Overlong-source cleanup gate (technical design 15.2.6): duration-keyed,
 // reason-agnostic; fires when either companion role is unobserved
 sourceExceedsDurationCap(event) -> boolean
-bothRolesObserved(observedByKey, parentEventId) -> boolean
+bothRolesObserved(observedByKey, parentEventId) -> boolean  // non-empty list per role
 
 // Fingerprint and comparison
 fingerprintSpec(input) -> string
@@ -325,7 +398,7 @@ elapsedExceedsPlanningBudget(runStartMs) -> boolean
 // of the 15.2.3 orphan point reads and the 15.2.8 daily sweep the
 // scan's completeness selects (mutually exclusive per run) -- deferral
 // behind a self-draining predecessor is transient -- and the 15.2.10
-// zero-emission lookups last of all: their chronic population never
+// suppressed-role lookups last of all: their chronic population never
 // drains, so ahead of the sweep they would starve it permanently,
 // while their own deferred work drains through the sweep-less
 // suppressed-work continuation. Fires at EVIDENCE_BUDGET_FRACTION of the
@@ -374,7 +447,9 @@ registryCodeOf(error) -> string | null
 // create; cancelled tombstones and PROVABLY concluded records among
 // the returns are passed over (15.2.7, 15.2.9 -- restoring a past
 // trip's record to a rescheduled occurrence would rewrite history; an
-// anchorless ended match still restores, rewriting its metadata); a
+// anchorless match restores while the desired span is live, rewriting
+// its metadata; an ended desired span emits no spec for it, nor for a
+// DISPLACED same-anchor block, which the orphan path deletes); a
 // same-key match
 // restores the dragged companion, CLASSIFIED
 // like an in-window match (15.2.5) -- an update ordinarily, a REPLACE
@@ -429,7 +504,10 @@ resolveOutOfWindowCompanions(diff, cleanup, dryRun, shouldStop) -> void
 // keeps its candidates (restoration owns them) unless the key is
 // already satisfied in-window AND the candidate is not a concluded
 // record (a stranded duplicate must be displaced -- a reschedule
-// leaves the record sharing the key with the new block by design);
+// leaves the record sharing the key with the new block by design); a
+// suppressed role's stray is the 15.2.10 lookup's, which reaches it
+// through an unbounded per-parent read no watermark gates, on this
+// run or its continuation, so the sweep states no second rule for it;
 // failed preserves --
 // restoration is create-driven and cannot reach a stray whose parent no
 // longer plans. Candidate selection skips keyless listing returns
@@ -466,7 +544,7 @@ loadSweepWatermark() / saveSweepWatermark(now)                    // 15.2.8
 // while the sweep's no-outcome parents are all outside the PLANNING
 // range (some read but unplanned, in the observation margin), where
 // OUTSIDE_WINDOW alone carries deletion authority;
-// directive-derived roles): no desired companion for the key ->
+// the desired role set): no desired companion for the key ->
 // delete, whatever page the parent sat on (a stale companion split
 // from its live source by pagination must not survive on liveness
 // alone); key still desired -> preserve this run, the parent's own
@@ -477,30 +555,40 @@ loadSweepWatermark() / saveSweepWatermark(now)                    // 15.2.8
 // off preserves the candidate and counts in suppressedDeletes
 resolveUnmatchedCompanions(diff, planningOutcomes, window, settings,
                            now, shouldStop) -> void
-// Zero-emission cleanup (15.2.10): for every PLANNED outcome, keys
-// whose role is PRESENT in PlanningOutcome.routes but ABSENT from
-// outcome.specs (the pair is the test -- a zero route with nonzero
-// buffer still emits a spec; an unrouted role proves nothing) and has
-// no LIVE observed companion in the window read (a key observed only
-// as a concluded record stays in -- the comparator preserves the
-// record and cannot reach an unobserved stale block sharing the key),
-// WHATEVER the route's
+// Suppressed-role cleanup (15.2.10):
+// for every PLANNED outcome, keys whose role the provider recorded on
+// PlanningOutcome.suppressed -- reason "zero" OR "ended" (both mean no
+// spec, no pending create, no restoration; an unrouted role appears in
+// neither list and proves nothing). A "zero" key enters when it has no
+// LIVE observed companion (a record-only key stays in -- the comparator
+// preserves the record and cannot reach an unobserved stale block
+// sharing the key); EVERY "ended" key enters -- the provider's
+// emission rule is the test (it records "ended" only with no
+// UNDISPLACED same-anchor companion in its context, 12.5), so the pass
+// repeats none, and the cost bound rests on 12.5, not on a filter
+// here (a rule admitting every ended role would enter every meeting
+// that ever ended, a dozen reads a run). WHATEVER the route's
 // provenance (a provenance filter would hide suppressed keys from
 // their own retry). Keys grouped by parent, ONE listCompanionsByParent
 // per PARENT -- the read returns both roles, and the canonical zero
 // case zeroes both roles of one parent, so per-key lookups would
 // double the reads; matches for
-// the zeroed roles join diff.deletes, deduplicated by id, preserved
+// the suppressed roles join diff.deletes, deduplicated by id, preserved
 // records excepted (15.2.9). Planned-parent deletion authority (17.3)
-// -- routing itself zeroed the role out of existence, which the
-// route-free 15.2.3 evaluation must preserve through. Runs on
+// -- the provider suppressed the role (zeroed by its route, or ended
+// with no undisplaced same-anchor companion), so desired state
+// provably contains no block for it; the route-free 15.2.3 evaluation
+// must preserve through both ambiguities. Matches follow 12.5's shared
+// rule: for an "ended" key the parent's UNDISPLACED same-anchor block
+// is kept (a record, or about to become one); every other match --
+// a displaced same-anchor block included -- is stale. Runs on
 // incomplete scans, daily runs, AND continuations; LAST on the
 // evidence tier, behind the sweep (23.1). shouldStop checked between
 // lookups; keys cut off count in suppressedDeletes -- the
 // deadline-starved engine branch invokes this same pass with the guard
 // already true (zero lookups, every pending key counted), so no second
 // population computation exists to drift (15.2.4, 15.2.10)
-resolveZeroEmissionCompanions(diff, planningOutcomes, observedByKey,
+resolveSuppressedRoleCompanions(diff, planningOutcomes, observedByKey,
                               now, shouldStop) -> void
 // Window-scan cursor persistence (7.2.1) -- User Properties, engine
 // policy, stubs live beside the other Status persistence, NOT in
@@ -536,22 +624,26 @@ resolveZeroEmissionCompanions(diff, planningOutcomes, observedByKey,
 // malformed, or unreadable cursors return null, degrading to a fresh
 // scan -- never a failed run (AC-RECOVERY-017)
 loadWindowScanCursor()
-  -> { pageToken, observeStart, observeEnd } | null
+  -> { pageToken, observeStart, observeEnd, pivot } | null  // pageToken opaque
 saveWindowScanCursor(cursor) / clearWindowScanCursor()
 // Whether a partial run's remaining causes are ones another pass can
 // drain: deferred operations, an application skipped for time, an
 // exhausted route budget, an unfinished scan chain, or -- on a run
 // whose scan covered the CURRENT window -- evidence-tier lookups cut
-// short (restoration, orphan resolution, or zero-emission cleanup --
+// short (restoration, orphan resolution, or suppressed-role cleanup --
 // never the daily-gated sweep) or planning cut short at its
 // tier (EXECUTION_BUDGET_EXCEEDED outcomes; a continuation re-reads
 // that window and retries them, while a chain slice's suppressed or
 // time-starved work instead waits for the slice's next fresh read --
 // 7.2.1's division of labor). A truncated SWEEP is never a cause: it
 // is daily-gated, so no continuation can re-run it (15.2.8). False
-// when the only cause is scan coverage after a FINISHED chain -- a fresh chain would re-tile
-// identical work (a pass justified by other causes may re-tile as a
-// side effect, bounded by the day's remaining allowance) (19.6, 23.4)
+// when the only cause is scan coverage after a FINISHED chain -- a
+// fresh chain would re-tile identical work (a pass justified by other
+// causes may re-tile as a side effect, bounded by the day's remaining
+// allowance) -- and false when the only cause is REJECTED WRITES
+// (failures alone, OWNERSHIP_LOST and CONCURRENT_EDIT included): the
+// next run of any kind re-plans them against a fresh read, so a pass
+// would drain nothing. Both record "notUseful" (4.11) (19.6, 23.4)
 continuationStillUseful(result, chainFinished) -> boolean
 // Hourly diagnostic allowance (20.3), RESERVE-then-REFUND: the reserve
 // writes the whole remaining allowance as used BEFORE any broker call
@@ -685,11 +777,12 @@ runManualReconciliation(e) -> ReconciliationResult
 // reset a concurrent successful run performs); skipped runs never reach
 // the counter, so no refund path exists -- the handler just re-enqueues.
 // Reset by any successful non-dry run; cap enforced at enqueue time; the
-// enqueue return value is how diagnostics.continuationCapReached (4.11)
+// enqueue return value is how the diagnostics.continuation disposition (4.11)
 // reaches the run result. BOTH call sites guard it -- trigger creation
 // can throw (per-user quota): the engine's partial-run call keeps the
 // truthful applied result and records a CONTINUATION_ENQUEUE_FAILED
-// warning, never a false failure record; the handler's skip-path
+// warning plus the "enqueueFailed" disposition (4.11), never a false
+// failure record; the handler's skip-path
 // re-enqueue logs the same code (log-only -- skipped results are never
 // persisted or rendered, so a warning on one reaches nobody). Deferred
 // work falls to the daily backstop (19.6)

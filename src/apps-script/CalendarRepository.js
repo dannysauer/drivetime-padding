@@ -4,12 +4,21 @@
  */
 
 /**
- * Lists every event in the observation range, following nextPageToken
- * until done OR shouldStop() fires, returning
- * { events, scanComplete, nextPageToken, resumed } -- nextPageToken
- * non-null exactly when the listing stopped early AT A RESUMABLE
- * POINT: after at least one fetched page (the token in hand), or the
- * untouched resume token of a never-attempted resume (below). A FRESH
+ * Lists every event in the observation range as TWO ORDERED SEGMENTS
+ * -- forward [pivot, observeEnd) first, then backward
+ * [observeStart, pivot), each with orderBy startTime -- so pages
+ * arrive upcoming-first and a truncated scan's prefix holds the
+ * imminent appointments rather than Calendar's unspecified default
+ * order; a single ascending query would front-load the margin behind
+ * `now` instead (Technical Design 7.2.1, 23.2). pivot is the chain's
+ * pinned `now`. Follows pagination until done OR shouldStop() fires,
+ * returning { events, scanComplete, nextPageToken, resumed } --
+ * nextPageToken an OPAQUE resume token this module encodes (segment
+ * plus Calendar page token; the segment boundary is itself a
+ * resumable point), non-null exactly when the listing stopped early
+ * AT A RESUMABLE POINT: after at least one fetched page (the token in
+ * hand), or the untouched resume token of a never-attempted resume
+ * (below). A FRESH
  * listing stopped before its first page has no token in existence and
  * returns null with scanComplete false -- nothing listed, nothing
  * resumable, the retry re-lists fresh. The ENGINE persists the token
@@ -47,7 +56,7 @@
  * to partial instead of a hard kill (section 7.2.1).
  */
 function listWindowEvents(
-    calendarId, observeStart, observeEnd, shouldStop, resumeToken) {
+    calendarId, observeStart, observeEnd, pivot, shouldStop, resumeToken) {
   throw new Error('Not implemented: Technical Design section 7.2.1');
 }
 
@@ -139,7 +148,18 @@ function createGeneratedEvent(spec) {
   throw new Error('Not implemented: Technical Design section 16');
 }
 
-/** Takes the observed event so the ETag can be carried. Section 16.5.1. */
+/**
+ * Takes the OBSERVED event, not a bare id, for the same reason the
+ * delete does (section 16.5.1): a user can strip the dtp marker between
+ * the read and the write, and an unconditional update would re-apply
+ * managed metadata to an event they just un-managed -- undoing ADR
+ * 0009's promise. Conditional per section 16.5.1, the single statement
+ * of the rule (If-Match or an immediate marker re-read; a 412 re-reads
+ * and splits OWNERSHIP_LOST from CONCURRENT_EDIT; a throwing re-read is
+ * CALENDAR_READ_FAILED). A target that no longer exists -- a 404, or a
+ * cancelled tombstone on the re-read -- is the user's deletion: an
+ * ordinary CALENDAR_WRITE_FAILED, never OWNERSHIP_LOST.
+ */
 function updateGeneratedEvent(observed, spec) {
   throw new Error('Not implemented: Technical Design section 16.5');
 }
@@ -148,7 +168,12 @@ function updateGeneratedEvent(observed, spec) {
  * Private-property write only -- no owned fields in the patch body, so the
  * event does not move and the user sees nothing. Required rather than
  * optional: skipping it leaves routeAt stale and every later run calls the
- * broker. Technical Design section 16.6.
+ * broker. Technical Design section 16.6. Conditional like every write
+ * against an observed event -- section 16.5.1 states the rule once; a
+ * patch that re-stamped dtp metadata onto an event the user un-managed
+ * would be exactly the ADR 0009 breach. A vanished target (404, or a
+ * cancelled tombstone on the re-read) is the user's deletion: ordinary
+ * CALENDAR_WRITE_FAILED, never OWNERSHIP_LOST.
  */
 function patchGeneratedEventMetadata(observed, privateProperties) {
   throw new Error('Not implemented: Technical Design section 16.6');
@@ -163,8 +188,11 @@ function patchGeneratedEventMetadata(observed, privateProperties) {
  * remove the event anyway -- breaching ADR 0009.
  *
  * Delete conditionally on the observed ETag where the runtime allows it,
- * otherwise re-read and re-verify the marker immediately before deleting.
- * Technical Design section 16.5.1.
+ * otherwise re-read and re-verify the marker immediately before deleting
+ * -- section 16.5.1 states the rule once for every write. A target that
+ * no longer exists (404 or cancelled tombstone) is the user's deletion:
+ * an ordinary CALENDAR_WRITE_FAILED the next run converges past, never
+ * an ownership failure.
  */
 function deleteGeneratedEvent(observed) {
   throw new Error('Not implemented: Technical Design section 16.5.1');

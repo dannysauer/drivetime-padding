@@ -249,8 +249,8 @@ The UI does not contain business logic. Manual synchronization calls the same en
 `CalendarRepository` hides Advanced Calendar API details and exposes business-oriented methods such as:
 
 ```javascript
-listWindowEvents(calendarId, observeStart, observeEnd, shouldStop,
-                 resumeToken)
+listWindowEvents(calendarId, observeStart, observeEnd, pivot,
+                 shouldStop, resumeToken)
 listGeneratedEventsBetween(calendarId, start, end, shouldStop)
 createGeneratedEvent(spec)
 updateGeneratedEvent(observed, spec)
@@ -964,7 +964,15 @@ function reconcile(options) {
           options.reason === "daily-trigger") {
         resume = loadWindowScanCursor();        // null when none stored
       }
-      const scanRange = resume || window;
+      // The pivot splits the read into a forward segment from `now`
+      // and a backward one, each ordered by start time, so pages arrive
+      // upcoming-first (technical design §7.2.1, §23.2). It is pinned
+      // with the range: every slice of one chain splits at one instant.
+      const scanRange = resume || {
+        observeStart: window.observeStart,
+        observeEnd: window.observeEnd,
+        pivot: now
+      };
       let nextPageToken = null;
       let resumed = false;
       ({ events: allEvents, scanComplete, nextPageToken, resumed } =
@@ -972,6 +980,7 @@ function reconcile(options) {
           "primary",
           scanRange.observeStart,
           scanRange.observeEnd,
+          scanRange.pivot,
           () => elapsedExceedsReadBudget(runStart),
           resume ? resume.pageToken : null
         ));
@@ -1038,7 +1047,8 @@ function reconcile(options) {
             ? { action: "save",
                 cursor: { pageToken: nextPageToken,
                           observeStart: scanRange.observeStart,
-                          observeEnd: scanRange.observeEnd } }
+                          observeEnd: scanRange.observeEnd,
+                          pivot: scanRange.pivot } }
             : null;
       } else if (scanComplete) {
         pendingCursorWrite = { action: "clear" };
@@ -1049,7 +1059,8 @@ function reconcile(options) {
           { action: "saveIfNone",
             cursor: { pageToken: nextPageToken,
                       observeStart: scanRange.observeStart,
-                      observeEnd: scanRange.observeEnd } };
+                      observeEnd: scanRange.observeEnd,
+                      pivot: scanRange.pivot } };
       }
     }
 
@@ -1089,7 +1100,9 @@ function reconcile(options) {
     // Index observed companions by parentEventId|role BEFORE planning, so
     // their route cache entries are reachable from the provider context.
     // Without this the cache cannot be consulted and every run calls the
-    // broker (ADR 0011, Technical Design 12.1.1).
+    // broker (ADR 0011, Technical Design 12.1.1). Every companion of a
+    // key is kept: the per-role choice is companionsFor's, below, which
+    // needs the source's anchors.
     const observedByKey = indexByGeneratedKey(observedGenerated);
 
     const desiredSpecs = [];
@@ -1190,9 +1203,7 @@ function reconcile(options) {
         // even when planning never runs or fails before specs exist -- the
         // card's effectiveBufferMinutes cannot be inferred from timestamps
         // that were never produced (technical design §17.6).
-        const effectiveBuffer = directives.bufferMinutes != null
-          ? directives.bufferMinutes
-          : settings.defaultBufferMinutes;
+        const effectiveBuffer = effectiveBufferMinutes(directives, settings);
 
         if (!eligibility.eligible) {
           planningOutcomes.set(event.id, {
@@ -1277,21 +1288,28 @@ function reconcile(options) {
         // through the title pattern gets ordinary companions (technical
         // design §12.6, AC-ELIG-007), and only the match can tell those
         // paths apart.
-        const context = buildProviderContext(
+        const context = buildProviderContext({
           event,
           directives,
           settings,
           origin,
-          eligibility.matchedBy,
+          matchedBy: eligibility.matchedBy,
+          // The desired role set, derived once here from the eligibility
+          // just evaluated (technical design §12.5) -- the provider never
+          // re-evaluates eligibility, and §15.2.3's evaluation derives
+          // the same set for a fetched parent.
+          desiredRoles: routeFreeDesiredRoles(eligibility),
           window,
           now,
           routeBudget,
           // The resolved companions themselves, not just their cache
           // triplets: getGeneratedEventSpecs applies the §15.2.9 freeze
-          // (strictly concluded + anchor equality) before routing, and a
-          // triplet-only context could not recognize the record.
-          companionsFor(observedByKey, event.id)
-        );
+          // (strictly concluded + anchor equality + not provably live)
+          // before routing, and a triplet-only context could not
+          // recognize the record. Per role the SAME-ANCHOR companion,
+          // whatever its state; else a live one over a record (§12.1.1).
+          observedCompanions: companionsFor(observedByKey, event, now)
+        });  // named fields: a new one can never shift its neighbours
 
         // Global, not namespaced: Apps Script files share one namespace
         // and the skeleton declares the bare function -- a qualified call
@@ -1516,8 +1534,16 @@ function reconcile(options) {
     // §15.2.4): one parent point read per unmatched companion. Absent
     // or cancelled proves the orphan and moves it into diff.deletes. A
     // LIVE parent is evaluated in place through the route-free
-    // desired-state tests its own slice would apply (planning-range
-    // overlap, eligibility, directive-derived roles): no desired
+    // desired-state tests its own slice would apply -- planning-range
+    // overlap, eligibility, the desired role set, through the shared
+    // routeFreeDesiredRoles helper. A role the source does not want:
+    // delete. A role it wants whose desired span endedSpanRouteFree
+    // reports ended (so the parent's slice emits no spec): §12.5's
+    // shared rule -- keep the parent's UNDISPLACED same-anchor block (a
+    // record, or about to become one), delete every other candidate as
+    // stale, a displaced same-anchor block included, lenient record
+    // test excepted. A role still live, or in the return band: preserve
+    // this run. In the first case, no desired
     // companion for the candidate's key means delete, whatever page the
     // parent sat on -- except a preserved record (technical design
     // §15.2.9's deletion-side test: concluded, or ended with an
@@ -1574,7 +1600,10 @@ function reconcile(options) {
     // (restoration owns them) unless the key is already satisfied
     // in-window AND the candidate is not a concluded record (a
     // reschedule leaves the record sharing the key with the new block
-    // by design); FAILED preserves. Deletes deduplicated by id like
+    // by design); a suppressed role's stray belongs to the §15.2.10
+    // lookup below, which reaches it through an unbounded per-parent
+    // read no watermark gates, on this run or its continuation -- one
+    // rule, one pass; FAILED preserves. Deletes deduplicated by id like
     // the overlong pass.
     //
     // Budget-aware on BOTH sides: gated on a fresh check (the restoration
@@ -1614,42 +1643,44 @@ function reconcile(options) {
       outOfTime = elapsedExceedsExecutionBudget(runStart);
     }
 
-    // Roles §12.5 zeroed out of existence produce no pending create,
-    // so neither restoration (create-driven) nor the route-free
-    // §15.2.3 evaluation can delete a stale block the scan never
-    // observed (technical design §15.2.10). Incomplete scans (the
+    // Roles §12.5 suppressed -- zeroed out of existence, or already
+    // ended -- produce no pending create, so neither restoration
+    // (create-driven) nor the route-free §15.2.3 evaluation can delete
+    // a stale block the scan never observed (technical design
+    // §15.2.10). Incomplete scans (the
     // split-page hazard), daily runs (the out-of-observation
-    // backstop), and continuations (the drain path for zero-emission
+    // backstop), and continuations (the drain path for suppressed-role
     // work deferred behind the sweep) perform the targeted per-parent
     // lookup for
-    // zero-emission keys with no LIVE observed companion (a key
-    // observed only as a concluded record stays in the population --
-    // the comparator preserves the record and cannot reach an
-    // unobserved stale block sharing the key); complete
+    // "zero" keys with no LIVE observed companion (a key observed
+    // only as a concluded record stays in the population -- the
+    // comparator preserves the record and cannot reach an unobserved
+    // stale block sharing the key) and EVERY "ended" key (the
+    // provider's emission rule is the test, §12.5); complete
     // calendar-trigger and manual scans skip it -- the comparator
     // handled the observed case, and the rest can wait a day. Evidence tier, LAST
     // on it -- after the sweep: this pass's chronic population (standing
-    // zero-emission keys with nothing to delete) is bounded but never
+    // suppressed-role keys with nothing to delete) is bounded but never
     // drains, so placing it ahead of the sweep could starve the sweep
     // permanently, while its own genuine work, if deferred behind the
     // sweep, drains through the suppressed-work continuation (which
     // runs no sweep). Preserved records are excepted from the
     // resulting deletes.
-    const zeroEmissionEligible = !options.eventIdFilter &&
+    const suppressedRoleEligible = !options.eventIdFilter &&
       (!scanComplete || options.reason === "daily-trigger" ||
        options.reason === "continuation");
-    if (zeroEmissionEligible && (options.dryRun || !outOfTime)) {
-      resolveZeroEmissionCompanions(diff, planningOutcomes, observedByKey,
+    if (suppressedRoleEligible && (options.dryRun || !outOfTime)) {
+      resolveSuppressedRoleCompanions(diff, planningOutcomes, observedByKey,
         now, () => elapsedExceedsEvidenceBudget(runStart));
       outOfTime = elapsedExceedsExecutionBudget(runStart);
-    } else if (zeroEmissionEligible) {
+    } else if (suppressedRoleEligible) {
       // Deadline before the pass: run it with the guard already true
       // -- zero lookups, every pending key counted into
       // suppressedDeletes through the single population contract, so
       // this starved branch cannot drift from the pass and the §15.2.4
       // diagnostics contract and §19.6 continuation cause hold here
       // too (§15.2.10).
-      resolveZeroEmissionCompanions(diff, planningOutcomes, observedByKey,
+      resolveSuppressedRoleCompanions(diff, planningOutcomes, observedByKey,
         now, () => true);
     }
 
@@ -1787,11 +1818,13 @@ function reconcile(options) {
           recordRunWarning("BOOKKEEPING_PERSIST_FAILED", persistError);
         }
       }
-      // Re-enqueue only while a continuation can still HELP: deferred
+      // Re-enqueue only while a continuation can still HELP -- never
+      // for rejected writes alone, which the next run of any kind
+      // re-plans against a fresh read (technical design §23.4): deferred
       // operations, an application skipped for time, an exhausted route
       // budget, an unfinished scan chain, or -- on a run whose scan
       // covered the current window -- evidence-tier lookups cut short
-      // (restoration, orphan resolution, or zero-emission cleanup) or
+      // (restoration, orphan resolution, or suppressed-role cleanup) or
       // planning cut short at its tier (a continuation re-reads that
       // window and retries them; a chain slice's suppressed or
       // time-starved work instead waits for the slice's next fresh
@@ -1804,27 +1837,37 @@ function reconcile(options) {
       // the deletes still suppressed by partial coverage need one
       // COMPLETE scan, which is the daily run's job (technical design
       // §19.6, §23.4).
-      if (result.status === "partial" &&
-          continuationStillUseful(result, chainFinished)) {
-        // {scheduled, capReached}: already-pending is fine (a pass is
-        // coming anyway); capReached is the state diagnostics must show.
-        // On diagnostics, not the result root -- the §17.2 contract
-        // exposes the flag as diagnostics.continuationCapReached, and
-        // status persistence reads the documented shape.
-        //
-        // Guarded: ScriptApp trigger creation can fail (per-user trigger
-        // quota, transient ScriptApp error), and the partial result in
-        // hand describes operations Calendar already ACCEPTED. Letting
-        // the throw reach the boundary would rebuild the run as a
-        // generic failure with an empty diff -- an affirmatively false
-        // record. The truthful partial result is kept, the missing
-        // continuation becomes a warning, and the deferred work waits
-        // for the daily backstop (REQ-TRIGGER-002).
-        try {
-          result.diagnostics.continuationCapReached =
-            enqueueContinuation().capReached;
-        } catch (enqueueError) {
-          recordRunWarning("CONTINUATION_ENQUEUE_FAILED", enqueueError);
+      if (result.status === "partial") {
+        if (continuationStillUseful(result, chainFinished)) {
+          // The continuation DISPOSITION is recorded here, where it is
+          // known, as diagnostics.continuation (technical design §4.11):
+          // "scheduled" (already-pending is fine -- a pass is coming
+          // anyway), "capReached" (the cap declined -- the state the
+          // card must show), "enqueueFailed". Status persistence copies
+          // it verbatim (§20.2) rather than deriving it from a boolean
+          // and a warning search, which a future default could turn
+          // into a false "scheduled".
+          //
+          // Guarded: ScriptApp trigger creation can fail (per-user
+          // trigger quota, transient ScriptApp error), and the partial
+          // result in hand describes operations Calendar already
+          // ACCEPTED. Letting the throw reach the boundary would rebuild
+          // the run as a generic failure with an empty diff -- an
+          // affirmatively false record. The truthful partial result is
+          // kept, the missing continuation becomes a warning plus the
+          // "enqueueFailed" disposition, and the deferred work waits for
+          // the daily backstop (REQ-TRIGGER-002).
+          try {
+            result.diagnostics.continuation =
+              enqueueContinuation().capReached ? "capReached" : "scheduled";
+          } catch (enqueueError) {
+            recordRunWarning("CONTINUATION_ENQUEUE_FAILED", enqueueError);
+            result.diagnostics.continuation = "enqueueFailed";
+          }
+        } else {
+          // A finished chain's remaining coverage is the daily run's job
+          // (§19.6); the card must say so rather than promise a pass.
+          result.diagnostics.continuation = "notUseful";
         }
       }
       // Guarded HERE, not just in the boundary: if this save threw into
@@ -1983,6 +2026,8 @@ Daily trigger: Installed
 Last successful sync: Today at 9:42 AM
 Last result: 12 checked, 2 created, 0 updated, 0 deleted
 ```
+
+The card also renders the persisted continuation **disposition** (technical design §20.2): `scheduled` — "Finishing remaining work shortly"; `capReached` — "Continuation limit reached — the daily run will finish the remaining work"; `enqueueFailed` — "Could not schedule the next pass — the daily run will finish the remaining work"; `notUseful` — "No follow-up pass needed — the next run picks up anything left" (a finished chain's coverage gap is the daily run's job; rejected writes are re-planned by the next run of any kind, so the line must not promise the daily run alone). A single boolean could not tell the last three from the first.
 
 Each trigger line renders one of three states from the health report (technical design §19.3): `Installed`, `Missing`, or — daily trigger only — `Scheduled hour out of date (repairing)`, the `stale` state — observable only after a contended or failed repair, since a homepage open runs the repair itself before rendering and an uncontended open therefore shows `Installed`. The Repair action is offered for `Missing` and `stale` alike; it runs the same replacement rule the daily firing runs automatically.
 

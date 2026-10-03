@@ -7,6 +7,23 @@
  * Enqueue and return.
  */
 
+/**
+ * Home card (Architecture 15.5, Technical Design 20.2). Renders the
+ * stored last-run record and the trigger health report, never the
+ * engine's return value (trigger handlers discard it). Two fields carry
+ * states the counts alone cannot: each trigger line is one of Installed
+ * / Missing / Scheduled hour out of date (repairing) from TriggerHealth
+ * (19.3), with the Repair action offered for the latter two; and a
+ * partial run's `continuation` disposition from the stored record (20.2)
+ * renders four distinct lines -- scheduled ("Finishing remaining work
+ * shortly"), capReached and enqueueFailed (each "the daily run will
+ * finish the remaining work" in its own words), and notUseful ("no
+ * follow-up pass needed -- the next run picks up anything left": a
+ * finished chain's gap is the daily run's, rejected writes any run's,
+ * so it must not promise the daily run alone) -- so the card never
+ * promises a continuation that will not fire. Null renders
+ * nothing.
+ */
 function buildHomeCard() {
   throw new Error('Not implemented: Architecture section 5.2');
 }

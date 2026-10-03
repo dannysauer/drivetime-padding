@@ -100,7 +100,7 @@ This matrix links requirement groups to architecture components, technical-desig
 | REQ-PERF-014 (clarified) | Route provenance distinguishes durable, ephemeral, broker | AC-CACHE-014 |
 | REQ-RECON-015 (clarified) | Overlong-source deletions deduplicated by event id | AC-RECOVERY-011 |
 | REQ-PERF-013 (specified) | Continuation worker and counter lifecycle | AC-CACHE-006 |
-| Planning order (TD §23.2, plumbed) | `orderForPlanning` applied before the route budget is spent | — arch pseudocode |
+| Planning order (TD §23.2, plumbed) | `orderForPlanning` applied before the route budget is spent; the window listing itself is segment-ordered (forward from the pinned pivot, then backward, `orderBy: startTime`) so the upcoming-first guarantee survives a truncated scan | AC-RECOVERY-017 |
 | Working-location plumbing | `listWorkingLocationEvents` called and passed to origin resolution | AC-ORIGIN-001, AC-ORIGIN-002 |
 | `workingLocation.fallbackToDefault` removed | Setting had no behavioral consumer; fallback is fixed behavior | AC-ORIGIN-003 |
 | Remove-all cleanup contract | Unbounded ownership scan, ordered teardown, reported partial failure | AC-CONFIG-004 |
@@ -150,7 +150,7 @@ This matrix links requirement groups to architecture components, technical-desig
 
 | Requirement | Covers | Scenario |
 |---|---|---|
-| §19.6 / Architecture §14.2 (aligned) | `continuationCapReached` recorded under `diagnostics`, matching §17.2 | — contract |
+| §19.6 / Architecture §14.2 (aligned) | The partial run's continuation outcome recorded under `diagnostics`, matching §17.2 — today the `continuation` disposition (`scheduled`, `capReached`, `enqueueFailed`, `notUseful`), which superseded the earlier boolean | AC-RECOVERY-018 |
 | REQ-RECON-017 | Daily anchor-selected sweep deletes companions of deleted sources | AC-RECOVERY-015 |
 | §13.2 (extended) | `anchor` persisted on every companion; sweeps cost nothing for history | AC-RECOVERY-015 |
 | §19.5 (serialized) | Manual enqueue check-and-create under the user lock; handlers collapse duplicate triggers | — TD §19.5 |
@@ -279,7 +279,7 @@ This matrix links requirement groups to architecture components, technical-desig
 |---|---|---|
 | §7.2.1 (application-gated cursor) | Window-scan cursor writes moved to the post-apply bookkeeping block — a run that throws or times out after its listing leaves the prior cursor, so the retry re-reads the slice instead of skipping it; the rejected dead token's clear stays eager at listing time, being skip-safe | AC-RECOVERY-017 |
 | §15.2.9 / §12.1.1 (freeze plumbing) | The planning context carries the resolved observed companion per role, so `getGeneratedEventSpecs` applies the concluded-record freeze before routing instead of spending broker budget on a role the comparator freezes anyway | AC-RECOVERY-015 |
-| §15.2.10 (zero-emission lookup) | Roles §12.5 zeroed out of existence produce no pending create, so restoration never fires; a targeted per-parent lookup on incomplete scans, daily runs, and continuations deletes the stale block the route-free evaluation must preserve | AC-RECOVERY-017 |
+| §15.2.10 (suppressed-role lookup) | Roles §12.5 suppresses — zeroed out of existence, or (since the twenty-fifth round) already ended with no undisplaced same-anchor companion — produce no pending create, so restoration never fires; a targeted per-parent lookup on incomplete scans, daily runs, and continuations deletes the displaced stale block the route-free evaluation must preserve | AC-RECOVERY-017 |
 | §17.1 (budget diagnostic) | A scoped diagnostic whose planning-tier boundary fires before the target is planned synthesizes `EXECUTION_BUDGET_EXCEEDED` instead of misreporting `EVENT_NOT_FOUND` for an event the targeted read just returned | AC-RECOVERY-013 |
 | §8.1 / §14.2 (per-event containment) | The normalizer is total and a planning throw becomes that source's `failed` outcome (`UNEXPECTED_ERROR`, logged, capping the run at `partial`) — one poisoned event cannot fail the run, which application-gated cursor writes require lest a deterministic throw freeze the scan chain at its slice | AC-RECOVERY-013 |
 
@@ -288,3 +288,13 @@ This matrix links requirement groups to architecture components, technical-desig
 | Requirement | Covers | Scenario |
 |---|---|---|
 | REQ-TIME-013 / §19.2 / §19.3 (schedule realignment) | The daily handler re-derives the maintenance hour from the user's current Calendar time zone at the next firing's instant on every run, and trigger repair replaces a daily trigger whose persisted installed hour (`dtp.dailyTrigger`) no longer matches — so a daylight-saving transition or time-zone change converges within one cycle with no user action, where previously only a homepage open or settings save could notice | AC-CONFIG-006 |
+
+## Requirements added in the twenty-fifth review round
+
+| Requirement | Covers | Scenario |
+|---|---|---|
+| §12.5 / §15.2.9 / §15.2.10 (ended rule) | A role whose computed span has already ended emits no spec, record or no record — the outbound test route-free — so a recently ended source with no companions creates no past-dated block; every non-emission is recorded on `PlanningOutcome.suppressed` with its reason, both reasons feed the §15.2.10 lookup, and the sweep deletes displaced candidates of suppressed roles instead of keeping them for a restoration that never comes | AC-OOO-013 |
+| §12.1.1 (companion resolution) | `indexByGeneratedKey` keeps every companion of a key and `companionsFor` chooses per role — the same-anchor companion first, then live over record, judged with the injected run clock — so the provider sees the trip's own block and the fallback agrees with the provider and comparator about concludedness | AC-CACHE-016 |
+| §20.2 (persisted continuation disposition) | The stored run record carries the partial run's continuation disposition (`scheduled`, `capReached`, `enqueueFailed`, `notUseful`), so the home card never promises a continuation that will not fire | AC-RECOVERY-018 |
+| §16.5.1 (conditional writes) | Every write against an observed event is conditional — `If-Match`, or an immediate marker re-read — and a rejected write re-reads to split `OWNERSHIP_LOST` (marker gone, not retried) from `CONCURRENT_EDIT` (marker intact, retryable); either outcome on the delete half of a replace aborts the whole replace | AC-RECOVERY-019 |
+| REQ-RECON-009 / §15.2.9 (anchor-past clause) | A companion is a record only when its anchor instant has itself passed — a future meeting's block dragged into the past is live state the update restores, never a frozen record that silently strips the meeting's padding; the write-side freeze additionally requires the role not to be provably live, so a just-ended meeting's still-wanted return block is restored too, while inside the return band the record stands in for the route and is never re-estimated | AC-OOO-013 |

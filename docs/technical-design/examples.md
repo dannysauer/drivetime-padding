@@ -66,7 +66,8 @@ Source event runs 10:00–11:00. Current time is 10:15.
 - outbound block 09:28–10:00 has already ended;
 - the reconciliation lookback places `planStart` at 02:15 and `observeStart` earlier still, so the outbound block is returned by the listing;
 - the source event is still planned, because its return block at 11:00–11:37 remains in the future and required;
-- desired and observed match in both directions;
+- the observed outbound block sits where its anchor put it and has ended: a **concluded record**, so the §15.2.9 freeze fires before routing — the role is emitted as the pinned spec, no broker call is spent, and the key classifies `unchanged` (had the user deleted that block, §12.5's ended rule would instead emit no spec at all, route-free, and create nothing);
+- the return key matches its observed block and classifies `unchanged`;
 - no duplicate outbound event is created.
 
 Without the lookback the outbound block would be invisible, its desired spec unmatched, and a duplicate created on every run.

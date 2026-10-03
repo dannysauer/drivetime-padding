@@ -101,10 +101,17 @@ function ownedFieldsMatch(observed, desiredSpec) {
 
 /**
  * The section 15.2.9 concluded-record test: observed end before the
- * run's injected `now` AND observed times within the persisted anchor's
- * companion span (undisplaced -- the 15.2.8 moved-test). A concluded
- * record is a trip that happened; every absence-of-desire deletion path
- * preserves it (comparator, 15.2.3 evaluation, 15.2.6 overlong lookup,
+ * run's injected `now`, the persisted ANCHOR instant itself before `now`
+ * (a future meeting's block dragged into the past is live state the
+ * update restores, not a record), AND observed times within the
+ * anchor's companion span (undisplaced -- the 15.2.8 moved-test).
+ * PARENT-LESS -- companion and clock only, as the deletion paths need -- so not
+ * by itself the write-side freeze, which additionally requires the role NOT to
+ * be provably live (endedSpanRouteFree anything but "live"): a just-ended
+ * meeting's return block has a past anchor and a live span, and dragged into
+ * the past it is a record here yet restored by the comparator (15.2.9). A
+ * concluded record is a trip that happened; every absence-of-desire deletion
+ * path preserves it (comparator, 15.2.3 evaluation, 15.2.6 overlong lookup,
  * 15.2.8 sweep), the fallback suppressedDeletes counter excludes it,
  * and only in-window duplicate collapse among copies of one trip
  * (13.5) and remove-all still delete one -- the 15.2.8
@@ -114,7 +121,11 @@ function ownedFieldsMatch(observed, desiredSpec) {
  * (conservative preserve -- a stray that persists beats erased
  * history); the write-side rules (matched-branch freeze, 15.2.7
  * lookup exclusion) use the strict test alone, so an anchorless match
- * still restores normally, rewriting its metadata whole (15.2.9).
+ * follows the DESIRED span: a live desired span emits the spec and the
+ * update restores it however far into the past it was dragged; an ended
+ * desired span with no undisplaced same-anchor block emits none, and
+ * an ended anchorless block is left as it is (15.2.9). Anchor equality compares
+ * INSTANTS, never strings.
  */
 function isConcludedRecord(observedEvent, now) {
   throw new Error('Not implemented: Technical Design section 15.2.9');
@@ -154,16 +165,25 @@ function orderForPlanning(events, now) {
  * undisplaced from its persisted anchor -- is never deleted on any
  * absence-of-desire path, and on matched branches splits on ANCHOR
  * EQUALITY (route-free): the desired spec's source anchor equals the
- * record's persisted anchor -> same occurrence -> `unchanged`, never
+ * record's persisted anchor AND the spec carries the provider's
+ * `pinned` flag (14 -- never inferred from the spec's times: a live
+ * role's computed spec can end before `now` too; an unpinned spec
+ * against a same-anchor record is a provably live role, a just-ended
+ * meeting's return block dragged into the past, restored by the update
+ * instead) -> same occurrence -> `unchanged`, never
  * update, replace, or metadata patch (a re-estimate or an edit to the
  * ended source must not rewrite a past block; routing is
  * short-circuited for the role); anchors differ -> the record matches
  * NOTHING -- the key falls through to create when the desired span
- * still lies ahead (a rescheduled occurrence gets fresh padding), and
- * produces NO write at all when the desired span has already ended (an
- * after-the-fact tidy-up cannot be padded; a past-dated create would
- * be manufactured history) -- and the record stays (Technical Design
- * 15.2.9); `now` is a parameter for those tests. Duplicate convergence
+ * still lies ahead (a rescheduled occurrence gets fresh padding); a
+ * desired span that has already ended never reaches the comparator --
+ * the PROVIDER emitted no spec for it (12.5's ended rule) -- so the
+ * comparator sees only different-anchor, anchorless, or DISPLACED
+ * same-anchor companions of the role (an undisplaced same-anchor one
+ * would have made the provider emit the spec that restores it), stale
+ * and deleted subject to the lenient record test
+ * (Technical Design 12.5, 15.2.9);
+ * `now` is a parameter for the concluded-record tests. Duplicate convergence
  * collapses live same-key copies (and co-observed concluded copies of
  * ONE trip -- same key and same anchor) but never a record against the
  * new occurrence's block.
@@ -182,13 +202,13 @@ function compareDesiredAndObserved(desiredSpecs, observedEvents,
  * nothing to consult and every run calls the broker -- and the anchors
  * and observed fields feeding the 15.2.9 freeze live there too.
  *
- * THE INDEX makes the key-collision choice: a key shared by a concluded
- * record and a live block (the post-reschedule overlap, 15.2.9)
- * indexes the LIVE, non-concluded companion -- it owns the key's
- * cache, and a live companion is never frozen; a record-only key
- * indexes the record, which the freeze reads. A last-wins collapse
- * could leave the record shadowing the live block, re-calling the
- * broker every run for a role with a valid cache entry.
+ * Keeps EVERY companion of a key (Map<key, ObservedGeneratedEvent[]>).
+ * A collision -- the post-reschedule record beside the new live block
+ * (15.2.9), or a stale duplicate beside the trip's own block -- is
+ * never collapsed here: the right pick per role depends on the
+ * source's 14.1 anchors, which only companionsFor has in hand, and the
+ * 15.2.10 membership tests ("no LIVE companion", "no SAME-ANCHOR
+ * companion") need the full list, not a representative.
  * Technical Design section 12.1.1, REQ-PERF-015.
  */
 function indexByGeneratedKey(observedEvents) {
@@ -199,15 +219,41 @@ function indexByGeneratedKey(observedEvents) {
  * The resolved observed companions per role for one source -- the whole
  * ObservedGeneratedEvent, not just its cache triplet: the provider
  * applies the 15.2.9 freeze (strictly concluded record + anchor
- * equality -> unchanged, routing short-circuited) before routing, and a
- * triplet-only context could not recognize the record. The triplets
- * still ride inside, passed to the routing client uninspected. Reads
- * the index's live-over-record key collapse (indexByGeneratedKey
- * above) -- the choice is the INDEX's, made before any lookup here.
+ * equality + ended desired span -> unchanged, routing short-circuited)
+ * before routing, and a triplet-only context could not recognize the
+ * record. The triplets still ride inside, passed to the routing client
+ * uninspected.
+ *
+ * THE CHOICE is made here, per role, from the source's own 14.1
+ * anchors (source.start for outbound, source.end for return): the
+ * UNDISPLACED companion whose persisted anchor equals the role's anchor
+ * AS AN INSTANT, then any same-anchor one (co-observed copies of one
+ * trip exist by design, 15.2.9; a displaced copy must not hide the
+ * record), whatever its state -- live, dragged, or a concluded record
+ * -- is the trip's own block, the one 12.5's ended rule and the freeze
+ * ask about (a different-anchor pick would hide the block the spec
+ * exists to restore). With no same-anchor companion: a LIVE,
+ * non-concluded one over a concluded record (the live block owns the
+ * key's cache; a record shadowing it would re-call the broker every
+ * run for a role with a valid entry -- ADR 0011, REQ-PERF-015), and a
+ * record only when nothing else carries the key. Liveness is judged
+ * with the injected run clock `now`, the same one the provider and
+ * comparator use, so a block crossing its end mid-run is never a
+ * record to one and live to another.
  * Technical Design sections 12.1.1, 15.2.9.
  */
-function companionsFor(observedByKey, parentEventId) {
+function companionsFor(observedByKey, event, now) {
   throw new Error('Not implemented: Technical Design section 12.1.1');
+}
+
+/**
+ * Assembles the DrivetimeContext (Technical Design 12.1) from NAMED
+ * fields -- never a positional list, which a new field would silently
+ * shift -- and attaches the routing client. The engine is the only
+ * caller; the provider never builds its own context.
+ */
+function buildProviderContext(fields) {
+  throw new Error('Not implemented: Technical Design section 12.1');
 }
 
 /**
@@ -258,30 +304,36 @@ function resolveOutOfWindowCompanions(diff, cleanup, dryRun, shouldStop) {
 }
 
 /**
- * Engine post-pass for INCOMPLETE scans (Technical Design 15.2.3,
- * 15.2.4): upgrades orphan deletion to per-event evidence. One
- * getEventById parent point read per unmatched observed companion --
- * absent or cancelled proves the orphan (the same rule the 15.2.8 sweep
- * trusts) and moves it into diff.deletes. A LIVE parent is evaluated in
- * place through the route-free desired-state tests its own slice would
- * apply (planning-range overlap against window; eligibility against
- * settings, which the sweep never needs because its no-outcome parents
- * all sit outside the PLANNING range -- some read but unplanned, in
- * the observation margin -- where position alone carries deletion
- * authority; a no-outcome parent HERE can sit inside the planning
- * range on an unread page, where only eligibility can decide;
- * directive-derived roles): no desired
- * companion for the key deletes, whatever page the parent sat on -- a
- * stale companion split from its live source by pagination must not
- * survive on liveness alone -- while a still-desired key preserves
- * this run (the parent's own slice restores it through the 15.2.7
- * lookup). A PRESERVED record (15.2.9's deletion-side test: concluded,
- * or ended with an unusable anchor) is spared without spending a read.
- * Checks
- * shouldStop BETWEEN reads; companions whose read never ran stay
- * preserved and count in diagnostics.suppressedDeletes. This is what
- * keeps cleanup alive on calendars too large for any single-budget
- * scan (7.2.1).
+ * Engine post-pass for INCOMPLETE scans (Technical Design 15.2.3, 15.2.4):
+ * upgrades orphan deletion to per-event evidence. One getEventById parent
+ * point read per unmatched observed companion -- absent or cancelled proves
+ * the orphan (the same rule the 15.2.8 sweep trusts) and moves it into
+ * diff.deletes. A LIVE parent is evaluated in place through the route-free
+ * desired-state tests its own slice would apply (planning-range overlap
+ * against window; eligibility against settings, which the sweep never needs
+ * because its no-outcome parents all sit outside the PLANNING range -- some
+ * read but unplanned, in the observation margin -- where position alone
+ * carries deletion authority; a no-outcome parent HERE can sit inside the
+ * planning range on an unread page, where only eligibility can decide;
+ * the desired role set -- evaluateEligibility on the fetched parent, then
+ * routeFreeDesiredRoles, the same derivation the engine feeds the provider):
+ * no desired companion for the key deletes, whatever page the
+ * parent sat on -- a stale companion split from its live source by pagination
+ * must not survive on liveness alone. For a desired role whose desired span
+ * endedSpanRouteFree reports "ended" (the time test shared with the provider,
+ * so the two cannot drift) the parent's slice emits no spec, and the candidate
+ * follows 12.5's shared rule: the parent's UNDISPLACED same-anchor block is
+ * kept (a record, or about to become one), every other companion of the role --
+ * a displaced same-anchor block included -- is stale and deleted unless the
+ * lenient record test spares it; a role still live, or in the return band,
+ * preserves the candidate this run -- the parent's own slice owns it, through
+ * the 15.2.7 lookup if it emits a spec, through the 15.2.10 lookup if it
+ * records the role ended. A PRESERVED record (15.2.9's
+ * deletion-side test: concluded, or ended with an unusable anchor) is spared
+ * without spending a read. Checks shouldStop BETWEEN reads; companions whose
+ * read never ran stay preserved and count in diagnostics.suppressedDeletes.
+ * This is what keeps cleanup alive on calendars too large for any
+ * single-budget scan (7.2.1).
  */
 function resolveUnmatchedCompanions(diff, planningOutcomes, window,
                                     settings, now, shouldStop) {
@@ -289,32 +341,43 @@ function resolveUnmatchedCompanions(diff, planningOutcomes, window,
 }
 
 /**
- * Zero-emission cleanup pass (Technical Design section 15.2.10). A role
- * the 12.5 zero rule emptied -- routing itself removed the role, so
- * quantized duration plus buffer is zero and no spec is emitted --
- * produces no pending create (restoration never fires) and must be
- * preserved by the route-free 15.2.3 evaluation, so a stale block the
- * scan never observed (split pagination slice, or beyond the
- * observation range) has no other deletion path.
+ * Suppressed-role cleanup pass (Technical Design section 15.2.10). A role
+ * the provider suppressed under 12.5 -- zeroed out of existence by its
+ * route, or already ended -- emits no spec, so it produces no pending
+ * create (restoration never fires) and the route-free 15.2.3 evaluation
+ * must preserve in its ambiguity; a displaced stale block the scan never
+ * observed (split pagination slice, or beyond the observation range)
+ * therefore has no other deletion path on a calendar that never
+ * completes a scan.
  *
- * Population: for every PLANNED outcome, keys whose role is PRESENT in
- * PlanningOutcome.routes but ABSENT from outcome.specs -- the pair is
- * the test (a zero route with nonzero buffer still emits a spec; an
- * unrouted role proves nothing) -- whatever the route's provenance (a
- * provenance filter would hide previously-suppressed keys from their
- * own retry), minus keys whose role already has a LIVE (non-record)
- * observed companion -- the comparator owns those; a key observed only
- * as a concluded record stays in the population, since the comparator
- * preserves the record and cannot reach an unobserved stale block
- * sharing the key (15.2.9), and the lookup's deletes except preserved
- * records so the record itself is never touched. Keys grouped by parent, ONE
- * listCompanionsByParent per PARENT -- the read returns both roles,
- * and the canonical zero case (a meeting at the origin with zero
- * buffer) zeroes both roles of one parent, so per-key lookups would
- * double the reads; matches for the zeroed roles join diff.deletes,
- * deduplicated by id against everything already queued, preserved
- * records excepted (15.2.9). Planned-parent deletion authority (17.3): desired state
- * provably contains no block for the role.
+ * Population: for every PLANNED outcome, keys whose role the provider recorded
+ * on PlanningOutcome.suppressed -- reason "zero" OR "ended": both mean no
+ * spec, no pending create, no restoration, so only this targeted lookup can
+ * reach a displaced stale block on a calendar that never completes a scan (an
+ * unrouted role appears in neither list and proves nothing) -- whatever the
+ * route's provenance (a provenance filter would hide previously-suppressed
+ * keys from their own retry). observedByKey holds EVERY companion per
+ * key (indexByGeneratedKey), so both membership tests below read the
+ * full list. A "zero" key enters when it has no LIVE
+ * observed companion (a record-only key stays in -- the comparator preserves
+ * the record and cannot reach an unobserved stale block sharing the key,
+ * 15.2.9); EVERY "ended" key enters -- the provider's emission rule is
+ * the test (it records "ended" only with no UNDISPLACED same-anchor
+ * companion in its context, 12.5), so this pass repeats none, and the
+ * cost bound rests on 12.5, not on a filter here. Matches follow 12.5's
+ * shared rule: for an "ended" key the parent's UNDISPLACED same-anchor
+ * block is kept (a record, or about to become one), every other match
+ * -- a displaced same-anchor block included -- is stale; for a "zero"
+ * key every match is stale. Deletes
+ * except preserved records, so a record is never touched. Keys grouped by
+ * parent, ONE
+ * listCompanionsByParent per PARENT -- the read returns both roles, and the
+ * canonical zero case (a meeting at the origin with zero buffer) zeroes both
+ * roles of one parent, so per-key lookups would double the reads; matches for
+ * the suppressed roles join diff.deletes, deduplicated by id against
+ * everything already queued, preserved records excepted (15.2.9).
+ * Planned-parent deletion authority (17.3): desired state provably contains no
+ * block for the role.
  *
  * Runs on incomplete scans, daily runs, AND continuations; LAST on the
  * evidence tier, behind the sweep (23.1) -- its chronic population of
@@ -327,47 +390,47 @@ function resolveUnmatchedCompanions(diff, planningOutcomes, window,
  * lookups, every pending key counted), so no second population
  * computation exists to drift (15.2.4).
  */
-function resolveZeroEmissionCompanions(
+function resolveSuppressedRoleCompanions(
     diff, planningOutcomes, observedByKey, now, shouldStop) {
   throw new Error('Not implemented: Technical Design section 15.2.10');
 }
 
 /**
  * Daily orphan sweep (Technical Design section 15.2.8). Lists
- * ownership-filtered events updated since the sweep watermark (a stray
- * was necessarily moved, and moves bump `updated`; cancelled tombstones
- * excluded), selects candidates by event id absent from the window read
- * plus anchor inside the maximal anchor band -- from planStart minus the
- * discovery slack and duration cap up to NOW (not planStart) plus
- * MAX_WINDOW_DAYS plus the duration cap, so a window shrink cannot hide
- * a stray and the lookback offset cannot reject a far-edge one --
- * then decides per parent
- * STATE via one point read: absent/cancelled parents delete (concluded
- * records excepted, 15.2.9 -- deleting a past meeting does not
- * un-happen the trip); live-but-out-of-window and in-window ineligible
- * parents delete only DISPLACED candidates (observed outside the
- * persisted anchor's companion span -- undisplaced candidates aged out
- * naturally and stay as calendar history, however recently a patch
- * bumped `updated`); planned parents keep their candidates unless an
- * in-window event already satisfies the key AND the candidate is not a
- * concluded record (a reschedule leaves the record sharing the key with
- * the new block by design); failed parents preserve. Takes the FULL
- * observed list (observedAll -- keyless corrupt events included, 8.1):
- * the id test must not read a window-observed keyless event, whose
- * deletion the engine already queued, as absent from the window.
- * Candidate selection skips keyless LISTING returns like anchorless
- * ones -- no parent to point-read, and the null-id read could throw,
- * deterministically failing every sweep over the same event (8.1). Runs
- * only on daily triggers with a COMPLETE window scan; shouldStop is checked between pages AND between parent point
- * reads (a bulk move can yield many candidates). Returns { events,
- * sweepComplete }; the ENGINE records sweepComplete in diagnostics and
- * writes the dtp.sweepCompletedAt watermark only after applyDiff
- * confirms deletedAll(events) -- application-gated like the shrink
- * high-water mark, because continuations cannot re-run the daily-gated
- * sweep and an application-blind advance would strand the found strays.
- * Takes the injected `now`: updatedMin, the anchor band, and the
- * watermark all derive from it, and the watermark stretches the bounds
- * over gaps of skipped or incomplete sweeps.
+ * ownership-filtered events updated since the sweep watermark (a stray was
+ * necessarily moved, and moves bump `updated`; cancelled tombstones excluded),
+ * selects candidates by event id absent from the window read plus anchor
+ * inside the maximal anchor band -- from planStart minus the discovery slack
+ * and duration cap up to NOW (not planStart) plus MAX_WINDOW_DAYS plus the
+ * duration cap, so a window shrink cannot hide a stray and the lookback offset
+ * cannot reject a far-edge one -- then decides per parent STATE via one point
+ * read: absent/cancelled parents delete (concluded records excepted, 15.2.9 --
+ * deleting a past meeting does not un-happen the trip); live-but-out-of-window
+ * and in-window ineligible parents delete only DISPLACED candidates (observed
+ * outside the persisted anchor's companion span -- undisplaced candidates aged
+ * out naturally and stay as calendar history, however recently a patch bumped
+ * `updated`); planned parents keep their candidates unless an in-window event
+ * already satisfies the key AND the candidate is not a concluded record (a
+ * reschedule leaves the record sharing the key with the new block by design),
+ * (a suppressed role's stray is the 15.2.10 lookup's, reached through
+ * an unbounded per-parent read no watermark gates, on this run or its
+ * continuation -- one rule, one pass); failed parents preserve. Takes the FULL
+ * observed list (observedAll -- keyless corrupt events included, 8.1): the id
+ * test must not read a window-observed keyless event, whose deletion the
+ * engine already queued, as absent from the window. Candidate selection skips
+ * keyless LISTING returns like anchorless ones -- no parent to point-read, and
+ * the null-id read could throw, deterministically failing every sweep over the
+ * same event (8.1). Runs only on daily triggers with a COMPLETE window scan;
+ * shouldStop is checked between pages AND between parent point reads (a bulk
+ * move can yield many candidates). Returns { events, sweepComplete }; the
+ * ENGINE records sweepComplete in diagnostics and writes the
+ * dtp.sweepCompletedAt watermark only after applyDiff confirms
+ * deletedAll(events) -- application-gated like the shrink high-water mark,
+ * because continuations cannot re-run the daily-gated sweep and an
+ * application-blind advance would strand the found strays. Takes the injected
+ * `now`: updatedMin, the anchor band, and the watermark all derive from it,
+ * and the watermark stretches the bounds over gaps of skipped or incomplete
+ * sweeps.
  */
 function sweepOutOfWindowCompanions(
     observedAll, planningOutcomes, window, now, shouldStop) {

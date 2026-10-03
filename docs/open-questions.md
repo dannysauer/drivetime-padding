@@ -54,12 +54,12 @@ Questions:
 | 1a | Whether `outOfOfficeProperties` can be patched on an existing OOO event — verified by **reading the value back** after the patch, not by request success alone: a patch Calendar accepts (200) but silently ignores would leave the owned-field mismatch permanently un-healable (patch rejected *or* ignored → realign by replacement) | TD §16.5, §15.2.1, §15.2.5 |
 | 2 | Whether `autoDeclineMode: declineNone` reliably prevents generated blocks from declining meetings | TD §16.2, REQ-ELIG-011 |
 | 3 | Whether explicit reminder suppression behaves consistently on OOO events | TD §16.3 |
-| 4 | Whether `showDeleted` + `singleEvents` is sufficient to detect all cancelled recurring instances | TD §7.3, AC-REC-003 |
+| 4 | Whether `showDeleted` + `singleEvents` is sufficient to detect all cancelled recurring instances — and whether `orderBy: "startTime"` (TD §7.2.1) returns cancelled instances, which may carry no `start`, at all and in a stable position | TD §7.2.1, §7.3, AC-REC-003 |
 | 5 | Whether extended properties survive on OOO events as they do on ordinary events | ADR 0009 — safety-critical |
-| 6 | Whether the Advanced Calendar service can send `If-Match` for conditional delete and patch | TD §16.5.1 — safety-critical |
+| 6 | Whether the Advanced Calendar service can send `If-Match` for conditional writes — delete, update, and metadata patch alike, every write against an observed event | TD §16.5.1 — safety-critical |
 | 7 | Exactly which fields a cancelled recurring tombstone carries when `showDeleted: true` | TD §8.2, §9.2 |
 
-Item 6 decides whether the deletion-safety boundary can be enforced atomically or only narrowed. If conditional delete is unavailable, the fallback — re-read and re-verify immediately before deleting — leaves a small residual race that must be documented rather than assumed away.
+Item 6 decides whether the ownership-safety boundary can be enforced atomically or only narrowed — for every write against an observed event, not deletes alone. If conditional writes are unavailable, the fallback — re-read and re-verify the marker immediately before each delete, update, and metadata patch — leaves a small residual race that must be documented rather than assumed away; where `If-Match` is available, a rejected write is re-read to tell ownership loss from a concurrent edit (TD §16.5.1).
 
 Item 5 is the one to test first. If OOO events cannot carry private extended properties, the deletion-safety boundary in ADR 0009 does not hold for the product's primary event type, and the design changes materially.
 

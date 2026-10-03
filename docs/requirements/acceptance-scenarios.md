@@ -53,8 +53,9 @@ The broker-call assertion is part of this scenario, not a separate concern. A ru
 **And** the outbound block 09:28–10:00 has already ended  
 **When** reconciliation runs at 10:15  
 **Then** the outbound block is still within the read window and observed  
+**And** the outbound block is a same-anchor concluded record, so the §15.2.9 freeze fires before routing: the role is emitted as the pinned spec (never suppressed), no broker call is spent on it, and the key classifies `unchanged`  
 **And** no duplicate outbound event is created  
-**And** the return block is preserved rather than treated as an orphan.
+**And** the return key matches its block as `unchanged`, preserved rather than treated as an orphan.
 
 ## AC-OOO-008: Route exceeds maximum supported travel
 
@@ -508,7 +509,8 @@ Creates and deletes both act on absence, and a truncated scan proves only that a
 
 **Given** a calendar whose observation range spans more pages than one execution budget can list  
 **When** a run truncates its window scan and schedules a continuation  
-**Then** the truncated run persists the listing cursor pinned to its observation range  
+**Then** the truncated run persists the listing cursor pinned to its observation range and pivot  
+**And** the listing itself is ordered upcoming-first across pages — the forward segment from the pivot first, then the backward one, each by start time — so the truncated prefix holds the imminent appointments rather than an unspecified subset (§23.2)  
 **And** the continuation resumes listing from that cursor instead of re-reading the same prefix  
 **And** successive passes plan, update, and — through the per-parent lookup — create for successive slices of the calendar  
 **And** unmatched companions in each slice are deleted only on per-parent evidence — a point read proving the parent absent or cancelled, or a fetched live parent evaluated to desire no companion for the key, so a stale companion split from its live source by a page boundary is still cleaned up — and preserved when the parent still desires the key or the read never ran  
@@ -516,7 +518,7 @@ Creates and deletes both act on absence, and a truncated scan proves only that a
 **And** when a chain is pending at daily time because its continuation could not be scheduled, the daily run resumes the chain rather than scanning fresh, and the deferred fresh-window pass completes within one daily cycle of the chain completing, in every case — two daily cycles *measured from the original deferral* when the resumed chain finishes within the day's allowance, the REQ-TRIGGER-002 carve-out for this compound failure (the daily sweep needs a complete scan, which a calendar this size never yields; its absence there is the design's accepted residual, not a failure of this bound)  
 **And** intervening calendar-trigger runs scan fresh without overwriting the chain's pending cursor  
 **And** a run that throws or times out after its listing never advances the cursor past its unapplied slice — cursor saves are application-gated, so a failed run's slice is re-read rather than skipped — while the skip-safe clear decisions still execute on a timed-out run (and a rejected dead token's eagerly, at listing time), so a stale chain cursor never captures the continuation a fresh complete scan schedules  
-**And** a role the zero rule emptied (§12.5 — routing itself removed the role) has its stale split-slice companion removed through the targeted zero-emission lookup, which needs no pending create and no complete scan  
+**And** a role the provider suppressed (§12.5 — zeroed out of existence by its route, or already ended with no undisplaced same-anchor companion observed) has its displaced stale split-slice companion removed through the targeted suppressed-role lookup, which needs no pending create and no complete scan  
 **And** a lost or expired cursor degrades to a fresh scan from the front, never to an error.
 
 Without the cursor, every continuation re-issues the same query from the first page, retrieves the same prefix, and truncates at the same depth — the chain reaches the continuation cap having repeated itself, and every source past the truncation point stays unreconciled indefinitely.
@@ -715,6 +717,16 @@ An ephemeral hit avoids the broker call, not the metadata patch. A boolean cache
 
 The ceiling bounds wire traffic. Counting logical calls instead would double the spend exactly when the broker is struggling.
 
+## AC-CACHE-016: A concluded record never shadows the live block's cache
+
+**Given** a source rescheduled after its trip, so a concluded record and a live block share a `parent|role` key for the observation overlap  
+**When** reconciliation indexes observed companions before planning  
+**Then** the per-role resolution selects the live block by the same-anchor rule — it is the add-on's own block for the new occurrence and carries the current source anchor — never the record  
+**And** the provider receives the live block's valid cache triplet and makes no broker call  
+**And** when no companion carries the current anchor (a second reschedule before the block was realigned), the fallback prefers a live companion over a record, judged with the run's injected clock, the same `now` the provider and comparator use  
+**And** when several companions carry the anchor, an undisplaced one is selected first, so a displaced copy can never hide the record or the block the spec exists to restore  
+**And** a block that crosses its end during the run is classified consistently by index, provider, and comparator.
+
 ## AC-CONFIG-004: Remove-all reaches events outside the window
 
 **Given** managed events exist both inside the observation range and far outside it (aged out, or beyond a shrunken horizon)  
@@ -780,6 +792,35 @@ Absence from `planningOutcomes` plus a complete scan means orphan. Sources skipp
 **And** no insert of a zero-length event is ever attempted.
 
 Calendar rejects zero-length events; without this rule every reconciliation would end `partial` on an insert that can never succeed.
+
+## AC-OOO-013: A recently ended source with no companions creates nothing
+
+**Given** an eligible source event that ended within the planning lookback, long enough ago that even the longest supported route plus its buffer would have ended (`source.end + MAX_TRAVEL_MINUTES + buffer < now`, minutes converted to the implementation's time unit)  
+**And** no companion is observed for it — a fresh installation, or the user deleted the blocks  
+**When** reconciliation runs  
+**Then** the provider emits no spec for either role, both decided route-free — the outbound block would end at `source.start`, the return block before `now` even at the travel cap — and spends no broker call  
+**And** no already-ended travel block is created  
+**And** the outcome is still `planned`, with both roles recorded as suppressed for reason `ended`  
+**And** a source that ended only minutes ago with a nonzero buffer keeps a **live** return role (`source.end + buffer ≥ now`, instants and durations in one time unit): it is routed normally and its block, still ahead, is created.
+
+**Given** the same ended source *with* observed companions  
+**When** reconciliation runs  
+**Then** an undisplaced companion is a concluded record: the §15.2.9 freeze fires before routing, its role is emitted as the pinned spec (not recorded as suppressed), and it classifies `unchanged`  
+**And** an undisplaced same-anchor companion the user had dragged a short distance, still live, makes the provider emit the spec, and the ordinary update restores it to its computed times (REQ-GEN-014)  
+**And** a same-anchor companion dragged *outside* its anchor's companion span is stale state like any different-anchor or anchorless block of the role: no spec is emitted for its sake and the orphan path deletes it on a complete scan, the §15.2.3, §15.2.8 and §15.2.10 passes elsewhere, the lenient record test excepted  
+**And** an edit to the ended meeting's location, or a route-cache miss, does not re-route a frozen role: the record stands in for the route, and the past block keeps its times.
+
+**Given** a *future* meeting whose outbound block the user dragged several hours into the past, so the block has ended yet still lies within its anchor's span  
+**When** reconciliation runs  
+**Then** the block is not a record — its anchor instant is still ahead — so the §15.2.9 freeze does not fire  
+**And** the desired span is live, the spec is emitted, the key matches, and the update restores the block to its computed times; the meeting keeps its padding.
+
+**Given** a meeting that ended five minutes ago with a ten-minute buffer, whose return block the user dragged an hour into the past — ended, undisplaced, and anchored to `source.end`, which is itself past  
+**When** reconciliation runs  
+**Then** the block is a record by the parent-less §15.2.9 test, yet the role is provably live (`source.end + buffer ≥ now`), so the freeze does not fire  
+**And** the role is routed, the computed spec is emitted, the key matches, and the update restores the block to its computed times — the still-wanted return padding is not silently stripped.
+
+A trip already taken cannot be padded; a fresh past-dated block would be manufactured history. The rule applies whether or not a historical companion exists — it previously fired only against a concluded record with a different anchor.
 
 ## AC-CONFIG-005: Diagnosing an event outside the window reports the reason
 
@@ -854,3 +895,27 @@ Restoration (AC-RECOVERY-012) is driven by a pending create, which requires a li
 **And** the block declines no unrelated meetings afterwards.
 
 Auto-decline mode is not a planning input, so the fingerprint cannot detect this. Like reminders (AC-RECOVERY-008), it is caught only because `outOfOfficeProperties` is in the owned-field set.
+
+## AC-RECOVERY-018: The stored record says what became of a partial run's continuation
+
+**Given** a non-dry run that ends `partial`  
+**When** its result is persisted  
+**Then** the stored record's `continuation` field carries the disposition — `scheduled` when a pass was enqueued or already pending, `capReached` when `MAX_CONSECUTIVE_CONTINUATIONS` declined it, `enqueueFailed` when the trigger write threw (`CONTINUATION_ENQUEUE_FAILED`), `notUseful` when no pass could drain what remains — a finished chain's coverage gap (the daily run's job) or rejected writes alone (re-planned by the next run of any kind)  
+**And** the home card renders each state distinctly, never promising a continuation that will not fire  
+**And** a non-partial run stores `null`.
+
+The trigger handler's return value is discarded, so the stored record is the only durable carrier; a single boolean would collapse three "no pass is coming" states into "not capped".
+
+## AC-RECOVERY-019: A write against a changed event never lands blind
+
+**Given** reconciliation has read a managed companion and queued an update, metadata patch, or delete for it  
+**And** the user edits that event before the write applies  
+**When** the write is attempted  
+**Then** it is conditional — `If-Match` on the observed ETag, or an immediate marker re-read where the runtime cannot send the header  
+**And** a rejected write is re-read: a stripped `dtp` marker records `OWNERSHIP_LOST` (not retried — the event is the user's now, and the next run plans the key against a fresh read), an intact marker records `CONCURRENT_EDIT` (retried next run against the fresh read)  
+**And** neither outcome re-stamps managed metadata onto the event or deletes it  
+**And** a target that has vanished (deleted by the user, or a cancelled tombstone) is never reported as ownership loss: it fails as an ordinary write failure, the run reports `partial`, and the next run — which no longer observes the block — converges on its own  
+**And** on the delete half of a replace, either outcome aborts the replace — the create half does not run  
+**And** the run reports `partial` with the failure counted.
+
+A 412 proves only that the event changed; reporting it as ownership loss would tell the user the add-on lost an event it still manages.
