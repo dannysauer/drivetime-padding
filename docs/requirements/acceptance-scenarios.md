@@ -1,0 +1,951 @@
+# Acceptance Scenarios
+
+This document provides behavior-oriented scenarios for the MVP. Scenario identifiers map to the requirements traceability matrix.
+
+---
+
+## AC-INSTALL-001: First-time setup
+
+**Given** a user has installed and authorized the add-on  
+**And** no settings exist  
+**When** the user opens the home card  
+**Then** the add-on displays default settings  
+**And** indicates that a default origin is required  
+**And** does not create generated events until configuration is valid.
+
+## AC-INSTALL-002: Trigger repair
+
+**Given** the user has valid settings  
+**And** the Calendar trigger is missing  
+**When** the user runs Repair automation  
+**Then** exactly one required Calendar trigger exists  
+**And** exactly one required daily trigger exists  
+**And** the UI reports success.
+
+---
+
+## AC-OOO-001: Create travel events for timed OOO event
+
+**Given** automation is enabled  
+**And** the default origin is configured  
+**And** a timed OOO event is within the planning window  
+**And** the event has a resolvable location  
+**And** outbound route duration is 20 minutes  
+**And** return route duration is 25 minutes  
+**And** the configured buffer is 7 minutes  
+**When** reconciliation runs  
+**Then** an outbound OOO event exists from 27 minutes before the source start until the source start  
+**And** a return OOO event exists from the source end until 32 minutes after the source end  
+**And** both generated events contain private ownership metadata.
+
+## AC-OOO-002: No duplicate writes
+
+**Given** the generated events from AC-OOO-001 match desired state  
+**When** reconciliation runs again without input changes  
+**Then** no generated event is created, updated, or deleted  
+**And** zero broker route calls are made, because both cached route entries are valid.
+
+The broker-call assertion is part of this scenario, not a separate concern. A run that makes ten route calls and writes nothing still costs money on every trigger firing.
+
+## AC-OOO-007: In-progress source event
+
+**Given** a timed OOO event running 10:00–11:00 with matching generated events  
+**And** the outbound block 09:28–10:00 has already ended  
+**When** reconciliation runs at 10:15  
+**Then** the outbound block is still within the read window and observed  
+**And** the outbound block is a same-anchor concluded record, so the §15.2.9 freeze fires before routing: the role is emitted as the pinned spec (never suppressed), no broker call is spent on it, and the key classifies `unchanged`  
+**And** no duplicate outbound event is created  
+**And** the return key matches its block as `unchanged`, preserved rather than treated as an orphan.
+
+## AC-OOO-008: Route exceeds maximum supported travel
+
+**Given** an eligible event whose location is an eight-hour drive from the resolved origin  
+**When** reconciliation runs  
+**Then** planning reports `ROUTE_TOO_LONG`  
+**And** no generated events are created for that source  
+**And** any pre-existing generated events for that source are preserved  
+**And** the event diagnostic card explains the destination is beyond the supported range.
+
+## AC-OOO-003: Source time changed
+
+**Given** a source event has matching generated events  
+**When** the user moves the source event by one hour  
+**And** reconciliation runs  
+**Then** the existing generated events are updated to surround the new time  
+**And** no duplicate companions remain.
+
+## AC-OOO-004: Source duration changed
+
+**Given** a source event has matching generated events  
+**When** the user extends the source end time  
+**And** reconciliation runs  
+**Then** the outbound event remains aligned to the source start  
+**And** the return event begins at the new source end.
+
+## AC-OOO-005: Source location changed
+
+**Given** a source event has matching generated events  
+**When** the source location changes  
+**And** route durations change  
+**Then** both generated events are recalculated and updated.
+
+## AC-OOO-006: Source deleted
+
+**Given** a source event has managed outbound and return events  
+**When** the source is deleted  
+**And** reconciliation runs  
+**Then** both managed generated events are deleted.
+
+---
+
+## AC-ELIG-001: All-day event ignored
+
+**Given** an all-day OOO event has a location  
+**When** reconciliation runs  
+**Then** no generated events are created  
+**And** diagnostics state that all-day events are unsupported.
+
+## AC-ELIG-002: Missing location ignored
+
+**Given** a timed OOO event has no Calendar location  
+**When** reconciliation runs  
+**Then** no generated events are created  
+**And** diagnostics state that a location is required.
+
+## AC-ELIG-003: Ordinary event ignored by default
+
+**Given** a timed ordinary event has a location  
+**And** optional subject matching is disabled  
+**When** reconciliation runs  
+**Then** no generated events are created.
+
+## AC-ELIG-004: Ordinary event included by pattern
+
+**Given** optional subject matching is enabled with `^OOO:`  
+**And** an ordinary timed event is named `OOO: Dentist`  
+**And** it has a location  
+**When** reconciliation runs  
+**Then** ordinary outbound and return events are generated  
+**And** they are not converted to OOO event type.
+
+## AC-ELIG-005: Per-event off directive
+
+**Given** an otherwise eligible event  
+**And** its description contains `drivetime padding: off`  
+**When** reconciliation runs  
+**Then** no desired generated events exist for that source  
+**And** any previously managed companions are deleted.
+
+---
+
+## AC-DIRECTIVE-001: Buffer override
+
+**Given** an eligible source event  
+**And** default buffer is 7 minutes  
+**And** the description contains `drivetime padding: buffer=15m`  
+**When** reconciliation runs  
+**Then** 15 minutes is added to each direction rather than 7 minutes.
+
+## AC-DIRECTIVE-002: Home origin override
+
+**Given** default and home origins are configured  
+**And** the description contains `drivetime padding: origin=home`  
+**When** reconciliation runs  
+**Then** both route calculations use the home origin.
+
+## AC-DIRECTIVE-003: Invalid directive
+
+**Given** an eligible source event  
+**And** the description contains `drivetime padding: buffer=banana`  
+**When** reconciliation runs  
+**Then** the invalid directive is ignored  
+**And** the default buffer is used  
+**And** a non-fatal warning is available in diagnostics.
+
+---
+
+## AC-ORIGIN-001: Working from home
+
+**Given** working-location selection is enabled  
+**And** the source time overlaps a home working-location event  
+**And** home origin is configured  
+**When** reconciliation runs  
+**Then** home origin is used.
+
+## AC-ORIGIN-002: Working from office
+
+**Given** working-location selection is enabled  
+**And** the source time overlaps an office working-location event  
+**And** office origin is configured  
+**When** reconciliation runs  
+**Then** office origin is used.
+
+## AC-ORIGIN-003: Missing selected origin falls back
+
+**Given** working-location resolves to office  
+**And** office origin is not configured  
+**And** default origin is configured  
+**When** reconciliation runs  
+**Then** default origin is used.
+
+## AC-ORIGIN-004: Missing default origin blocks writes
+
+**Given** no default origin is configured  
+**When** reconciliation runs  
+**Then** no generated events are created or deleted  
+**And** the run reports invalid configuration.
+
+---
+
+## AC-REC-001: Simple recurring instances
+
+**Given** a weekly recurring eligible event has four instances inside the window  
+**When** reconciliation runs  
+**Then** each instance has one outbound and one return event  
+**And** all generated events are non-recurring.
+
+## AC-REC-002: Move one instance
+
+**Given** a weekly recurring event has generated companions  
+**When** one instance is moved  
+**And** reconciliation runs  
+**Then** only the moved instance's generated companions change.
+
+## AC-REC-003: Cancel one instance
+
+**Given** a weekly recurring event has generated companions  
+**When** one instance is cancelled  
+**And** reconciliation runs  
+**Then** only that instance's generated companions are deleted.
+
+## AC-REC-004: Change one instance location
+
+**Given** a weekly recurring event has generated companions  
+**When** one instance receives a different location  
+**And** reconciliation runs  
+**Then** only that instance's routes and companions are recalculated.
+
+## AC-REC-005: Window advances
+
+**Given** a recurring instance is initially outside the 60-day window  
+**When** the daily window advances to include it  
+**Then** the next reconciliation creates its generated companions.
+
+---
+
+## AC-RECOVERY-001: Generated event deleted manually
+
+**Given** a source event remains eligible  
+**And** its outbound generated event is manually deleted  
+**When** reconciliation runs  
+**Then** the outbound event is recreated  
+**And** the matching return event is not duplicated.
+
+## AC-RECOVERY-002a: Moved event whose fingerprint still matches
+
+**Given** a generated event that the user has dragged to a different time  
+**And** the source event is unchanged, so the desired fingerprint equals the stored fingerprint  
+**When** reconciliation runs  
+**Then** the observed owned fields are compared against the desired specification  
+**And** the mismatch is detected despite the matching fingerprint  
+**And** the event is restored to its desired time.
+
+Calendar preserves private extended properties through a user edit, so the stored fingerprint survives exactly the tampering it would need to detect. A fingerprint-only comparison would classify this as `unchanged` and silently fail AC-RECOVERY-002.
+
+## AC-RECOVERY-002: Generated event moved manually
+
+**Given** a source event remains eligible  
+**And** a generated event is manually moved  
+**When** reconciliation runs  
+**Then** the event is restored to desired time.
+
+## AC-RECOVERY-003: Metadata removed
+
+**Given** a generated-looking event has had all Drivetime Padding metadata removed  
+**When** reconciliation runs  
+**Then** that event is not deleted based on title  
+**And** a new managed event is created if required.
+
+## AC-RECOVERY-004: Route broker temporary failure
+
+**Given** a source event remains eligible  
+**And** valid generated events already exist  
+**When** the route broker returns a transient error  
+**Then** existing generated events are preserved  
+**And** the run reports a planning error  
+**And** a later reconciliation retries.
+
+## AC-RECOVERY-005: Partial write failure
+
+**Given** neither generated event exists  
+**When** outbound creation succeeds and return creation fails  
+**Then** the run reports partial success  
+**And** the next reconciliation creates the missing return event without duplicating outbound.
+
+---
+
+## AC-CACHE-001: Expired cache, immaterial change
+
+**Given** generated events whose cached route entries are older than 24 hours  
+**And** the broker now returns 1455 seconds where it previously returned 1440  
+**When** reconciliation runs  
+**Then** both values quantize to 1500 seconds  
+**And** the fingerprint is unchanged  
+**And** the diff records a **metadata patch**, not an update and not `unchanged`  
+**And** the patch body contains only the route cache triplet — `routeHash`, `routeSecs`, and `routeAt` — so a missing or mismatched hash is repaired in the same write  
+**And** the event's start, end, summary, event type, and transparency are not written  
+**And** a subsequent run within 24 hours makes zero broker calls.
+
+The final assertion is the point of the scenario. Classifying this as `unchanged` and skipping the write would leave `routeAt` permanently stale, so every later run would call the broker again — reintroducing exactly the unbounded cost the cache exists to prevent. The write is required; what makes it safe is that the user sees nothing.
+
+## AC-CACHE-002: Selective invalidation
+
+**Given** eligible events resolving to a mix of the default origin and the home origin  
+**When** the user changes only the home origin  
+**Then** route cache entries for home-origin events are invalidated  
+**And** cache entries for default-origin events remain valid and cause no broker calls.
+
+## AC-CACHE-003: Route budget prevents stampede
+
+**Given** more eligible events than `MAX_ROUTE_CALLS_PER_RUN` allows after a settings change invalidates every cache entry  
+**When** reconciliation runs  
+**Then** the run stops planning at the ceiling and reports `partial`  
+**And** unplanned events retain their existing generated events rather than having them deleted  
+**And** subsequent runs drain the remainder.
+
+## AC-CACHE-004: Diagnostic card budget
+
+**Given** a user has opened diagnostic cards enough times to reach the hourly route ceiling  
+**When** another diagnostic card is opened for an unplanned event  
+**Then** eligibility, directives, and resolved origin are still displayed  
+**And** no broker call is made  
+**And** the card reports that timing is temporarily unavailable.
+
+## AC-OOO-010: Long-running in-progress source
+
+**Given** a timed OOO source event running 01:00–18:00 with matching generated events  
+**And** the current time is 12:00, so the source started before the 8-hour lookback  
+**When** reconciliation runs  
+**Then** the source is planned, because it overlaps the planning range  
+**And** it is **not** reported `OUTSIDE_WINDOW`  
+**And** its return block at 18:00 is preserved rather than deleted as ineligible.
+
+A start-time containment test would fail this scenario, and because ineligibility carries deletion authority the failure would delete a needed return block mid-appointment.
+
+## AC-REC-006: Cancelled tombstone without timestamps
+
+**Given** a cancelled recurring instance returned by `showDeleted: true`  
+**And** the tombstone carries only identity, recurrence linkage, and original start — no `start` or `end`  
+**When** eligibility is evaluated  
+**Then** cancellation is recognized before any timestamp is read  
+**And** normalization does not throw on the missing values  
+**And** the reason is `CANCELLED_EVENT`, granting deletion authority  
+**And** the instance's companions are deleted.
+
+## AC-RECOVERY-006: Source moved outside the observation range
+
+**Given** generated events whose source has been moved far beyond `observeEnd`  
+**And** the scan completes successfully  
+**When** reconciliation runs  
+**Then** the companions are treated as orphaned and deleted  
+**And** they are not preserved indefinitely on the grounds that their parent was not evaluated.
+
+**Given** the same state but a scan truncated by pagination failure or execution budget  
+**When** reconciliation runs  
+**Then** the companions are preserved  
+**And** the run records `scanComplete: false`.
+
+## AC-RECOVERY-007: Marker removed between read and write
+
+**Given** a generated event queued for deletion  
+**And** a concurrent client removes its `dtp` marker after the read but before the write  
+**When** the diff is applied  
+**Then** the delete does not remove the event  
+**And** the run records the conflict rather than silently succeeding.
+
+## AC-CACHE-007: Corrupt cached duration is not trusted
+
+**Given** a generated event whose `routeHash` matches and whose `routeAt` is fresh  
+**And** whose `routeSecs` holds a negative, non-numeric, or non-integer value  
+**When** reconciliation runs  
+**Then** the entry is treated as absent  
+**And** the broker is called  
+**And** no companion time is derived from the corrupt value.
+
+## AC-CACHE-008: Diagnostics warm an ephemeral cache
+
+**Given** an eligible event with no generated events yet  
+**When** the diagnostic card is opened twice within the ephemeral cache TTL  
+**Then** the first open calls the broker and writes the ephemeral cache  
+**And** the second open makes no broker call  
+**And** neither open creates a Calendar event.
+
+## AC-OOO-011: Extending only the source end
+
+**Given** a source event with matching outbound and return blocks  
+**When** the user extends only the source end time  
+**Then** the return block is updated  
+**And** the outbound block is **not** written, because its fingerprint does not include the source end.
+
+## AC-ELIG-007: Out of Office inclusion disabled
+
+**Given** an otherwise eligible real OOO event with a location  
+**And** `eligibility.includeOutOfOffice` is false  
+**And** title-pattern matching is disabled  
+**When** reconciliation runs  
+**Then** the reason is `OUT_OF_OFFICE_DISABLED`, not `TITLE_PATTERN_NO_MATCH`  
+**And** no generated events are created  
+**And** any existing companions for that source are deleted, because the source is ineligible rather than failed.
+
+**Given** the same event  
+**And** title-pattern matching is enabled with a pattern its title matches  
+**When** reconciliation runs  
+**Then** the event qualifies through the pattern  
+**And** the companions are ordinary events, not `outOfOffice`, because the provider received `matchedBy: "titlePattern"` and keys the type on the match rather than the source type.
+
+The toggle governs automatic OOO treatment, not just inclusion. Keying the companion type on the source's event type would emit exactly the OOO blocks the user switched off.
+
+## AC-ELIG-008: Blank summary does not match a broad pattern
+
+**Given** a timed OOO event with a location and an empty summary  
+**And** title-pattern matching is enabled with a pattern that matches the text `Untitled event`  
+**When** eligibility is evaluated  
+**Then** matching is performed against the raw empty summary  
+**And** the event does not qualify through the pattern.
+
+**Given** the same event qualifying through its OOO event type instead  
+**When** generated events are produced  
+**Then** their subjects use the display fallback  
+**And** read `[Drivetime Padding] Travel to Untitled event`.
+
+## AC-CACHE-009: Provider can reach the observed cache
+
+**Given** a source event whose companions carry valid `routeHash`, `routeSecs`, and `routeAt`  
+**When** reconciliation plans that source  
+**Then** the planning context receives those cache entries keyed by role  
+**And** the routing client reuses them  
+**And** zero broker calls are made  
+**And** each `RouteResult` reports `source: "durable"`.
+
+This scenario exists because the cache is only reachable if observed companions are indexed before planning. An implementation that builds the provider context from the source event alone passes every other cache scenario in this document while calling the broker on every run.
+
+## AC-RECOVERY-008: Reminders re-enabled on a travel block
+
+**Given** a generated travel block created with reminders suppressed  
+**And** the user enables a 10-minute popup reminder on it  
+**And** the source event is otherwise unchanged, so the fingerprint still matches  
+**When** reconciliation runs  
+**Then** the owned-field comparison detects the reminder difference  
+**And** the event is updated to restore suppression  
+**And** the user does not receive an alert for the travel block on the next run.
+
+Reminder state is not a planning input, so the fingerprint cannot detect this. It is caught only because reminders are in the owned-field set — the same reason a manual time change is caught.
+
+## AC-CACHE-010: Route age survives the ephemeral cache
+
+**Given** the diagnostic card warms the ephemeral cache for an unplanned event at 09:00  
+**And** reconciliation consumes that entry at 12:00 and creates the companions  
+**When** the durable cache entry is written  
+**Then** `routeAt` records 09:00, the time the broker produced the duration  
+**And** not 12:00, the time the entry was read  
+**And** the entry expires 24 hours after 09:00 rather than after 12:00.
+
+Stamping the read time would let a duration live up to one ephemeral TTL longer than `ROUTE_CACHE_MAX_AGE_HOURS` permits.
+
+## AC-CONFIG-002: Reducing the planning window
+
+**Given** `windowDays` is 180  
+**And** generated events exist for a source event 90 days out  
+**When** the user reduces `windowDays` to 7  
+**And** reconciliation runs  
+**Then** the ownership-filtered cleanup pass reads the span between the new horizon and the previous high-water mark  
+**And** the companions 90 days out are deleted  
+**And** a stranded companion the run also matched to a planned key (restoration, or co-observation under a pinned scan cursor) is realigned inside the window instead of deleted  
+**And** the high-water mark is lowered only after every stranded event is **resolved** — deleted, or realigned by an applied write; a failed or deferred realignment holds the mark exactly like a failed deletion.
+
+**Given** the same shrink but a cleanup pass that fails partway  
+**When** reconciliation runs again  
+**Then** the high-water mark is still high  
+**And** the remaining stranded companions are found and deleted.
+
+Without the high-water mark the contracted observation range never reads those events, so they would survive until the rolling window grew back out to them — roughly 82 days here, during which the setting appears to do nothing.
+
+## AC-CACHE-011: Reschedule costs no broker calls
+
+**Given** a source event with matching companions and valid route cache entries  
+**When** the user moves the event two hours later without changing its location  
+**And** reconciliation runs  
+**Then** both companions are updated to surround the new time  
+**And** zero broker calls are made, because the route input hash excludes source times  
+**And** both refreshed companions retain their cached durations.
+
+Rescheduling is the most common calendar edit. If it cost two broker calls, the cache would only protect calendars nobody touches.
+
+## AC-CACHE-012: Corrupt hash is repaired, not just refreshed
+
+**Given** a generated event whose `routeHash` is missing or corrupted while its visible fields are correct  
+**When** reconciliation runs  
+**Then** the cache entry fails validation and the broker is called once per direction  
+**And** the metadata patch persists `routeHash`, `routeSecs`, and `routeAt` together  
+**And** the next run makes zero broker calls.
+
+Patching only the duration and timestamp would leave the bad hash in place, so the entry would fail validation again on every subsequent run — a freshly stamped cache that never becomes usable.
+
+## AC-RECOVERY-009: Incomplete scan does not create duplicates
+
+**Given** a source event with existing companions  
+**And** an observation scan that fails after reading the source but before reaching its return block  
+**When** reconciliation runs  
+**Then** the run records `scanComplete: false`  
+**And** the pending create for the seemingly missing return block is resolved through the unbounded per-parent companion lookup, which finds the existing block — it is **updated**, never duplicated (classified through the same update-versus-replace rules as an in-window match)  
+**And** creates the budget-cut lookup pass never resolved are withheld from application (`suppressedCreates`) while everything the pass did resolve still applies  
+**And** orphan deletion proceeds only for unmatched companions with per-parent evidence: a point read proving the parent absent or cancelled, or a fetched live parent evaluated to desire no companion for the key; a live parent still desiring the key preserves its companion this run  
+**And** updates and metadata patches for events that were read proceed normally  
+**And** the run reports `partial`.
+
+Creates and deletes both act on absence, and a truncated scan proves only that an event was not reached — not that it does not exist. Both upgrade to per-event evidence: the create's parent lookup is complete for that parent whatever the scan covered, and the delete's parent point read proves absence the same way the daily sweep's absent-parent rule does.
+
+## AC-RECOVERY-017: Continuations advance through a calendar too large for one scan
+
+**Given** a calendar whose observation range spans more pages than one execution budget can list  
+**When** a run truncates its window scan and schedules a continuation  
+**Then** the truncated run persists the listing cursor pinned to its observation range and pivot  
+**And** the listing itself is ordered upcoming-first across pages — the forward segment from the pivot first, then the backward one, each by start time — so the truncated prefix holds the imminent appointments rather than an unspecified subset (§23.2)  
+**And** a timed event spanning the pivot is listed once — owned by the forward segment and filtered from the backward one — so no source is planned twice and no companion is indexed as two copies; an all-day or end-less return is listed at most once per slice, harmlessly  
+**And** the continuation resumes listing from that cursor instead of re-reading the same prefix  
+**And** successive passes plan, update, and — through the per-parent lookup — create for successive slices of the calendar  
+**And** unmatched companions in each slice are deleted only on per-parent evidence — a point read proving the parent absent or cancelled, or a fetched live parent evaluated to desire no companion for the key, so a stale companion split from its live source by a page boundary is still cleaned up — and preserved when the parent still desires the key or the read never ran  
+**And** a chain longer than one day's continuation allowance survives the episode boundary: the daily run resets the allowance and resumes the pending cursor  
+**And** when a chain is pending at daily time because its continuation could not be scheduled, the daily run resumes the chain rather than scanning fresh, and the deferred fresh-window pass completes within one daily cycle of the chain completing, in every case — two daily cycles *measured from the original deferral* when the resumed chain finishes within the day's allowance, the REQ-TRIGGER-002 carve-out for this compound failure (the daily sweep needs a complete scan, which a calendar this size never yields; its absence there is the design's accepted residual, not a failure of this bound)  
+**And** intervening calendar-trigger runs scan fresh without overwriting the chain's pending cursor  
+**And** a run that throws or times out after its listing never advances the cursor past its unapplied slice — cursor saves are application-gated, so a failed run's slice is re-read rather than skipped — while the skip-safe clear decisions still execute on a timed-out run (and a rejected dead token's eagerly, at listing time), so a stale chain cursor never captures the continuation a fresh complete scan schedules  
+**And** a role the provider suppressed (§12.5 — zeroed out of existence by its route, or already ended with no undisplaced same-anchor companion observed) has its displaced stale split-slice companion removed through the targeted suppressed-role lookup, which needs no pending create and no complete scan  
+**And** a lost or expired cursor degrades to a fresh scan from the front, never to an error.
+
+Without the cursor, every continuation re-issues the same query from the first page, retrieves the same prefix, and truncates at the same depth — the chain reaches the continuation cap having repeated itself, and every source past the truncation point stays unreconciled indefinitely.
+
+## AC-ORIGIN-005: Place ID origin survives the return route
+
+**Given** the effective origin is configured as a Place ID  
+**When** both routes are calculated  
+**Then** the return request carries the Place ID with its type intact as the destination endpoint  
+**And** the return cache entry is keyed on the typed endpoint pair  
+**And** the Place ID is never flattened to an address string.
+
+## AC-CACHE-005: Buffer change costs no broker calls
+
+**Given** eligible events with valid route cache entries  
+**When** the user changes only `defaultBufferMinutes`  
+**Then** no cache entry is invalidated, because the route input hash excludes the buffer  
+**And** zero broker calls are made  
+**And** generated events are updated, because the buffer changes event times and therefore the fingerprint.
+
+## AC-CACHE-006: Partial run continues without waiting a day
+
+**Given** an origin change invalidating more route directions than `MAX_ROUTE_CALLS_PER_RUN` allows  
+**When** reconciliation runs and stops at the ceiling  
+**Then** the run reports `partial`  
+**And** a continuation is scheduled rather than the work deferring to the next daily run  
+**And** the continuation completes the remaining events  
+**And** events already processed cost no broker calls, because their cache entries are now valid  
+**And** consecutive continuations stop at the documented cap.
+
+## AC-OOO-009: Source event straddling the far window edge
+
+**Given** a timed source event starting shortly before `planEnd` and ending after it  
+**And** matching generated events already exist  
+**When** reconciliation runs  
+**Then** the source is planned, because its start falls inside the planning range  
+**And** its return block — which begins after `planEnd` — is still observed  
+**And** no duplicate return event is created.
+
+Without the observation range extending past `planEnd`, `timeMax` would exclude the return block while still returning its source, and a duplicate would be created on every run. This is the mirror image of AC-OOO-007.
+
+## AC-ELIG-006: Overlong timed source event
+
+**Given** a timed source event lasting more than `MAX_SOURCE_DURATION_MINUTES`  
+**When** eligibility is evaluated  
+**Then** the reason is `SOURCE_TOO_LONG`  
+**And** no generated events are created.
+
+## AC-CONFIG-001: Malformed persisted settings
+
+**Given** User Properties containing the string `"false"` where `eligibility.titlePatternEnabled` expects a boolean  
+**When** settings are loaded  
+**Then** validation fails with a type error for that field rather than treating the value as truthy  
+**And** write-mode reconciliation is blocked  
+**And** dry-run diagnostics still run so the user can see the problem.
+
+**Given** a non-string `origins.default.value`  
+**When** settings are loaded  
+**Then** validation fails before any route hashing is attempted, rather than throwing inside a trigger.
+
+**Given** instead a stored document whose `schemaVersion` is `-1`, `null`, or the string `"2"`; or a valid old version whose migration chain is missing an intermediate entry; or a migration that throws on a structurally partial old document or returns without advancing the version  
+**When** settings are loaded  
+**Then** every one of those states is reported as a structural `INVALID_SETTINGS` error on `schemaVersion` naming the version the chain could not get past — never a throw inside a trigger and never an unterminated migration loop —  
+**And** the settings card offers the reset-to-defaults path.
+
+**Given** instead `dtp.settings` holding truncated or otherwise malformed JSON  
+**When** settings are loaded  
+**Then** the parse failure is caught and reported as a structural `INVALID_SETTINGS` error rather than throwing before validation can run  
+**And** the settings card offers the same reset-to-defaults path.
+
+**Given** instead no stored settings document at all  
+**When** settings are loaded  
+**Then** the defaults apply directly — a fresh install is not a validation failure.
+
+## AC-INSTALL-003: Trigger verification
+
+**Given** a fresh Marketplace installation  
+**When** installation completes  
+**Then** the required Calendar and daily triggers exist  
+**And** each executes under the installing user's authorization context  
+**And** the home card reports both as installed.
+
+> Depends on Prototype Spike 1. If Marketplace-installed add-ons cannot create installable triggers, this scenario and the architecture behind it must be redesigned.
+
+## AC-DRYRUN-001: Dry run
+
+**Given** an eligible event has no generated companions  
+**When** dry-run reconciliation executes  
+**Then** the result reports two creates  
+**And** Calendar remains unchanged  
+**And** stored automation state — the last-run record, the window high-water mark, and the continuation counter — is unchanged, so a preview never alters how a later real run classifies or reports.
+
+---
+
+## AC-PRIV-001: Broker payload minimization
+
+**Given** a route request is made  
+**When** the broker request is inspected  
+**Then** it contains origin, destination, mode, and optional correlation data only  
+**And** contains no event title, description, attendee, or recurrence data.
+
+## AC-SEC-001: Invalid broker authentication
+
+**Given** a broker request has invalid authentication  
+**When** the broker receives it  
+**Then** the broker rejects it before calling Google Maps  
+**And** records an authentication-failure metric without logging secrets.
+
+---
+
+## AC-ELIG-009: Qualification path changes the companion event type
+
+**Given** a source event whose companions were created as `outOfOffice` events  
+**And** the user disables `includeOutOfOffice` while the source still matches the title pattern  
+**When** reconciliation runs  
+**Then** each companion is deleted and recreated as an ordinary event  
+**And** no patch attempts to change `eventType` in place  
+**And** the run counts one replacement per companion, not an unrelated delete and create.
+
+Calendar declares `eventType` immutable after creation. A patch carrying a different type fails identically on every run, leaving the companion permanently wrong.
+
+## AC-RECOVERY-010: A rejected write is reported, not absorbed
+
+**Given** a reconciliation diff proposing two creates  
+**And** Calendar rejects one of them  
+**When** the run completes  
+**Then** the stored last-run record counts one create and one failed write  
+**And** the run status is `partial`, not `success`  
+**And** the failure's error record appears in the result.
+
+Status is built from what Calendar accepted, not from what the diff proposed. Self-healing on the next run excuses the missing rollback, never the missing report.
+
+## AC-RECOVERY-011: Overlong source's stale companions are removed
+
+**Given** a source event that had companions created while it was eligible  
+**And** the source is later extended beyond `MAX_SOURCE_DURATION_MINUTES` — as a timed event or by conversion into a multi-day all-day event  
+**And** enough time passes that at least one companion falls before `observeStart` while the source remains in the observation range  
+**When** reconciliation runs  
+**Then** the source is classified ineligible (`SOURCE_TOO_LONG` or `ALL_DAY_EVENT`)  
+**And** its companions are located by ownership and parent metadata outside the window bounds  
+**And** all of them are deleted in that same run  
+**And** no event id appears in the delete list twice, even when one companion was also queued by the ordinary comparison.
+
+Definitive ineligibility carries deletion authority, but the window scan cannot reach companions the overlong source stranded behind `observeStart`. The lookup keys on the duration, not the classification reason — the all-day check runs before the duration check, so a multi-day all-day conversion never reports `SOURCE_TOO_LONG` — and fires when either role is missing, so a half-stranded pair is cleaned in one run.
+
+## AC-CACHE-013: Zero-second route is cached and reused
+
+**Given** a source event whose origin and destination resolve to coincident endpoints  
+**And** the broker returns a zero-second duration  
+**When** reconciliation runs twice within the carrying tier's lifetime — the durable cache age limit when a companion exists to carry the entry, or the shorter ephemeral TTL when the zero-padding rule (§12.5) emitted no companions  
+**Then** the second run makes no broker call  
+**And** the cached zero is accepted by validation rather than treated as absent  
+**And** the entry is served from the tier that carries it.
+
+Zero is a legitimate duration. A truthiness check on the cached value would reject it before validation, forcing a broker call and metadata rewrite on every run. The two tiers have different lifetimes: the ephemeral tier is capped by CacheService well under `ROUTE_CACHE_MAX_AGE_HOURS` (§20.3), so a companion-less zero route re-fetched after ephemeral eviction is conformant — §12.5's expected-case behavior is two broker calls per ephemeral TTL, not per durable lifetime, and because CacheService is best-effort the hard bound is the per-run ceiling (REQ-PERF-010 exception), not the TTL. A test must not assert the TTL figure as an invariant.
+
+## AC-CONFIG-003: Companion spanning the reduced horizon is not double-handled
+
+**Given** `windowDays` is reduced  
+**And** a managed companion starts before the new `observeEnd` but ends after it  
+**When** reconciliation runs  
+**Then** the shrink cleanup pass excludes that companion  
+**And** only the ordinary comparison decides whether it is updated, unchanged, or deleted  
+**And** no delete and update are queued for the same event in one run.
+
+`Events.list` bounds `timeMin` on event end, so a boundary-spanning event is visible to both the observation read and the cleanup scan; without the start filter, a cleanup delete races the comparator's repair and the delete-first write order wins.
+
+## AC-ELIG-010: Special event types cannot qualify by title pattern
+
+**Given** a timed `fromGmail` event with a location whose title matches the enabled pattern  
+**When** eligibility is evaluated  
+**Then** the reason is `UNSUPPORTED_EVENT_TYPE`  
+**And** the title pattern is never consulted  
+**And** no generated events are created.
+
+Pattern inclusion is limited to ordinary events. Without a type gate ahead of pattern matching, `UNSUPPORTED_EVENT_TYPE` is unreachable and special-type sources silently gain default-typed companions.
+
+## AC-CACHE-014: Ephemeral hit still repairs the durable cache
+
+**Given** a diagnostic has warmed the ephemeral cache for a route  
+**And** the companion's durable cache entry is expired  
+**When** reconciliation plans that source  
+**Then** no broker call is made  
+**And** the `RouteResult` reports `source: "ephemeral"`  
+**And** the durable triplet is patched onto the companion, so the run after ephemeral eviction also makes no broker call.
+
+An ephemeral hit avoids the broker call, not the metadata patch. A boolean cached/not-cached flag conflates the tiers and strands the stale durable entry.
+
+## AC-CACHE-015: Transient retries spend the route budget
+
+**Given** a run whose broker calls each receive a 503 and succeed on the immediate retry  
+**When** the run reaches the per-run route ceiling  
+**Then** the total HTTP attempts made, including retries, do not exceed `MAX_ROUTE_CALLS_PER_RUN`  
+**And** remaining events are left unplanned as `ROUTE_BUDGET_EXCEEDED`  
+**And** their existing companions are preserved.
+
+The ceiling bounds wire traffic. Counting logical calls instead would double the spend exactly when the broker is struggling.
+
+## AC-CACHE-016: A concluded record never shadows the live block's cache
+
+**Given** a source rescheduled after its trip, so a concluded record and a live block share a `parent|role` key for the observation overlap  
+**When** reconciliation indexes observed companions before planning  
+**Then** the per-role resolution selects the live block by the same-anchor rule — it is the add-on's own block for the new occurrence and carries the current source anchor — never the record  
+**And** the provider receives the live block's valid cache triplet and makes no broker call  
+**And** when no companion carries the current anchor (a second reschedule before the block was realigned), the fallback prefers a live companion over a record, judged with the run's injected clock, the same `now` the provider and comparator use  
+**And** when several companions carry the anchor, an undisplaced one is selected first, so a displaced copy can never hide the record or the block the spec exists to restore  
+**And** a block that crosses its end during the run is classified consistently by index, provider, and comparator.
+
+## AC-CONFIG-004: Remove-all reaches events outside the window
+
+**Given** managed events exist both inside the observation range and far outside it (aged out, or beyond a shrunken horizon)  
+**And** the user confirms "Remove all generated events and disable automation"  
+**When** the action runs  
+**Then** the card action returns within the callback budget, having **replaced the stored settings with the disabled tombstone** — the schema-complete defaults with `enabled: false`, removing configured origin addresses, under the lock, before any deletion work begins — removed the triggers, and enqueued the cleanup worker  
+**And** the worker deletes every managed event in budget-bounded passes, including events no window-bounded scan would read, re-enqueueing itself until the scan completes — never writing the settings document itself  
+**And** cumulative progress is persisted and shown by the home card while cleanup is running — including during an actively executing pass, whose own trigger is already consumed: the card reads the liveness stamp's freshness rather than misreporting a live pass as failed  
+**And** the origin addresses are therefore gone on **every** cleanup outcome — success, failure, or a worker that never wins the lock again  
+**And** the final record reports cumulative deletions and the outstanding failures from the last complete walk — a truncated final pass leaves the prior count standing, marked possibly stale by `scanComplete: false`, and a transient failure a later complete pass retried successfully leaves no residue — with a retry offered when any remain or the scan never completed  
+**And** a later manual synchronization or trigger repair does not regenerate events or triggers.
+
+"All" must mean all: the ordinary scans are bounded by the rolling window, and a cleanup built on them silently misses history and stranded events. And the deletions cannot live in the card callback — its execution budget is fixed while the user's history is not, and a timeout mid-cleanup would leave events and personal settings behind at exactly the moment the user is preparing to uninstall.
+
+## AC-RECOVERY-012: Companion dragged outside the window is restored
+
+**Given** a source event with a managed return block  
+**And** the user drags that return block months into the future, beyond `observeEnd`  
+**When** reconciliation runs with a complete scan  
+**Then** no new return block is created  
+**And** the moved managed event is located by ownership and parent metadata without time bounds  
+**And** it is updated back to the desired time.
+
+Duplicate convergence cannot help here: one copy is outside every range the ordinary read covers. The create path must look before it leaps. The restoration match is classified like an in-window match: when the desired `eventType` changed while the companion sat out of range, the match becomes a **replacement** rather than an update — an update patch on the immutable field would be rejected on every run.
+
+## AC-RECOVERY-013: Execution cutoff does not orphan unplanned sources
+
+**Given** a run whose observation scan completed  
+**And** planning's time-tier boundary is reached partway through the planning loop  
+**When** the run stops planning and applies its diff  
+**Then** every unprocessed source carries a `failed` planning outcome (`EXECUTION_BUDGET_EXCEEDED`)  
+**And** none of their existing companions are deleted as orphans  
+**And** the run reports `partial`.
+
+Absence from `planningOutcomes` plus a complete scan means orphan. Sources skipped for time must be marked, or the degradation path deletes travel blocks because the run was slow.
+
+**Given** a scoped diagnostic run whose planning-tier boundary fires before the opened event's iteration runs  
+**When** the diagnostic completes  
+**Then** the card reports `EXECUTION_BUDGET_EXCEEDED` — the run gave up on the event — never `EVENT_NOT_FOUND` for an event the targeted read just returned.
+
+**Given** a source event whose planning deterministically throws (malformed data the provider cannot process)  
+**When** reconciliation runs  
+**Then** the throw is contained per event: that source carries a `failed` outcome (`UNEXPECTED_ERROR`), logged, with its `AppErrorRecord` folded into the run's errors  
+**And** its existing companions are preserved like any planning failure  
+**And** the rest of the run proceeds, reporting at best `partial` — never `success` over the unplanned source  
+**And** the window-scan chain is never frozen at the poisoned event's slice: the run completes and its application-gated cursor advances normally.
+
+## AC-RECOVERY-014: A run-wide failure is recorded, not swallowed
+
+**Given** persisted settings that fail validation  
+**When** a trigger fires reconciliation  
+**Then** the run returns a structured result with status `failed` and an `INVALID_SETTINGS` error  
+**And** the stored last-run record reflects that failure  
+**And** the home card does not continue to display the previous run's success.
+
+## AC-OOO-012: Coincident endpoints with zero buffer produce no blocks
+
+**Given** an eligible source event whose origin and destination coincide (zero-second route)  
+**And** the effective buffer is 0 minutes  
+**When** reconciliation runs  
+**Then** no companion is created for either direction  
+**And** any existing companions for that source are deleted as orphans of a planned parent  
+**And** no insert of a zero-length event is ever attempted.
+
+Calendar rejects zero-length events; without this rule every reconciliation would end `partial` on an insert that can never succeed.
+
+## AC-OOO-013: A recently ended source with no companions creates nothing
+
+**Given** an eligible source event that ended within the planning lookback, long enough ago that even the longest supported route plus its buffer would have ended (`source.end + MAX_TRAVEL_MINUTES + buffer < now`, minutes converted to the implementation's time unit)  
+**And** no companion is observed for it — a fresh installation, or the user deleted the blocks  
+**When** reconciliation runs  
+**Then** the provider emits no spec for either role, both decided route-free — the outbound block would end at `source.start`, the return block before `now` even at the travel cap — and spends no broker call  
+**And** no already-ended travel block is created  
+**And** the outcome is still `planned`, with both roles recorded as suppressed for reason `ended`  
+**And** a source that ended only minutes ago with a nonzero buffer keeps a **live** return role (`source.end + buffer ≥ now`, instants and durations in one time unit): it is routed normally and its block, still ahead, is created.
+
+**Given** the same ended source *with* observed companions  
+**When** reconciliation runs  
+**Then** an undisplaced companion is a concluded record: the §15.2.9 freeze fires before routing, its role is emitted as the pinned spec (not recorded as suppressed), and it classifies `unchanged`  
+**And** an undisplaced same-anchor companion the user had dragged a short distance, still live, makes the provider emit the spec, and the ordinary update restores it to its computed times (REQ-GEN-014)  
+**And** a same-anchor companion dragged *outside* its anchor's companion span is stale state like any different-anchor or anchorless block of the role: no spec is emitted for its sake and the orphan path deletes it on a complete scan, the §15.2.3, §15.2.8 and §15.2.10 passes elsewhere, the lenient record test excepted  
+**And** an edit to the ended meeting's location, or a route-cache miss, does not re-route a frozen role: the record stands in for the route, and the past block keeps its times.
+
+**Given** a *future* meeting whose outbound block the user dragged several hours into the past, so the block has ended yet still lies within its anchor's span  
+**When** reconciliation runs  
+**Then** the block is not a record — its anchor instant is still ahead — so the §15.2.9 freeze does not fire  
+**And** the desired span is live, the spec is emitted, the key matches, and the update restores the block to its computed times; the meeting keeps its padding.
+
+**Given** a meeting that ended five minutes ago with a ten-minute buffer, whose return block the user dragged an hour into the past — ended, undisplaced, and anchored to `source.end`, which is itself past  
+**When** reconciliation runs  
+**Then** the block is a record by the parent-less §15.2.9 test, yet the role is provably live (`source.end + buffer ≥ now`), so the freeze does not fire  
+**And** the role is routed, the computed spec is emitted, the key matches, and the update restores the block to its computed times — the still-wanted return padding is not silently stripped.
+
+A trip already taken cannot be padded; a fresh past-dated block would be manufactured history. The rule applies whether or not a historical companion exists — it previously fired only against a concluded record with a different anchor.
+
+## AC-CONFIG-005: Diagnosing an event outside the window reports the reason
+
+**Given** a source event starting beyond the planning horizon  
+**When** the user opens the event diagnostic card  
+**Then** the event is fetched by id rather than through the window scan  
+**And** the card reports `OUTSIDE_WINDOW`  
+**And** no full window listing is performed for the card open.
+
+A window-scan-based diagnostic would return silence for exactly the events users most wonder about.
+
+## AC-CONFIG-006: Daily trigger realigns after a timezone-offset change
+
+**Given** a daily trigger installed at the UTC hour derived for the user's Calendar time zone  
+**And** a daylight-saving transition occurs, or the user changes their Calendar time zone  
+**When** the next daily trigger fires, at the now-stale hour  
+**Then** the reconciliation run completes normally  
+**And** the daily handler re-derives the UTC hour for the current time zone at the next firing's instant  
+**And** trigger repair creates the replacement at the derived hour first, persists the new record for it, then deletes the stale trigger by unique id, because the derived hour differs from the persisted `dtp.dailyTrigger` hour  
+**And** when the derived hour lies later the same day, the replacement also fires that day — an accepted second run — and from the next day on the daily run fires at the intended local hour only, with no homepage open or settings save by the user  
+**And** when the daily firing collides with another execution holding the user lock, the run and its repair are skipped together — nothing is logged as a failure — and the realignment completes on the next firing (two cycles, the accepted residual)  
+**And** a repair failure is logged as `TRIGGER_REPAIR_FAILED` without affecting the run's result, and the next daily firing retries.
+
+The trigger that fires the repair is the stale one — it still fires, an hour off — which is what makes the path automatic rather than dependent on the user noticing a schedule drift that has no visible symptom.
+
+## AC-RECOVERY-015: Companion stranded by a deleted source is swept
+
+**Given** a managed companion dragged outside the observation range  
+**And** its source event deleted before any reconciliation runs  
+**When** the next daily maintenance run executes  
+**Then** the ownership sweep finds the companion via its persisted `anchor`  
+**And** a point read confirms the parent no longer exists  
+**And** the companion is deleted  
+**And** historical companions whose anchors lie outside the sweep's anchor band trigger no parent lookups.
+
+**Given** instead the source still exists but was moved outside the planning range together with its companion  
+**When** the next daily maintenance run executes  
+**Then** the point read finds the live parent, sees it was not evaluated this run, and the **displaced** companion (observed outside its persisted anchor's companion span — it was moved) is deleted — an out-of-window source's desired state is no companions, and they regenerate when it re-enters the window.
+
+**Given** instead a companion whose trip has concluded, sitting exactly where its anchor placed it, its parent aged out of the planning range (or deleted after the fact)  
+**When** any reconciliation runs while the companion is still inside the observation range  
+**Then** the companion is preserved as a **record of the trip** — deletion authority stops at the past — and it ages out of the observation range untouched.
+
+**Given** instead a concluded companion whose parent still plans (inside the lookback), the desired specification still anchored to the recorded occurrence  
+**When** a location edit, buffer change, or refreshed route estimate would otherwise change the companion  
+**Then** the record classifies as `unchanged` — no route call is spent on it — rather than being patched to times that never applied.
+
+**Given** instead a concluded companion whose parent is rescheduled to a future occurrence  
+**When** reconciliation runs  
+**Then** the record matches nothing and the new occurrence gets fresh companions — the out-of-window lookup and duplicate convergence both pass over concluded records — while the record stays on the calendar as history  
+**And** an after-the-fact edit to an already-ended occurrence's times produces no write at all: a past trip cannot be padded, so no past-dated companion is manufactured.
+
+**Given** instead a companion that aged out of the observation range naturally, its `updated` bumped by a settings-change patch in its final in-window days, its parent live behind the planning range  
+**When** the next daily maintenance run executes  
+**Then** the sweep lists it as a candidate but the displacement test finds it exactly where its anchor put it, and it is **preserved as calendar history** — record-keeping must not depend on how recently an event happened to be patched.
+
+**Given** instead a companion dragged outside the observation range while the window was configured long, its parent's anchor far in the future  
+**And** the user then shrinks `windowDays` so that anchor lies beyond the new planning range  
+**When** the next daily maintenance run executes  
+**Then** the anchor band still spans out to the largest configurable horizon, so the companion is found and the parent-state rule applies — a window shrink does not hide the stray.
+
+Restoration (AC-RECOVERY-012) is driven by a pending create, which requires a live parent planning inside the window; a deleted or out-of-window parent leaves nothing pending and the stray invisible to the bounded scan. Only a scan independent of desired state can find it, and the anchor is what keeps that scan from probing every historical event daily.
+
+## AC-RECOVERY-016: Auto-decline switched on a generated OOO block
+
+**Given** a generated out-of-office travel block created with `autoDeclineMode: "declineNone"`  
+**And** the user changes the block's auto-decline mode so it declines incoming meetings  
+**And** the source event is otherwise unchanged, so the fingerprint still matches  
+**When** reconciliation runs  
+**Then** the owned-field comparison detects the auto-decline difference  
+**And** the auto-decline mode is restored to `declineNone` — by patch where Calendar accepts `outOfOfficeProperties` in a patch body, by replacement otherwise  
+**And** the block declines no unrelated meetings afterwards.
+
+Auto-decline mode is not a planning input, so the fingerprint cannot detect this. Like reminders (AC-RECOVERY-008), it is caught only because `outOfOfficeProperties` is in the owned-field set.
+
+## AC-RECOVERY-018: The stored record says what became of a partial run's continuation
+
+**Given** a non-dry run that ends `partial`  
+**When** its result is persisted  
+**Then** the stored record's `continuation` field carries the disposition — `scheduled` when a pass was enqueued or already pending, `capReached` when `MAX_CONSECUTIVE_CONTINUATIONS` declined it, `enqueueFailed` when the trigger write threw (`CONTINUATION_ENQUEUE_FAILED`), `notUseful` when no pass could drain what remains — a finished chain's coverage gap (the daily run's job) or rejected writes alone (re-planned by the next run of any kind)  
+**And** the home card renders each state distinctly, never promising a continuation that will not fire  
+**And** a non-partial run stores `null`.
+
+The trigger handler's return value is discarded, so the stored record is the only durable carrier; a single boolean would collapse three "no pass is coming" states into "not capped".
+
+## AC-RECOVERY-019: A write against a changed event never lands blind
+
+**Given** reconciliation has read a managed companion and queued an update, metadata patch, or delete for it  
+**And** the user edits that event before the write applies  
+**When** the write is attempted  
+**Then** it is conditional — `If-Match` on the observed ETag, or an immediate marker re-read where the runtime cannot send the header  
+**And** a rejected write is re-read: a stripped `dtp` marker records `OWNERSHIP_LOST` (not retried — the event is the user's now, and the next run plans the key against a fresh read), an intact marker records `CONCURRENT_EDIT` (retried next run against the fresh read)  
+**And** neither outcome re-stamps managed metadata onto the event or deletes it  
+**And** a target that has vanished (deleted by the user, or a cancelled tombstone) is never reported as ownership loss: it fails as an ordinary write failure, the run reports `partial`, and the next run — which no longer observes the block — converges on its own  
+**And** on the delete half of a replace, either outcome aborts the replace — the create half does not run  
+**And** the run reports `partial` with the failure counted.
+
+A 412 proves only that the event changed; reporting it as ownership loss would tell the user the add-on lost an event it still manages.
+
+## AC-CONFIG-007: A catastrophically backtracking title pattern is rejected
+
+**Given** title-pattern matching is enabled with the pattern `^(a+)+$`  
+**When** the settings are validated on save or on load  
+**Then** the pattern compiles but falls outside the §9.3 accepted subset — a quantified group whose body contains a quantifier  
+**And** the result is a structural validation error — field `eligibility.titlePattern`, code `INVALID_TITLE_PATTERN`, the message naming the construct and its position — inside an `INVALID_SETTINGS` run failure, exactly as a compile error would be  
+**And** no reconciliation runs against the pattern, dry runs included, and the settings UI shows the error  
+**And** the patterns `^OOO\b`, `\bOOO\b|\bout of office\b`, `(?:OOO|out of office)\b`, `.*?x`, `[(]a[+]` and `[\w\-]+` are accepted — escaped and class-contained metacharacters count toward no cap  
+**And** `^*` and `[z-a]` are refused by compilation, which runs before the subset scan, with the compile error as the message  
+**And** the check is an allowlist: `\\(a+)+`, `((a+)b)+`, `(a|ab)+` and `((a|ab)c)+` are refused (a quantified group holding a quantifier or an alternation), `(?<g>.+)\k<g>`, `(a)\1` and `\1` are refused (outside the grammar, whether or not a group exists), `(a|b)(a|b)(a|b)(a|b)` is refused (four alternation bars, more than three — short enough that only that rule fires), `.*.*.*x` is refused (three quantifiers, more than two), and `[^](a+)+]`, `[]a]`, `[\w-]` and `Team sync {` are refused because `[^]`, an empty or `]`-first class, a bare hyphen that is not a range, and a bare brace are not in the subset — V8 would compile all four, the first catastrophically  
+**And** a summary longer than `MAX_TITLE_PATTERN_SUBJECT_CHARS` UTF-16 code units does not match at all, reported `TITLE_TOO_LONG` rather than `TITLE_PATTERN_NO_MATCH` so the card names the bound (the evaluator is the bound's one owner and the matcher's only caller — it checks the bound before calling the bound-free matcher; a summary of exactly the bound is still matched; with the pattern disabled the reason stays `TITLE_PATTERN_DISABLED`) — it is never truncated and matched, so `\bOOO\b` cannot match an over-long title with `OOO` as its last three code units before the bound, and `OOO$` cannot be defeated silently  
+**And** the same pattern text with matching **disabled** is not checked and does not invalidate the settings  
+**And** a stored pattern saved before the rule existed fails the same way on load — a visible structural error, never a silent disable that would delete the pattern's companions  
+**And** the pattern is compiled once per run after validation and handed to every eligibility evaluation, never compiled per event.
+
+Apps Script has no regex timeout; a pattern that merely compiles can otherwise kill every run on the same calendar input.
+
+## AC-RECOVERY-020: An in-progress source is listed once on a fresh run
+
+**Given** a meeting that started before `now` and ends after it, with its two travel blocks on the calendar  
+**And** a fresh single-slice run whose window read fits one execution budget  
+**When** the repository lists the forward segment from the pivot and then the backward segment  
+**Then** the meeting — returned by both Calendar queries, since `timeMin` filters on end and `timeMax` on start — appears once in the listing, owned by the forward segment  
+**And** its return block, ending after the pivot, is owned by the forward segment, while its outbound block — ending at the source start, before the pivot — is owned by the backward one; each appears once  
+**And** the engine plans the source once, indexes one copy of each companion, and §13.5's duplicate convergence deletes nothing  
+**And** a zero-duration event at exactly the pivot instant is the one accepted gap — unobserved by that run's chain, listed by the next fresh run with a new pivot.
+
+The partition is not a chain-only concern: without it every ordinary run with a meeting underway would plan that meeting twice.

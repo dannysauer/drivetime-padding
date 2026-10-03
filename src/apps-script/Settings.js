@@ -1,0 +1,89 @@
+/**
+ * Defaults, persistence, validation, migration. Technical Design section 5.
+ *
+ * Settings are stored as one JSON document so reads are atomic and migration
+ * has a single input.
+ */
+
+function defaultSettings_() {
+  return {
+    schemaVersion: CURRENT_SETTINGS_SCHEMA,
+    enabled: true,
+    windowDays: 60,
+    defaultBufferMinutes: 7,
+    eligibility: {
+      includeOutOfOffice: true,
+      titlePatternEnabled: false,
+      titlePattern: '^OOO\\b',
+      caseSensitive: false,
+    },
+    origins: {
+      default: { type: 'address', value: '' },
+      home: { type: 'address', value: '' },
+      office: { type: 'address', value: '' },
+    },
+    // No fallbackToDefault toggle: falling back to the default origin is
+    // fixed behavior (Technical Design section 10.4), and a validated
+    // setting with no behavioral consumer misleads the user who flips it.
+    workingLocation: {
+      enabled: true,
+    },
+    generatedEvents: {
+      titlePrefix: '[Drivetime Padding]',
+    },
+  };
+}
+
+/**
+ * Returns validated, migrated settings.
+ *
+ * Order: read the stored document; when ABSENT, the section 5.2 defaults
+ * apply directly (fresh install -- migrateSettings_ is not called and no
+ * INVALID_SETTINGS results); parse with JSON.parse GUARDED (malformed or
+ * truncated JSON becomes a structural INVALID_SETTINGS error on field
+ * `settings`, never a throw -- the section 5.4 guarded-parse contract);
+ * otherwise migrate first (section 5.4 -- an unsupportedSchema result
+ * becomes a structural INVALID_SETTINGS error on schemaVersion, never a
+ * throw), then deep-merge, then validate.
+ *
+ * Must deep-merge against defaults rather than Object.assign: a stored
+ * document containing a partial nested object would otherwise drop the
+ * remaining keys of that object.
+ *
+ * Returns { settings, validation } and never throws on validation
+ * problems -- the engine branches on the validation tiers
+ * (structurallyValid gates every run, writeReady gates writes; Technical
+ * Design section 5.3). Returning a bare UserSettings would make the
+ * engine's destructuring yield undefined for both fields and send every
+ * run into the failure boundary.
+ */
+function loadSettings() {
+  throw new Error('Not implemented: Technical Design section 5');
+}
+
+function saveSettings(settings) {
+  throw new Error('Not implemented: Technical Design section 5.3');
+}
+
+/**
+ * Returns all errors, not just the first. Technical Design section 5.3. An
+ * ENABLED title pattern must pass the type check and the
+ * MAX_TITLE_PATTERN_LENGTH cap FIRST (a non-string is refused before
+ * anything reads .length -- validation never throws; the O(1) cap keeps
+ * a corrupt multi-kilobyte value away from new RegExp), then compile,
+ * then lie in the 9.3 accepted subset -- an allowlist grammar (the one
+ * statement of its rules), so unknown constructs fail closed -- the runtime has
+ * no regex timeout, so a catastrophic pattern that merely compiles would kill
+ * every run. A failing pattern is a structural INVALID_SETTINGS error naming
+ * the construct, like a compile error; a disabled pattern is validated for type
+ * only. Applies to STORED settings on load as to new ones on save (5.3) --
+ * blocking is the safe failure; a silent disable would delete the pattern's
+ * companions.
+ */
+function validateSettings(settings) {
+  throw new Error('Not implemented: Technical Design section 5.3');
+}
+
+function migrateSettings_(settings) {
+  throw new Error('Not implemented: Technical Design section 5.4');
+}

@@ -1,0 +1,30 @@
+name: Validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# The job only checks out and runs pre-commit; a read-only token removes
+# write capability from third-party hook revisions pinned by tag.
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Needed by the local apps-script-syntax hook, which shells out to node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Every check lives in .pre-commit-config.yaml so CI and local hooks
+      # cannot disagree. Add checks there, not here.
+      - uses: pre-commit/action@v3.0.1
