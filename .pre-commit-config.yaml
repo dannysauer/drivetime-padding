@@ -1,0 +1,100 @@
+# Pre-commit hooks for Drivetime Padding.
+#
+# Install once per clone:
+#
+#     pip install pre-commit
+#     pre-commit install
+#
+# Run against everything (CI does this):
+#
+#     pre-commit run --all-files
+#
+# The repository is at design stage: the Apps Script sources are documented
+# stubs, so the hooks are hygiene and Markdown checks plus four
+# repo-specific invariants (per-file and shared-scope syntax checks over those
+# stubs, the manifest matching its documented copy, and the technical
+# design's duplicated snippets -- embedded function bodies, the
+# eligibility-reason enum and the cap literals -- matching the sources and
+# the broker README). When implementation starts, a JavaScript linter and
+# formatter configured to Google's JavaScript style guide, and the test
+# suite test/README.md plans, will be added here.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Two trailing spaces are a hard line break in Markdown, used
+        # deliberately in the Given/When/Then scenarios.
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-yaml
+      - id: check-json
+      - id: pretty-format-json
+        args: [--autofix, --indent=2, --no-sort-keys]
+      - id: check-added-large-files
+        args: [--maxkb=512]
+
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.18.1
+    hooks:
+      - id: markdownlint-cli2
+
+  - repo: local
+    hooks:
+      # The Apps Script sources are plain JS in a shared global namespace, so
+      # there is no build step to catch a syntax error before deployment.
+      #
+      # The loop is required. `node --check a.js b.js` checks only a.js and
+      # treats b.js as a script argument, so a bare `entry: node --check`
+      # exits 0 with a syntax error in any file but the first.
+      - id: apps-script-syntax
+        name: Apps Script syntax check
+        entry: bash -c 'for f in "$@"; do node --check "$f" || exit 1; done' --
+        language: system
+        files: ^src/apps-script/.*\.js$
+
+      # Apps Script loads every file into ONE global scope, so a `const` or
+      # `let` declared in two files is a load-time "Identifier has already
+      # been declared" that no per-file check can see -- and it takes down
+      # every trigger handler at once. Concatenating the sources reproduces
+      # that scope for node --check.
+      - id: apps-script-shared-scope
+        name: Apps Script shared-scope check
+        entry: >-
+          bash -c 'tmp="$(mktemp)" && cat src/apps-script/*.js > "$tmp.js"
+          && node --check "$tmp.js"; rc=$?; rm -f "$tmp" "$tmp.js"; exit $rc'
+        language: system
+        pass_filenames: false
+        files: ^src/apps-script/.*\.js$
+
+      # The technical design duplicates a few things from the sources: a
+      # handful of function bodies verbatim, the EligibilityReason enum and
+      # SYNTHESIS_REASONS list, and the title-pattern and route-input cap
+      # literals (two of which the broker README repeats). Same hazard as
+      # the manifest copy: a fix landing in one place leaves the other
+      # quietly wrong, so each pair is diffed (comments and whitespace
+      # ignored). tools/check_td_snippets.py lists the pairs.
+      - id: td-snippets-match-source
+        name: Technical design snippets match source
+        entry: python3 tools/check_td_snippets.py
+        language: system
+        pass_filenames: false
+        files: ^(src/apps-script/.*\.js|docs/technical-design/technical-design\.md|cloud/routing-broker/README\.md|tools/check_td_snippets\.py)$
+
+      # docs/architecture/appsscript-manifest.example.json is the documented
+      # copy of the add-on manifest, listed under Supporting documents in
+      # docs/INDEX.md. If the two drift, the documentation is quietly wrong
+      # about what the add-on requests -- including its OAuth scopes.
+      - id: manifest-matches-docs
+        name: Manifest matches documented example
+        entry: >-
+          bash -c 'diff -u src/apps-script/appsscript.json
+          docs/architecture/appsscript-manifest.example.json'
+        language: system
+        pass_filenames: false
+        files: ^(src/apps-script/appsscript\.json|docs/architecture/appsscript-manifest\.example\.json)$
