@@ -1,0 +1,17 @@
+# Settings for the trellis documentation skills. Skills read this before
+# asking a question, so each answer is recorded once.
+style: trellis
+paths:
+  adrs: docs/adrs
+  design: docs/design
+  # Living pages also live in docs/technical-design and docs/requirements;
+  # docs/INDEX.md maps every document to its kind.
+  living: docs/architecture
+  evidence: docs/planning/evidence
+adrs:
+  naming: date
+  owner: Project maintainer
+requirements:
+  id_pattern: REQ-<AREA>-<NNN>
+  keywords: rfc2119
+precedence: docs/INDEX.md

@@ -1,0 +1,7 @@
+.DS_Store
+.clasp.json
+node_modules/
+dist/
+.env
+.env.*
+__pycache__/
